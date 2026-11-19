@@ -63,7 +63,12 @@ async fn send(
     cookie: Option<&str>,
     extra: &[(&str, &str)],
 ) -> Hit {
-    let mut request = Request::builder().method(method).uri(uri);
+    // The peer is a proxy on the Docker network, as with Traefik in Coolify.
+    let proxy = std::net::SocketAddr::from(([10, 0, 0, 2], 40000));
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(axum::extract::ConnectInfo(proxy));
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }

@@ -181,6 +181,7 @@ pub fn testing_config(path: PathBuf) -> Config {
         argon_memory_kib: 32,
         connectivity_targets: Vec::new(),
         proxy_hops: 0,
+        trusted_proxies: owlee_platform::default_trusted_proxies(),
         geoip_path: None,
         ingest: owlee_platform::IngestConfig::default(),
     }

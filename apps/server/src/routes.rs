@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::engine;
 use crate::error::AppError;
-use crate::peer::ClientIp;
+use crate::peer::Client;
 use crate::instance_settings::{self, SmtpInput};
 use crate::notify;
 use crate::present::{self, Stats};
@@ -148,11 +148,11 @@ struct AuthBody {
 
 async fn register(
     State(state): State<AppState>,
-    ClientIp(ip): ClientIp,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<AuthBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
-    limit_auth_ip(&state, &ip)?;
+    limit_auth_ip(&state, &client.ip)?;
     let account = account_fields(&body.email, body.display_name)?;
     if let Err(error) = state.passwords.validate(&body.password) {
         return Err(password_field(error));
@@ -222,11 +222,11 @@ struct SetupBody {
 
 async fn setup_complete(
     State(state): State<AppState>,
-    ClientIp(ip): ClientIp,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<SetupBody>,
 ) -> Result<(StatusCode, CookieJar, Json<present::UserResponse>), AppError> {
-    limit_auth_ip(&state, &ip)?;
+    limit_auth_ip(&state, &client.ip)?;
     let now = TimestampMillis::now();
     // A finished install refuses setup even when the body still carries the old token.
     // A wrong or expired token, while setup is still open, is unauthorized.
@@ -273,12 +273,12 @@ async fn setup_complete(
 
 async fn login(
     State(state): State<AppState>,
-    ClientIp(ip): ClientIp,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<AuthBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
     let normalized = normalize_email(&body.email);
-    limit_auth_ip(&state, &ip)?;
+    limit_auth_ip(&state, &client.ip)?;
     // Only failed passwords cost the account a token, so a user who types the
     // right password is not locked out by someone else's guesses for long.
     let account_key = format!("login-account:{}", hash_token(&normalized));

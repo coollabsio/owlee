@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::store;
 use crate::error::AppError;
-use crate::peer::{self, client_ip};
+use crate::peer::Client;
 use crate::quota;
 use crate::state::AppState;
 
@@ -36,7 +36,7 @@ pub async fn ingest_envelope(
     request: Request,
 ) -> Response {
     let max_body = state.config.ingest.error_max_body_bytes;
-    let peer = peer::peer_addr(request.extensions());
+    let client = Client::of(&state.config, &headers, request.extensions());
     let bytes = match read_limited(request, max_body, &headers).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
@@ -71,7 +71,7 @@ pub async fn ingest_envelope(
         Ok(project) => project,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, peer, &project.id) {
+    if let Some(response) = enforce_rate(&state, &headers, &client, &project.id) {
         return response;
     }
     let mut last_id = None;
@@ -121,7 +121,7 @@ pub async fn ingest_store(
     request: Request,
 ) -> Response {
     let max_body = state.config.ingest.error_max_body_bytes;
-    let peer = peer::peer_addr(request.extensions());
+    let client = Client::of(&state.config, &headers, request.extensions());
     let bytes = match read_limited(request, max_body, &headers).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
@@ -151,7 +151,7 @@ pub async fn ingest_store(
         Ok(project) => project,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, peer, &project.id) {
+    if let Some(response) = enforce_rate(&state, &headers, &client, &project.id) {
         return response;
     }
     let event = normalize_event(payload);
@@ -181,11 +181,10 @@ enum Accepted {
 fn enforce_rate(
     state: &AppState,
     headers: &HeaderMap,
-    peer: Option<std::net::IpAddr>,
+    client: &Client,
     project_id: &str,
 ) -> Option<Response> {
-    let ip = client_ip(headers, state.config.proxy_hops, peer);
-    let ip_limit = state.error_ip_limit.check(&format!("error-ip:{ip}"));
+    let ip_limit = state.error_ip_limit.check(&format!("error-ip:{}", client.ip));
     if !ip_limit.allowed {
         return Some(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
     }

@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use ipnet::IpNet;
 use thiserror::Error;
 
 const ENV: &str = "OWLEE_ENV";
@@ -20,6 +21,7 @@ const SMTP_FROM: &str = "OWLEE_SMTP_FROM";
 const ARGON_MEMORY: &str = "OWLEE_ARGON_MEMORY_KIB";
 const CONNECTIVITY_TARGETS: &str = "OWLEE_CONNECTIVITY_TARGETS";
 const PROXY_HOPS: &str = "OWLEE_PROXY_HOPS";
+const TRUSTED_PROXIES: &str = "OWLEE_TRUSTED_PROXIES";
 const GEOIP_PATH: &str = "OWLEE_GEOIP_PATH";
 const ERROR_MAX_BODY: &str = "OWLEE_ERROR_MAX_BODY_BYTES";
 const ANALYTICS_MAX_BODY: &str = "OWLEE_ANALYTICS_MAX_BODY_BYTES";
@@ -118,6 +120,9 @@ pub struct Config {
     pub connectivity_targets: Vec<String>,
     /// Trusted reverse proxies in front of Owlee. `0` means the socket address is the client.
     pub proxy_hops: usize,
+    /// Forwarding headers are used only when the TCP peer is in one of these
+    /// networks. A client that reaches the port directly cannot fake its address.
+    pub trusted_proxies: Vec<IpNet>,
     /// Optional MaxMind or DB-IP city database (`.mmdb`) for analytics geolocation.
     pub geoip_path: Option<PathBuf>,
     pub ingest: IngestConfig,
@@ -140,6 +145,7 @@ impl Config {
                 .map(str::to_owned)
                 .to_vec(),
             proxy_hops: 0,
+            trusted_proxies: default_trusted_proxies(),
             geoip_path: None,
             ingest: IngestConfig::default(),
         }
@@ -234,6 +240,13 @@ impl Config {
                 value: hops,
             })?;
         }
+        if let Some(networks) = optional(TRUSTED_PROXIES) {
+            config.trusted_proxies =
+                parse_networks(&networks).ok_or(ConfigError::Invalid {
+                    name: TRUSTED_PROXIES,
+                    value: networks,
+                })?;
+        }
         if let Some(path) = optional(GEOIP_PATH) {
             config.geoip_path = Some(PathBuf::from(path));
         }
@@ -301,6 +314,36 @@ pub enum ConfigError {
         "OWLEE_DATABASE_URL must be a postgres:// or postgresql:// URL. SQLite is the default; set OWLEE_DATABASE_PATH to move the file"
     )]
     DatabaseUrl,
+}
+
+/// Loopback and private networks: Docker, Traefik, and Coolify proxies live
+/// here, and a visitor from the internet does not.
+#[must_use]
+pub fn default_trusted_proxies() -> Vec<IpNet> {
+    ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+        .iter()
+        .filter_map(|network| network.parse().ok())
+        .collect()
+}
+
+/// Comma-separated CIDRs or plain addresses. `none` trusts no proxy. A network
+/// that holds every address (`0.0.0.0/0`, `::/0`) is refused.
+fn parse_networks(value: &str) -> Option<Vec<IpNet>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let network = part
+                .parse::<IpNet>()
+                .ok()
+                .or_else(|| part.parse::<IpAddr>().ok().map(IpNet::from))?;
+            (network.prefix_len() > 0).then_some(network)
+        })
+        .collect()
 }
 
 fn optional(name: &str) -> Option<String> {
@@ -485,6 +528,17 @@ impl FromStr for EnvironmentMode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trusted_proxies_parse_and_refuse_everything() {
+        let networks = super::parse_networks("10.0.0.0/8, 203.0.113.7, ::1").unwrap();
+        assert_eq!(networks.len(), 3);
+        assert!(networks[1].contains(&"203.0.113.7".parse::<std::net::IpAddr>().unwrap()));
+        assert_eq!(super::parse_networks("none").unwrap().len(), 0);
+        assert!(super::parse_networks("0.0.0.0/0").is_none());
+        assert!(super::parse_networks("::/0").is_none());
+        assert!(super::parse_networks("proxy.local").is_none());
+    }
+
     use std::path::PathBuf;
 
     use super::*;

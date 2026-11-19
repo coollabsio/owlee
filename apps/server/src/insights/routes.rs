@@ -24,7 +24,7 @@ use sqlx::Row;
 use super::geo;
 use super::record;
 use crate::error::AppError;
-use crate::peer::{self, client_ip};
+use crate::peer::Client;
 use crate::quota;
 use crate::routes::require_user;
 use crate::state::AppState;
@@ -115,9 +115,10 @@ pub async fn fallback(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
+    client: Client,
 ) -> Response<Body> {
     if matches!(method, Method::GET | Method::HEAD)
-        && let Some(response) = host_redirect(&state, &method, &uri, &headers).await
+        && let Some(response) = host_redirect(&state, &method, &uri, &headers, &client).await
     {
         return response;
     }
@@ -143,8 +144,7 @@ async fn script() -> Response<Body> {
 
 async fn receive(State(state): State<AppState>, request: Request) -> Response<Body> {
     let headers = request.headers().clone();
-    let peer = peer::peer_addr(request.extensions());
-    let ip = client_ip(&headers, state.config.proxy_hops, peer);
+    let client = Client::of(&state.config, &headers, request.extensions());
     let max_body = state.config.ingest.analytics_max_body_bytes;
     if let Some(length) = headers
         .get(header::CONTENT_LENGTH)
@@ -169,7 +169,7 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
             return with_cors(AppError::field("body", "Event JSON is invalid.").into_response());
         }
     };
-    let ip_limit = state.analytics_ip_limit.check(&format!("analytics-ip:{ip}"));
+    let ip_limit = state.analytics_ip_limit.check(&format!("analytics-ip:{}", client.ip));
     if !ip_limit.allowed {
         return with_cors(AppError::limited(ip_limit.retry_after_secs).into_response());
     }
@@ -179,7 +179,7 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
     if !site_limit.allowed {
         return with_cors(AppError::limited(site_limit.retry_after_secs).into_response());
     }
-    match accept_event(&state, &headers, &ip, payload).await {
+    match accept_event(&state, &headers, &client, payload).await {
         Ok(status) => with_cors(status.into_response()),
         Err(error) => with_cors(error.into_response()),
     }
@@ -199,7 +199,7 @@ fn payload_too_large() -> Response<Body> {
 async fn accept_event(
     state: &AppState,
     headers: &HeaderMap,
-    ip: &str,
+    client: &Client,
     payload: EventPayload,
 ) -> Result<StatusCode, AppError> {
     if payload.kind.is_empty()
@@ -276,7 +276,7 @@ async fn accept_event(
         .map(Value::to_string)
         .filter(|value| value.len() <= 4096);
     let now = now_secs();
-    let place = geo::locate(state.geo.as_deref(), headers, state.config.proxy_hops, ip);
+    let place = geo::locate(state.geo.as_deref(), headers, client.hops, &client.ip);
     let (browser, os, device) = parse_user_agent(ua);
     record::record(
         &state.db,
@@ -284,7 +284,7 @@ async fn accept_event(
             site_id: Some(site_id.clone()),
             timestamp: now,
             event_type: payload.kind,
-            session_id: Some(session_id(&state.insights_secret, &site_id, ip, ua, now)),
+            session_id: Some(session_id(&state.insights_secret, &site_id, &client.ip, ua, now)),
             pathname: page.as_ref().map(|page| page.path.clone()),
             url_query: page.as_ref().and_then(|page| page.query.clone()),
             title: payload
@@ -326,10 +326,9 @@ async fn short_link(
     method: Method,
     Path(slug): Path<String>,
     headers: HeaderMap,
-    request: Request,
+    client: Client,
 ) -> Response<Body> {
-    let _ = request;
-    resolve_slug(&state, method, &headers, None, slug.trim_matches('/')).await
+    resolve_slug(&state, method, &headers, &client, None, slug.trim_matches('/')).await
 }
 
 async fn host_redirect(
@@ -337,6 +336,7 @@ async fn host_redirect(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    client: &Client,
 ) -> Option<Response<Body>> {
     let host = headers
         .get(header::HOST)
@@ -354,13 +354,14 @@ async fn host_redirect(
         .flatten()?;
     let _ = row;
     let slug = uri.path().trim_matches('/');
-    Some(resolve_slug(state, method.clone(), headers, Some(&host), slug).await)
+    Some(resolve_slug(state, method.clone(), headers, client, Some(&host), slug).await)
 }
 
 async fn resolve_slug(
     state: &AppState,
     method: Method,
     headers: &HeaderMap,
+    client: &Client,
     host: Option<&str>,
     slug: &str,
 ) -> Response<Body> {
@@ -403,10 +404,10 @@ async fn resolve_slug(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if method != Method::HEAD && !ua.is_empty() && !bots().is_bot(ua) {
-        let ip = client_ip(headers, state.config.proxy_hops, None);
+        let ip = client.ip.clone();
         let (browser, os, device) = parse_user_agent(ua);
         let now = now_secs();
-        let place = geo::locate(state.geo.as_deref(), headers, state.config.proxy_hops, &ip);
+        let place = geo::locate(state.geo.as_deref(), headers, client.hops, &ip);
         let click = Incoming {
             link_id: Some(id.clone()),
             timestamp: now,
@@ -1131,11 +1132,11 @@ async fn link_breakdown(
 
 async fn public_site_overview(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: Client,
     Path(slug): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    limit_public(&state, &headers)?;
+    limit_public(&state, &client)?;
     let resource = public_site(&state.db, &slug).await?;
     let totals = site_totals(&state.db, &resource.id, range).await?;
     Ok(Json(public_overview(
@@ -1148,11 +1149,11 @@ async fn public_site_overview(
 
 async fn public_link_overview(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: Client,
     Path(slug): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    limit_public(&state, &headers)?;
+    limit_public(&state, &client)?;
     let resource = public_link(&state.db, &slug).await?;
     let totals = link_totals(&state.db, &resource.id, range, false).await?;
     Ok(Json(public_overview(resource, totals, "clicks", "clicks")))
@@ -1160,11 +1161,11 @@ async fn public_link_overview(
 
 async fn public_site_dimension(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: Client,
     Path((slug, dimension)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    limit_public(&state, &headers)?;
+    limit_public(&state, &client)?;
     let resource = public_site(&state.db, &slug).await?;
     Ok(Json(
         public_dimension(
@@ -1181,11 +1182,11 @@ async fn public_site_dimension(
 
 async fn public_link_dimension(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    client: Client,
     Path((slug, dimension)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    limit_public(&state, &headers)?;
+    limit_public(&state, &client)?;
     let resource = public_link(&state.db, &slug).await?;
     Ok(Json(
         public_dimension(
@@ -1524,9 +1525,8 @@ async fn public_link(db: &Database, slug: &str) -> Result<PublicResource, AppErr
     })
 }
 
-fn limit_public(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
-    let ip = client_ip(headers, state.config.proxy_hops, None);
-    if state.public_limit.allow(&ip) {
+fn limit_public(state: &AppState, client: &Client) -> Result<(), AppError> {
+    if state.public_limit.allow(&client.ip) {
         Ok(())
     } else {
         Err(AppError::limited(60))
