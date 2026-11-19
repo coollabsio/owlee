@@ -510,6 +510,10 @@ export type Issue = {
 export type IssueFeed = {
   issues: Issue[];
   environments: string[];
+  /** Per status under the same filters, ignoring the status filter. */
+  counts: Record<Issue["status"], number>;
+  /** More issues match than the feed returns. */
+  truncated: boolean;
 };
 
 export type TagCount = { key: string; value: string; count: number };
