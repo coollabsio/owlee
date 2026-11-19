@@ -40,7 +40,7 @@ export function PriorityMark({ priority }: { priority: string }) {
       {[1, 2, 3].map((bar) => (
         <span
           key={bar}
-          className={`w-[3px] rounded-sm ${bar <= rank ? "bg-current" : "bg-[var(--ui-hover)]"}`}
+          className={`w-[0.1875rem] rounded-sm ${bar <= rank ? "bg-current" : "bg-[var(--ui-hover)]"}`}
           style={{ height: 4 + bar * 4 }}
         />
       ))}

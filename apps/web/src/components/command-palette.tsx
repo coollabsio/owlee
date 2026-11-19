@@ -119,7 +119,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
           <input
             ref={input}
             className="command-palette-input"
-            placeholder="Search pages, monitors, sites, links..."
+            placeholder="Search pages, monitors, sites, links…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onKeyDown}
@@ -134,8 +134,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
         </div>
         <div ref={list} id="command-palette-results" role="listbox" className="command-palette-body">
           {results.length === 0 ? (
-            <p className="px-4 py-10 text-center text-[13px] text-[var(--ui-fg-faint)]">
-              {loading ? "Loading..." : `No results for "${query.trim()}"`}
+            <p className="px-4 py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">
+              {loading ? "Loading…" : `No results for "${query.trim()}"`}
             </p>
           ) : (
             results.map((item, index) => (

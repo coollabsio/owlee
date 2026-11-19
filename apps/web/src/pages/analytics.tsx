@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
-import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
+import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { useCanEdit } from "@/lib/me";
@@ -29,6 +29,18 @@ export function AnalyticsPage() {
   const scope = useListScope({ allProjects: siteId != null });
   const sites = useQuery({ queryKey: scope.key("sites"), queryFn: () => api<InsightSite[]>(scope.path("/api/sites")) });
   if (!siteId) return <SiteList sites={sites.data ?? []} loading={sites.isLoading} error={sites.error} />;
+  if (sites.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-3 w-72" />
+        </div>
+        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
   const site = sites.data?.find((item) => item.id === siteId);
   return <SiteDetail siteId={siteId} site={site} />;
 }
@@ -40,8 +52,8 @@ function rowCover(to: string) {
 function CardEmpty({ title, body }: { title: string; body?: string }) {
   return (
     <div className="px-4 py-10 text-center">
-      <p className="text-[14px] font-medium text-[var(--ui-fg)]">{title}</p>
-      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">{body}</p> : null}
+      <p className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{title}</p>
+      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">{body}</p> : null}
     </div>
   );
 }
@@ -53,6 +65,11 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("");
   const [projectId, setProjectId] = useProjectChoice();
+  const { rows, sort, toggle } = useSort(sites, {
+    name: (site) => site.name,
+    domain: (site) => site.domain,
+    id: (site) => site.public_id,
+  });
   const create = useMutation({
     mutationFn: () => api<InsightSite>("/api/sites", { method: "POST", body: JSON.stringify({ name, domain, project_id: projectId }) }),
     onSuccess: async () => {
@@ -74,36 +91,35 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
         <Empty title="No sites yet" body="Add the site you want to measure, then paste the tracker snippet." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : undefined} />
       ) : (
         <LayerCard title="Sites" description="Open a site to see its traffic." flush>
-          {loading ? <CardEmpty title="Loading sites..." /> : (
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Domain</th>
-                  <th className="hidden sm:table-cell">Public id</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sites.map((site) => {
-                  const to = `/analytics/${site.id}`;
-                  return (
-                    <tr key={site.id} className="clickable-row">
-                      <td className="cell-link"><Link className="row-link" to={to}>{site.name}</Link><ProjectTag id={site.project_id} />{rowCover(to)}</td>
-                      <td className="cell-link">
-                        {rowCover(to)}
-                        <span className="inline-flex items-center gap-2">
-                          {site.domain}
-                          <StatusBadge tone={site.verified ? "success" : "warning"}>{site.verified ? "Verified" : "Unverified"}</StatusBadge>
-                          {site.quota_exceeded ? <StatusBadge tone="error">Quota reached</StatusBadge> : null}
-                        </span>
-                      </td>
-                      <td className="cell-link hidden font-mono text-[12px] sm:table-cell">{rowCover(to)}{site.public_id}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
+          <table className="cool-table">
+            <thead>
+              <tr>
+                <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
+                <SortHeader column="domain" sort={sort} onSort={toggle}>Domain</SortHeader>
+                <SortHeader column="id" sort={sort} onSort={toggle} className="hidden sm:table-cell">Public id</SortHeader>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? <SkeletonRows columns={[undefined, undefined, "hidden sm:table-cell"]} /> : null}
+              {rows.map((site) => {
+                const to = `/analytics/${site.id}`;
+                return (
+                  <tr key={site.id} className="clickable-row">
+                    <td className="cell-link"><Link className="row-link" to={to}>{site.name}</Link><ProjectTag id={site.project_id} />{rowCover(to)}</td>
+                    <td className="cell-link">
+                      {rowCover(to)}
+                      <span className="inline-flex items-center gap-2">
+                        {site.domain}
+                        <StatusBadge tone={site.verified ? "success" : "warning"}>{site.verified ? "Verified" : "Unverified"}</StatusBadge>
+                        {site.quota_exceeded ? <StatusBadge tone="error">Quota reached</StatusBadge> : null}
+                      </span>
+                    </td>
+                    <td className="cell-link hidden font-mono text-[0.75rem] sm:table-cell">{rowCover(to)}{site.public_id}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </LayerCard>
       )}
       <Dialog open={canEdit && open} title="New site" description="The domain is used to ignore your own referrer." onClose={() => setOpen(false)}>
@@ -112,7 +128,7 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
           <Field label="Domain"><Input required value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="coolify.io" /></Field>
           <ProjectField value={projectId} onChange={setProjectId} />
           <ErrorText error={create.error} />
-          <Button variant="primary" type="submit" disabled={create.isPending}>Create site</Button>
+          <Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? <><Spinner />Creating…</> : "Create site"}</Button>
         </form>
       </Dialog>
     </div>
@@ -128,7 +144,7 @@ function SiteDetail({ siteId, site }: { siteId: string; site?: InsightSite }) {
       <PageHeader
         title={site?.name ?? "Site"}
         keepTitle
-        description={site ? `${site.domain} · no cookies, no stored IP addresses` : "Loading site..."}
+        description={site ? `${site.domain} · no cookies, no stored IP addresses` : undefined}
         actions={
           <Select
             className="w-36"
@@ -152,7 +168,7 @@ function SiteDetail({ siteId, site }: { siteId: string; site?: InsightSite }) {
               type="button"
               aria-current={item === tab ? "page" : undefined}
               className={cn(
-                "h-9 shrink-0 border-b-2 px-2.5 text-[13px] font-medium transition-colors",
+                "h-9 shrink-0 border-b-2 px-2.5 text-[0.8125rem] font-medium transition-colors",
                 item === tab ? "border-[var(--ui-accent)] text-[var(--ui-fg)]" : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
               )}
               onClick={() => setTab(item)}
@@ -271,9 +287,9 @@ function VitalsCard({ siteId, query }: { siteId: string; query: string }) {
           const sample = rows.find((row) => row.metric === metric && row.device === "Desktop") ?? rows.find((row) => row.metric === metric);
           const value = sample?.p75 == null ? "-" : metric === "cls" ? sample.p75.toFixed(3) : Math.round(sample.p75);
           return (
-            <li key={metric} className="flex h-[30px] items-center justify-between rounded-[6px] px-2.5 text-[12px]">
+            <li key={metric} className="flex h-[1.875rem] items-center justify-between rounded-[6px] px-2.5 text-[0.75rem]">
               <span className="font-medium text-[var(--ui-fg-dim)]">{metric.toUpperCase()}</span>
-              <span className="font-mono text-[11px] text-[var(--ui-fg-dim)]">{value}</span>
+              <span className="font-mono text-[0.6875rem] text-[var(--ui-fg-dim)]">{value}</span>
             </li>
           );
         })}
@@ -316,7 +332,7 @@ function BreakdownCard({
                   type="button"
                   aria-pressed={view.dimension === dimension}
                   className={cn(
-                    "h-5 rounded px-1.5 text-[11px] font-medium",
+                    "h-5 rounded px-1.5 text-[0.6875rem] font-medium",
                     view.dimension === dimension ? "bg-[var(--ui-hover)] text-[var(--ui-fg)]" : "text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
                   )}
                   onClick={() => {
@@ -330,7 +346,7 @@ function BreakdownCard({
             </span>
           ) : null}
           {rows.length > BREAKDOWN_ROWS ? (
-            <button type="button" className="text-[11px] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" onClick={() => setExpanded((value) => !value)}>
+            <button type="button" className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" onClick={() => setExpanded((value) => !value)}>
               {expanded ? "Show less" : "View all"}
             </button>
           ) : null}
@@ -365,8 +381,8 @@ function EventsPanel({ siteId, query }: { siteId: string; query: string }) {
             {rows.map((row) => (
               <tr key={row.name}>
                 <td className="font-medium text-[var(--ui-fg)]">{row.name}</td>
-                <td className="text-right font-mono text-[12px]">{row.count}</td>
-                <td className="text-right font-mono text-[12px]">{row.visitors}</td>
+                <td className="text-right font-mono text-[0.75rem]">{row.count}</td>
+                <td className="text-right font-mono text-[0.75rem]">{row.visitors}</td>
               </tr>
             ))}
           </tbody>
@@ -399,9 +415,9 @@ function VisitorsPanel({ siteId, query }: { siteId: string; query: string }) {
               const to = `/analytics/${siteId}/visitors/${row.id}`;
               return (
                 <tr key={row.id} className="clickable-row">
-                  <td className="cell-link"><Link className="row-link font-mono text-[12px]" to={to}>{row.id}</Link>{rowCover(to)}</td>
-                  <td className="cell-link text-right font-mono text-[12px]">{rowCover(to)}{row.views}</td>
-                  <td className="cell-link text-right font-mono text-[12px]">{rowCover(to)}{row.events}</td>
+                  <td className="cell-link"><Link className="row-link font-mono text-[0.75rem]" to={to}>{row.id}</Link>{rowCover(to)}</td>
+                  <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{row.views}</td>
+                  <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{row.events}</td>
                 </tr>
               );
             })}
@@ -421,9 +437,21 @@ export function VisitorPage() {
   });
   const visitor = detail.data?.visitor;
   const activity = detail.data?.activity ?? [];
+  if (detail.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-3 w-72" />
+        </div>
+        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader keepTitle title="Visitor" description={visitor ? `Hash ${visitor.id}` : "Loading..."} />
+      <PageHeader keepTitle title="Visitor" description={visitor ? `Hash ${visitor.id}` : undefined} />
       <ErrorText error={detail.error} />
       <LayerCard title="Details">
         <StatGrid className="xl:grid-cols-4">
@@ -478,22 +506,22 @@ function DomainCard({ site }: { site: InsightSite }) {
     >
       <SiteQuota key={String(site.quota_override ?? "inherit")} site={site} />
       {!site.verified && site.ingest_open ? (
-        <p className="mb-3 text-[13px] text-[var(--ui-fg-dim)]">
+        <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-dim)]">
           This install is in development, so events from the configured domain are still accepted. Production refuses them until the TXT record verifies.
         </p>
       ) : null}
       {!site.verified && !site.ingest_open ? (
-        <p className="mb-3 text-[13px] text-[var(--ui-fg-dim)]">
+        <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-dim)]">
           Events are rejected until this domain is verified.
         </p>
       ) : null}
-      <p className="mb-1 text-[11px] font-medium text-[var(--ui-fg-faint)]">Name</p>
-      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] text-[var(--ui-fg)]">{site.verify_name}</pre>
-      <p className="mb-1 text-[11px] font-medium text-[var(--ui-fg-faint)]">Value</p>
-      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] text-[var(--ui-fg)]">{site.verify_value}</pre>
+      <p className="mb-1 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Name</p>
+      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] text-[var(--ui-fg)]">{site.verify_name}</pre>
+      <p className="mb-1 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Value</p>
+      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] text-[var(--ui-fg)]">{site.verify_value}</pre>
       {canEdit ? (
         <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
-          Verify
+          {verify.isPending ? <><Spinner />Verifying…</> : "Verify"}
         </Button>
       ) : null}
       <ErrorText error={verify.error} />
@@ -525,7 +553,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
   });
   return (
     <div className="mb-4 border-b border-[var(--ui-divider)] pb-4">
-      <p className={`mb-3 text-[13px] ${site.quota_exceeded ? "text-[var(--ui-error)]" : "text-[var(--ui-fg-faint)]"}`}>
+      <p className={`mb-3 text-[0.8125rem] ${site.quota_exceeded ? "text-[var(--ui-error)]" : "text-[var(--ui-fg-faint)]"}`}>
         {site.used_today.toLocaleString()} of {site.daily_quota.toLocaleString()} events today
         {site.quota_override == null ? " (instance default)" : " (this site)"}
         {site.quota_exceeded ? ". Further events are rejected until the counter resets." : "."} Resets {resetWhen(site.resets_at)}.
@@ -571,23 +599,23 @@ function TrackerPanel({ site }: { site: InsightSite }) {
       }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["sites"] }),
   });
-  const code = "rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] font-mono text-[12px]";
+  const code = "rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] font-mono text-[0.75rem]";
   return (
     <div className="grid gap-6 lg:grid-cols-2">
       <LayerCard title="Tracker" description="Paste this before </body>. It sets no cookies.">
         <pre className={cn(code, "overflow-x-auto p-3 text-[var(--ui-fg)]")}>{snippet}</pre>
-        <p className="mt-4 mb-1.5 text-[11px] font-medium text-[var(--ui-fg-faint)]">Custom events</p>
+        <p className="mt-4 mb-1.5 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Custom events</p>
         <pre className={cn(code, "overflow-x-auto p-3 text-[var(--ui-fg)]")}>{`owleeEvent("signup", { plan: "hobby" })`}</pre>
       </LayerCard>
       <LayerCard title="Public dashboard" description="Share aggregate numbers without a login.">
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); save.mutate(); }}>
-          <label className="flex items-center gap-2 text-[13px] font-medium text-[var(--ui-fg-dim)]">
+          <label className="flex items-center gap-2 text-[0.8125rem] font-medium text-[var(--ui-fg-dim)]">
             <input type="checkbox" className="accent-[var(--ui-accent)]" disabled={!canEdit} checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
             Public page enabled
           </label>
           {site.public_enabled ? (
-            <p className="text-[13px] text-[var(--ui-fg-faint)]">
-              Share path <Link className="auth-text-link font-mono text-[12px]" to={`/share/sites/${site.public_slug}`}>/share/sites/{site.public_slug}</Link>
+            <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
+              Share path <Link className="auth-text-link font-mono text-[0.75rem]" to={`/share/sites/${site.public_slug}`}>/share/sites/{site.public_slug}</Link>
             </p>
           ) : null}
           <ErrorText error={save.error} />

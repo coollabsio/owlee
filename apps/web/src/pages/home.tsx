@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode } from "react";
 import { Link } from "react-router";
 import { Sparkline } from "@/components/error-charts";
-import { ErrorText, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
+import { ErrorText, LayerCard, PageHeader, Skeleton, StatusBadge } from "@/components/ui";
 import { api, type Dashboard, type DashboardIncident, type DashboardPageRow } from "@/lib/api";
 import { duration, percent, stateLabel, timeAgo } from "@/lib/utils";
 import { useListScope } from "@/lib/workspace";
@@ -33,7 +33,17 @@ export function HomePage() {
     return (
       <div className="flex flex-col gap-6">
         <PageHeader title="Dashboard" description="Monitors, incidents, errors, and traffic." />
-        {home.error ? <ErrorText error={home.error} /> : <LayerCard><p className="text-[13px] text-[var(--ui-fg-faint)]">Loading the overview…</p></LayerCard>}
+        {home.error ? (
+          <ErrorText error={home.error} />
+        ) : (
+          <div className="flex flex-col gap-6" aria-busy="true">
+            <LayerCard><Skeleton className="h-32 w-full" /></LayerCard>
+            <div className="grid items-start gap-6 lg:grid-cols-2">
+              <LayerCard><Skeleton className="h-24 w-full" /></LayerCard>
+              <LayerCard><Skeleton className="h-24 w-full" /></LayerCard>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -44,8 +54,8 @@ export function HomePage() {
         <PageHeader title="Dashboard" description="Monitors, incidents, errors, and traffic." />
         <LayerCard>
           <div className="flex min-h-48 flex-col items-center justify-center px-2 py-8 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">Nothing to report yet</h2>
-            <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
+            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">Nothing to report yet</h2>
+            <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">
               Create a monitor, a site, or an error app. This page fills in as soon as one of them has data.
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
@@ -92,7 +102,7 @@ function QuotaNotice({ hits }: { hits: Dashboard["quota_hits"] }) {
           const to = hit.kind === "error" ? `/errors/apps/${hit.id}` : `/analytics/${hit.id}`;
           const noun = hit.kind === "error" ? "errors" : "events";
           return (
-            <li key={`${hit.kind}-${hit.id}`} className="flex flex-wrap items-baseline gap-x-2 text-[13px]">
+            <li key={`${hit.kind}-${hit.id}`} className="flex flex-wrap items-baseline gap-x-2 text-[0.8125rem]">
               <StatusBadge tone="error">Cap reached</StatusBadge>
               <Link className="font-medium text-[var(--ui-fg)] hover:underline" to={to}>{hit.name}</Link>
               <span className="text-[var(--ui-fg-faint)]">
@@ -107,7 +117,7 @@ function QuotaNotice({ hits }: { hits: Dashboard["quota_hits"] }) {
 }
 
 function viewAll(to: string, label = "View all") {
-  return <Link className="text-[11px] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to={to}>{label}</Link>;
+  return <Link className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to={to}>{label}</Link>;
 }
 
 function rowCover(to: string) {
@@ -115,16 +125,16 @@ function rowCover(to: string) {
 }
 
 function Note({ children }: { children: ReactNode }) {
-  return <p className="px-4 py-8 text-center text-[13px] text-[var(--ui-fg-faint)]">{children}</p>;
+  return <p className="px-4 py-8 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">{children}</p>;
 }
 
 function Metric({ label, value, previous, emphasize }: { label: string; value: string; previous?: { current: number; previous: number }; emphasize?: boolean }) {
   return (
     <div className="min-w-0">
-      <p className="text-[11px] font-medium text-[var(--ui-fg-faint)]">{label}</p>
-      <p className={emphasize ? "mt-1 text-[24px] leading-8 font-semibold tracking-tight text-[var(--ui-error)]" : "mt-1 text-[24px] leading-8 font-semibold tracking-tight text-[var(--ui-fg)]"}>{value}</p>
+      <p className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">{label}</p>
+      <p className={emphasize ? "mt-1 text-[1.5rem] leading-8 font-semibold tracking-tight text-[var(--ui-error)]" : "mt-1 text-[1.5rem] leading-8 font-semibold tracking-tight text-[var(--ui-fg)]"}>{value}</p>
       {previous ? (
-        <p className="mt-0.5 text-[12px] font-medium">
+        <p className="mt-0.5 text-[0.75rem] font-medium">
           <Delta current={previous.current} previous={previous.previous} />
         </p>
       ) : null}
@@ -136,7 +146,7 @@ function Delta({ current, previous }: { current: number; previous: number }) {
   if (current === 0 && previous === 0) return null;
   const label = previous === 0 ? "new" : `${current > previous ? "+" : ""}${Math.round(((current - previous) / previous) * 100)}%`;
   const className = current > previous ? "text-[var(--ui-success)]" : current < previous ? "text-[var(--ui-error)]" : "text-[var(--ui-fg-faint)]";
-  return <span className={`text-[12px] font-medium ${className}`}>{label}</span>;
+  return <span className={`text-[0.75rem] font-medium ${className}`}>{label}</span>;
 }
 
 function summary(data: Dashboard) {
@@ -177,7 +187,7 @@ function MonitorsCard({ data }: { data: Dashboard }) {
             <Metric label="Uptime today" value={percent(monitors.uptime_today)} />
             <Metric label="Response today" value={monitors.avg_latency_ms == null ? "-" : `${monitors.avg_latency_ms} ms`} />
           </div>
-          {extra.length > 0 ? <p className="border-b border-[var(--ui-divider)] px-4 py-2 text-[12px] text-[var(--ui-fg-faint)]">{extra.join(" · ")}</p> : null}
+          {extra.length > 0 ? <p className="border-b border-[var(--ui-divider)] px-4 py-2 text-[0.75rem] text-[var(--ui-fg-faint)]">{extra.join(" · ")}</p> : null}
           {monitors.failing.length === 0 ? (
             <Note>Nothing is failing.</Note>
           ) : (
@@ -200,7 +210,7 @@ function MonitorsCard({ data }: { data: Dashboard }) {
                         <td className="cell-link max-w-[16rem]">
                           <Link className="row-link" to={to}>{monitor.name}</Link>
                           {rowCover(to)}
-                          <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{monitor.url}</div>
+                          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
                         </td>
                         <td className="cell-link">{rowCover(to)}<StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state] ?? monitor.state}</StatusBadge></td>
                         <td className="cell-link whitespace-nowrap">{rowCover(to)}{duration(monitor.since)}</td>
@@ -242,7 +252,7 @@ function IncidentRow({ incident }: { incident: DashboardIncident }) {
       <td className="cell-link">
         <Link className="row-link" to={to}>{incident.title}</Link>
         {rowCover(to)}
-        <div className="text-[11px] text-[var(--ui-fg-faint)]">{stateLabel[incident.impact] ?? incident.impact} · {duration(incident.started_at)}</div>
+        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{stateLabel[incident.impact] ?? incident.impact} · {duration(incident.started_at)}</div>
       </td>
       <td className="cell-link text-right">{rowCover(to)}<StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status] ?? incident.status}</StatusBadge></td>
     </tr>
@@ -264,7 +274,7 @@ function PagesCard({ pages }: { pages: DashboardPageRow[] }) {
                   <td className="cell-link">
                     <Link className="row-link" to={to}>{page.title}</Link>
                     {rowCover(to)}
-                    <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">/status/{page.slug}</div>
+                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">/status/{page.slug}</div>
                   </td>
                   <td className="cell-link text-right">
                     {rowCover(to)}
@@ -313,12 +323,12 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
                       <td className="cell-link max-w-[18rem]">
                         <Link className="row-link" to={to}>{issue.title}</Link>
                         {rowCover(to)}
-                        <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
+                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
                       </td>
                       <td className="cell-link whitespace-nowrap text-right">
                         {rowCover(to)}
-                        <div className="font-mono text-[12px]">{issue.event_count.toLocaleString()}</div>
-                        <div className="text-[11px] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
+                        <div className="font-mono text-[0.75rem]">{issue.event_count.toLocaleString()}</div>
+                        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
                       </td>
                     </tr>
                   );
@@ -363,7 +373,7 @@ function TrafficCard({ analytics }: { analytics: Dashboard["analytics"] }) {
                       <td className="cell-link">
                         <Link className="row-link" to={to}>{site.name}</Link>
                         {rowCover(to)}
-                        <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{site.domain}</div>
+                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{site.domain}</div>
                       </td>
                       <td className="cell-link text-right font-mono">{rowCover(to)}{site.visitors.toLocaleString()}</td>
                       <td className="cell-link text-right font-mono">{rowCover(to)}{site.pageviews.toLocaleString()}</td>

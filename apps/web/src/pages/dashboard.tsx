@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { UptimeBars } from "@/components/charts";
-import { Empty, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
+import { Empty, LayerCard, PageHeader, SkeletonRows, StatusBadge } from "@/components/ui";
 import { api, type Overview } from "@/lib/api";
 import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
 import { useListScope } from "@/lib/workspace";
@@ -46,7 +46,7 @@ export function DashboardPage() {
     <div className="flex flex-col gap-6">
       <PageHeader title="Overview" description="Live checks, uptime, and the incidents customers can see." />
       <LayerCard title="System status" actions={<StatusBadge tone={summary.tone}>{summary.title}</StatusBadge>}>
-        <p className="text-[13px] text-[var(--ui-fg-dim)]">{summary.body}</p>
+        <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{summary.body}</p>
       </LayerCard>
       {overview.error ? <p className="field-error">{(overview.error as Error).message}</p> : null}
       {monitors.length === 0 && !overview.isLoading ? (
@@ -59,61 +59,58 @@ export function DashboardPage() {
         <LayerCard
           title="Monitors"
           description="30-day history"
-          actions={<Link className="text-[11px] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to="/monitors">View all</Link>}
+          actions={<Link className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to="/monitors">View all</Link>}
           flush
         >
-          {overview.isLoading ? (
-            <CardText title="Loading monitors…" />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="cool-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>State</th>
-                    <th className="hidden lg:table-cell">History</th>
-                    <th className="hidden sm:table-cell">Today</th>
-                    <th className="hidden md:table-cell">Latency</th>
-                    <th>Last check</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {monitors.map((monitor) => {
-                    const to = `/monitors/${monitor.id}`;
-                    return (
-                      <tr key={monitor.id} className="clickable-row">
-                        <td className="cell-link max-w-[16rem]">
-                          <Link className="row-link" to={to}>{monitor.name}</Link>
-                          {rowCover(to)}
-                          <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{monitor.url}</div>
-                        </td>
-                        <td className="cell-link">
-                          {rowCover(to)}
-                          <StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state]}</StatusBadge>
-                        </td>
-                        <td className="cell-link hidden w-[30%] lg:table-cell">
-                          {rowCover(to)}
-                          <UptimeBars bars={monitor.bars} className="h-6" />
-                        </td>
-                        <td className="cell-link hidden sm:table-cell">
-                          {rowCover(to)}
-                          {percent(monitor.uptime_24h)}
-                        </td>
-                        <td className="cell-link hidden md:table-cell">
-                          {rowCover(to)}
-                          {monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`}
-                        </td>
-                        <td className="cell-link whitespace-nowrap">
-                          {rowCover(to)}
-                          {timeAgo(monitor.last_checked_at)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <div className="overflow-x-auto">
+            <table className="cool-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>State</th>
+                  <th className="hidden lg:table-cell">History</th>
+                  <th className="hidden sm:table-cell">Today</th>
+                  <th className="hidden md:table-cell">Latency</th>
+                  <th>Last check</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.isLoading ? <SkeletonRows columns={[undefined, undefined, "hidden lg:table-cell", "hidden sm:table-cell", "hidden md:table-cell", undefined]} /> : null}
+                {monitors.map((monitor) => {
+                  const to = `/monitors/${monitor.id}`;
+                  return (
+                    <tr key={monitor.id} className="clickable-row">
+                      <td className="cell-link max-w-[16rem]">
+                        <Link className="row-link" to={to}>{monitor.name}</Link>
+                        {rowCover(to)}
+                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
+                      </td>
+                      <td className="cell-link">
+                        {rowCover(to)}
+                        <StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state]}</StatusBadge>
+                      </td>
+                      <td className="cell-link hidden w-[30%] lg:table-cell">
+                        {rowCover(to)}
+                        <UptimeBars bars={monitor.bars} className="h-6" />
+                      </td>
+                      <td className="cell-link hidden sm:table-cell">
+                        {rowCover(to)}
+                        {percent(monitor.uptime_24h)}
+                      </td>
+                      <td className="cell-link hidden md:table-cell">
+                        {rowCover(to)}
+                        {monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`}
+                      </td>
+                      <td className="cell-link whitespace-nowrap">
+                        {rowCover(to)}
+                        {timeAgo(monitor.last_checked_at)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </LayerCard>
       )}
       <div className="grid items-start gap-6 lg:grid-cols-2">
@@ -130,7 +127,7 @@ export function DashboardPage() {
                       <td className="cell-link">
                         <Link className="row-link" to={to}>{incident.title}</Link>
                         {rowCover(to)}
-                        <div className="text-[11px] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</div>
+                        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</div>
                       </td>
                       <td className="cell-link text-right">
                         {rowCover(to)}
@@ -171,8 +168,8 @@ function rowCover(to: string) {
 function CardText({ title, body }: { title: string; body?: string }) {
   return (
     <div className="flex min-h-32 flex-col items-center justify-center px-4 py-8 text-center">
-      <p className="text-[14px] font-medium text-[var(--ui-fg)]">{title}</p>
-      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">{body}</p> : null}
+      <p className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{title}</p>
+      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">{body}</p> : null}
     </div>
   );
 }
