@@ -109,6 +109,31 @@ pub async fn get_project(db: &Database, id: &str) -> Result<Project, AppError> {
     }
 }
 
+/// Counts come from `issues`, not `events`, so they stay all-time after
+/// retention prunes old event rows.
+#[derive(Debug, Clone)]
+pub struct ProjectActivity {
+    pub issue_count: i64,
+    pub event_count: i64,
+    pub last_event_at: Option<String>,
+}
+
+pub async fn project_activity(db: &Database, id: &str) -> Result<ProjectActivity, AppError> {
+    let sql = statement(
+        db,
+        "SELECT CAST(COUNT(*) AS BIGINT) AS issue_count,
+                CAST(COALESCE(SUM(event_count), 0) AS BIGINT) AS event_count,
+                MAX(last_seen) AS last_event_at
+         FROM issues WHERE project_id = ?",
+    );
+    let row = sqlx::query(&sql).bind(id).fetch_one(db.pool()).await?;
+    Ok(ProjectActivity {
+        issue_count: row.try_get("issue_count")?,
+        event_count: row.try_get("event_count")?,
+        last_event_at: row.try_get("last_event_at")?,
+    })
+}
+
 pub async fn project_for_ingest(
     db: &Database,
     id: &str,
@@ -631,7 +656,9 @@ async fn unique_slug(db: &Database, base: &str) -> Result<String, AppError> {
 fn normalize_platform(platform: &str) -> String {
     let normalized = match platform.trim().to_ascii_lowercase().as_str() {
         "php" => "php".to_owned(),
-        "javascript" | "node" | "browser" => "javascript".to_owned(),
+        "javascript" | "browser" => "javascript".to_owned(),
+        "node" | "nodejs" => "node".to_owned(),
+        "laravel" => "laravel".to_owned(),
         "rust" => "rust".to_owned(),
         "python" => "python".to_owned(),
         "java" => "java".to_owned(),

@@ -32,6 +32,9 @@ pub struct ProjectView {
     pub used_today: i64,
     pub quota_exceeded: bool,
     pub resets_at: String,
+    pub issue_count: i64,
+    pub event_count: i64,
+    pub last_event_at: Option<String>,
 }
 
 pub async fn list_projects(
@@ -106,6 +109,7 @@ async fn project_view(state: &AppState, project: Project) -> Result<ProjectView,
     let global = crate::quota::error_quota(&state.db).await?;
     let daily_quota = crate::quota::effective(global, project.daily_quota);
     let used_today = crate::quota::used(&state.db, crate::quota::ERROR, &project.id).await?;
+    let activity = store::project_activity(&state.db, &project.id).await?;
     Ok(ProjectView {
         dsn: store::build_dsn(
             &state.config.public_origin,
@@ -117,6 +121,9 @@ async fn project_view(state: &AppState, project: Project) -> Result<ProjectView,
         resets_at: crate::quota::resets_at(),
         daily_quota,
         used_today,
+        issue_count: activity.issue_count,
+        event_count: activity.event_count,
+        last_event_at: activity.last_event_at,
         id: project.id,
         name: project.name,
         slug: project.slug,

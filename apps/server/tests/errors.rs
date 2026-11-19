@@ -174,6 +174,9 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
             .unwrap()
             .ends_with(&format!("/{id}"))
     );
+    assert_eq!(project["lastEventAt"], Value::Null);
+    assert_eq!(project["issueCount"], json!(0));
+    assert_eq!(project["eventCount"], json!(0));
 
     let mut event = sample();
     let id1 = hex_id();
@@ -198,6 +201,36 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    let (status, after, _) = call(
+        &app,
+        "GET",
+        &format!("/api/error-projects/{id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert!(after["lastEventAt"].is_string(), "{after}");
+    assert_eq!(after["issueCount"], json!(1));
+    assert_eq!(after["eventCount"], json!(1));
+    let (_, listed, _) = call(
+        &app,
+        "GET",
+        "/api/error-projects",
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    let listed = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == json!(id))
+        .unwrap();
+    assert_eq!(listed["eventCount"], json!(1));
 
     let mut second = event.clone();
     second["event_id"] = json!(id2);
