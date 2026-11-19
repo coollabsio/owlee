@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
 import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
@@ -30,7 +30,19 @@ export function IssuesPage() {
   const navigate = useNavigate();
   const client = useQueryClient();
   const [status, setStatus] = useState("unresolved");
-  const [projectId, setProjectId] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const projectId = searchParams.get("project") ?? "";
+  function setProjectId(value: string) {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        if (value) next.set("project", value);
+        else next.delete("project");
+        return next;
+      },
+      { replace: true },
+    );
+  }
   const [environment, setEnvironment] = useState("");
   const [range, setRange] = useState<(typeof ranges)[number]>("14d");
   const [q, setQ] = useState("");
@@ -74,6 +86,7 @@ export function IssuesPage() {
   });
 
   const issues = feed.data?.issues ?? [];
+  const waitingProject = projects.data?.find((project) => project.id === projectId && !project.lastEventAt);
   const allChecked = issues.length > 0 && selected.length === issues.length;
 
   function applySaved(view: SavedView) {
@@ -196,12 +209,32 @@ export function IssuesPage() {
         </div>
         {feed.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading issues...</p> : null}
         {feed.isError ? <p className="p-4 text-[13px] text-[var(--ui-error)]">{(feed.error as Error).message}</p> : null}
-        {feed.data && issues.length === 0 ? (
+        {projects.data?.length === 0 ? (
+          <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
+            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No projects yet</h2>
+            <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
+              {canEdit
+                ? "Create a project to get a DSN and a step-by-step SDK guide. Its errors show up here."
+                : "An editor has to create a project before errors can be collected."}
+            </p>
+            {canEdit ? (
+              <Link className="button button-highlighted mt-4" to="/error-projects">
+                Create a project
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
+        {projects.data?.length !== 0 && feed.data && issues.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
             <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No issues in this view</h2>
             <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
               Point a Sentry SDK at a project DSN and throw an error. Events in the selected range show up here.
             </p>
+            {waitingProject ? (
+              <Link className="button mt-4" to={`/error-projects/${waitingProject.id}`}>
+                Open the {waitingProject.name} setup guide
+              </Link>
+            ) : null}
           </div>
         ) : null}
         {issues.length > 0 ? (

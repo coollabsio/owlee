@@ -478,6 +478,9 @@ export type Project = {
   usedToday: number;
   quotaExceeded: boolean;
   resetsAt: string;
+  issueCount: number;
+  eventCount: number;
+  lastEventAt: string | null;
 };
 
 export type Issue = {
