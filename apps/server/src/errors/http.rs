@@ -169,6 +169,8 @@ pub struct StatusBody {
 pub struct IssueFeed {
     pub issues: Vec<IssueRow>,
     pub environments: Vec<String>,
+    pub counts: store::IssueCounts,
+    pub truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -200,7 +202,7 @@ pub async fn list_issues(
         }
     };
     let environments = store::list_environments(&state.db, &filter.project_id).await?;
-    let issues = store::list_issues(
+    let page = store::list_issues(
         &state.db,
         &store::IssueQuery {
             status,
@@ -213,8 +215,10 @@ pub async fn list_issues(
     )
     .await?;
     Ok(Json(IssueFeed {
-        issues,
+        issues: page.issues,
         environments,
+        counts: page.counts,
+        truncated: page.truncated,
     }))
 }
 

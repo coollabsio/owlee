@@ -236,56 +236,134 @@ pub struct IssueAnalytics {
     pub tags: Vec<TagCount>,
 }
 
-pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<Vec<IssueRow>, AppError> {
+/// The feed shows at most this many issues, after sorting.
+const ISSUE_LIMIT: usize = 200;
+
+/// Every feed filter except status. `issue_filter_binds` returns its binds in order.
+const ISSUE_FILTERS: &str = "(? = '' OR i.project_id = ?)
+           AND (? = '' OR lower(i.title) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.culprit, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.short_id, '')) LIKE ? ESCAPE '\\')
+           AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.environment = ?))
+           AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?))";
+
+fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 10] {
     let like = like_pattern(&query.search);
     let search_flag = if query.search.trim().is_empty() {
-        String::new()
+        ""
     } else {
-        "1".to_owned()
+        "1"
     };
+    let since_flag = if since.is_empty() { "" } else { "1" };
+    [
+        query.project_id.clone(),
+        query.project_id.clone(),
+        search_flag.to_owned(),
+        like.clone(),
+        like.clone(),
+        like,
+        query.environment.clone(),
+        query.environment.clone(),
+        since_flag.to_owned(),
+        since.to_owned(),
+    ]
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct IssueCounts {
+    pub unresolved: i64,
+    pub resolved: i64,
+    pub ignored: i64,
+}
+
+pub struct IssuePage {
+    pub issues: Vec<IssueRow>,
+    /// Counts per status under the same filters, ignoring the status filter.
+    pub counts: IssueCounts,
+    pub truncated: bool,
+}
+
+pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage, AppError> {
     let since = since_bound(&query.since);
-    let since_flag = if since.is_empty() {
-        String::new()
-    } else {
-        "1".into()
+    let since_flag = if since.is_empty() { "" } else { "1" };
+    let filters = issue_filter_binds(query, &since);
+    let order = match query.sort.as_str() {
+        "age" | "first_seen" => "i.first_seen ASC",
+        "events" => "period_event_count DESC",
+        "users" => "user_count DESC",
+        _ => "i.last_seen DESC",
     };
+    // The stats are columns so the sort runs before the limit.
     let sql = statement(
         db,
-        "SELECT i.id, i.project_id, p.name AS project_name, p.slug AS project_slug,
+        &format!(
+            "SELECT i.id, i.project_id, p.name AS project_name, p.slug AS project_slug,
                 i.title, i.culprit, i.status, i.level, i.platform, i.environment, i.release,
-                i.first_seen, i.last_seen, i.event_count, i.short_id, i.unhandled
+                i.first_seen, i.last_seen, i.event_count, i.short_id, i.unhandled,
+                CAST(CASE WHEN ? = '' THEN i.event_count
+                     ELSE (SELECT COUNT(*) FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?)
+                END AS BIGINT) AS period_event_count,
+                CAST((SELECT COUNT(DISTINCT ev.user_key) FROM events ev
+                      WHERE ev.issue_id = i.id AND ev.user_key != '' AND (? = '' OR ev.timestamp >= ?)) AS BIGINT) AS user_count
          FROM issues i
          JOIN projects p ON p.id = i.project_id
          WHERE (? = '' OR i.status = ?)
-           AND (? = '' OR i.project_id = ?)
-           AND (? = '' OR lower(i.title) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.culprit, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.short_id, '')) LIKE ? ESCAPE '\\')
-           AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.environment = ?))
-           AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?))
-         ORDER BY i.last_seen DESC
-         LIMIT 200",
+           AND {ISSUE_FILTERS}
+         ORDER BY {order}, i.last_seen DESC, i.id
+         LIMIT {}",
+            ISSUE_LIMIT + 1
+        ),
     );
-    let rows = sqlx::query(&sql)
-        .bind(&query.status)
-        .bind(&query.status)
-        .bind(&query.project_id)
-        .bind(&query.project_id)
-        .bind(&search_flag)
-        .bind(&like)
-        .bind(&like)
-        .bind(&like)
-        .bind(&query.environment)
-        .bind(&query.environment)
-        .bind(&since_flag)
+    let mut select = sqlx::query(&sql)
+        .bind(since_flag)
         .bind(&since)
-        .fetch_all(db.pool())
-        .await?;
+        .bind(since_flag)
+        .bind(&since)
+        .bind(&query.status)
+        .bind(&query.status);
+    for value in &filters {
+        select = select.bind(value);
+    }
+    let rows = select.fetch_all(db.pool()).await?;
+    let truncated = rows.len() > ISSUE_LIMIT;
     let mut issues = rows
         .iter()
-        .map(issue_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    attach_feed_stats(db, &mut issues, &since).await?;
-    sort_issues(&mut issues, &query.sort);
-    Ok(issues)
+        .take(ISSUE_LIMIT)
+        .map(|row| {
+            let mut issue = issue_from_row(row)?;
+            issue.period_event_count = row.try_get("period_event_count")?;
+            issue.user_count = row.try_get("user_count")?;
+            Ok(issue)
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    attach_trends(db, &mut issues).await?;
+
+    let sql = statement(
+        db,
+        &format!(
+            "SELECT i.status, CAST(COUNT(*) AS BIGINT) AS total
+         FROM issues i
+         WHERE {ISSUE_FILTERS}
+         GROUP BY i.status"
+        ),
+    );
+    let mut count = sqlx::query(&sql);
+    for value in &filters {
+        count = count.bind(value);
+    }
+    let mut counts = IssueCounts::default();
+    for row in count.fetch_all(db.pool()).await? {
+        let total: i64 = row.try_get("total")?;
+        match row.try_get::<String, _>("status")?.as_str() {
+            "unresolved" => counts.unresolved = total,
+            "resolved" => counts.resolved = total,
+            "ignored" => counts.ignored = total,
+            _ => {}
+        }
+    }
+    Ok(IssuePage {
+        issues,
+        counts,
+        truncated,
+    })
 }
 
 pub async fn list_environments(db: &Database, project_id: &str) -> Result<Vec<String>, AppError> {
@@ -488,8 +566,7 @@ pub async fn ingest_event(
         .as_deref()
         .and_then(|start| DateTime::parse_from_rfc3339(start).ok())
         .is_some_and(|start| {
-            Utc::now().signed_duration_since(start.with_timezone(&Utc))
-                < Duration::seconds(keep)
+            Utc::now().signed_duration_since(start.with_timezone(&Utc)) < Duration::seconds(keep)
         });
     let store_payload = stored_count < keep_first.max(1) || !window_open;
     if store_payload {
@@ -857,7 +934,10 @@ pub async fn events_for_user(db: &Database, user_key: &str) -> Result<Vec<UserEv
 }
 
 pub async fn delete_events_for_user(db: &Database, user_key: &str) -> Result<u64, AppError> {
-    let sql = statement(db, "DELETE FROM events WHERE id IN (SELECT event_id FROM event_users WHERE user_hash = ?)");
+    let sql = statement(
+        db,
+        "DELETE FROM events WHERE id IN (SELECT event_id FROM event_users WHERE user_hash = ?)",
+    );
     Ok(sqlx::query(&sql)
         .bind(user_key)
         .execute(db.pool())
@@ -885,8 +965,7 @@ pub async fn privatize_events(db: &Database, app_key: &AppKey) -> Result<(), App
             let payload: String = row.try_get("payload")?;
             let (hashes, payload) = match serde_json::from_str::<serde_json::Value>(&payload) {
                 Ok(mut raw) => {
-                    let hashes =
-                        user_hashes(app_key, &owlee_errors::normalize_event(raw.clone()));
+                    let hashes = user_hashes(app_key, &owlee_errors::normalize_event(raw.clone()));
                     owlee_errors::scrub_raw_event(&mut raw);
                     (hashes, raw.to_string())
                 }
@@ -912,92 +991,42 @@ pub async fn privatize_events(db: &Database, app_key: &AppKey) -> Result<(), App
 const INSERT_USER: &str =
     "INSERT INTO event_users (user_hash, event_id) VALUES (?, ?) ON CONFLICT DO NOTHING";
 
-async fn attach_feed_stats(
-    db: &Database,
-    issues: &mut [IssueRow],
-    since: &str,
-) -> Result<(), AppError> {
+async fn attach_trends(db: &Database, issues: &mut [IssueRow]) -> Result<(), AppError> {
     if issues.is_empty() {
         return Ok(());
     }
-    let window_start = Utc::now() - Duration::days(14);
+    let now = Utc::now();
     let sql = statement(
         db,
-        "SELECT issue_id, timestamp, user_key FROM events WHERE timestamp >= ?",
+        "SELECT issue_id, timestamp FROM events WHERE timestamp >= ?",
     );
     let rows = sqlx::query(&sql)
-        .bind(window_start.to_rfc3339_opts(SecondsFormat::Millis, true))
+        .bind((now - Duration::days(14)).to_rfc3339_opts(SecondsFormat::Millis, true))
         .fetch_all(db.pool())
         .await?;
-    let period_start = if since.is_empty() {
-        None
-    } else {
-        parse_time(since)
-    };
-    let day = Duration::hours(24);
-    let mut by_issue: std::collections::BTreeMap<
-        String,
-        (Vec<i64>, Vec<i64>, i64, std::collections::BTreeSet<String>),
-    > = std::collections::BTreeMap::new();
-    for issue in issues.iter() {
-        by_issue.insert(
-            issue.id.clone(),
-            (
-                vec![0; 24],
-                vec![0; 14],
-                0,
-                std::collections::BTreeSet::new(),
-            ),
-        );
-    }
+    let index: std::collections::HashMap<String, usize> = issues
+        .iter()
+        .enumerate()
+        .map(|(position, issue)| (issue.id.clone(), position))
+        .collect();
     for row in &rows {
         let issue_id: String = row.try_get("issue_id")?;
-        let Some(slot) = by_issue.get_mut(&issue_id) else {
+        let Some(&position) = index.get(&issue_id) else {
             continue;
         };
         let timestamp: String = row.try_get("timestamp")?;
-        let user_key: Option<String> = row.try_get("user_key")?;
         let Some(parsed) = parse_time(&timestamp) else {
             continue;
         };
-        if let Some(index) = bucket_index(parsed, Utc::now() - day, 24) {
-            slot.0[index] += 1;
+        let issue = &mut issues[position];
+        if let Some(bucket) = bucket_index(parsed, now - Duration::hours(24), 24) {
+            issue.trend24h[bucket] += 1;
         }
-        if let Some(index) = bucket_index(parsed, Utc::now() - Duration::days(14), 14) {
-            slot.1[index] += 1;
-        }
-        let in_period = period_start.map(|start| parsed >= start).unwrap_or(true);
-        if in_period {
-            slot.2 += 1;
-            if let Some(user_key) = user_key.filter(|value| !value.is_empty()) {
-                slot.3.insert(user_key);
-            }
-        }
-    }
-    for issue in issues.iter_mut() {
-        if let Some((trend24h, trend14d, period_events, users)) = by_issue.remove(&issue.id) {
-            issue.trend24h = trend24h;
-            issue.trend14d = trend14d;
-            if !since.is_empty() {
-                issue.period_event_count = period_events;
-            }
-            issue.user_count = users.len() as i64;
+        if let Some(bucket) = bucket_index(parsed, now - Duration::days(14), 14) {
+            issue.trend14d[bucket] += 1;
         }
     }
     Ok(())
-}
-
-fn sort_issues(issues: &mut [IssueRow], sort: &str) {
-    match sort {
-        "age" | "first_seen" => {
-            issues.sort_by(|left, right| left.first_seen.cmp(&right.first_seen))
-        }
-        "events" => {
-            issues.sort_by(|left, right| right.period_event_count.cmp(&left.period_event_count))
-        }
-        "users" => issues.sort_by(|left, right| right.user_count.cmp(&left.user_count)),
-        _ => issues.sort_by(|left, right| right.last_seen.cmp(&left.last_seen)),
-    }
 }
 
 fn since_bound(spec: &str) -> String {

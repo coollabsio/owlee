@@ -15,7 +15,7 @@ async fn app() -> (Router, Option<String>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owlee.sqlite");
     let _keep = Box::leak(Box::new(dir));
-    let state = boot(testing_config(path)).await.unwrap();
+    let state = boot(fast_ingest(testing_config(path))).await.unwrap();
     let token = initialize_setup_token(&state.db, TimestampMillis::now())
         .await
         .unwrap()
@@ -73,6 +73,13 @@ fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
         .find(|value| value.starts_with("owlee_session="))
         .or_else(|| pairs.first().copied())
         .map(str::to_owned)
+}
+
+/// The sort test ingests 203 events from one address in one burst.
+fn fast_ingest(mut config: owlee_platform::Config) -> owlee_platform::Config {
+    config.ingest.error_rate_ip_burst = 1_000;
+    config.ingest.error_rate_project_burst = 1_000;
+    config
 }
 
 fn envelope(event_json: &str) -> Vec<u8> {
@@ -308,6 +315,11 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     assert_eq!(status, StatusCode::OK, "{feed}");
     assert_eq!(feed["issues"].as_array().unwrap().len(), 1, "{feed}");
     assert_eq!(feed["issues"][0]["eventCount"], 4);
+    assert_eq!(
+        feed["counts"],
+        json!({"unresolved": 1, "resolved": 0, "ignored": 0})
+    );
+    assert_eq!(feed["truncated"], json!(false));
     assert!(
         feed["issues"][0]["title"]
             .as_str()
@@ -358,6 +370,96 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(allow.as_deref(), Some("*"));
+
+    sorts_before_the_limit(&app, &cookie).await;
+}
+
+/// One busy issue older than 200 quiet ones must still lead `sort=events`.
+async fn sorts_before_the_limit(app: &Router, cookie: &str) {
+    let (_, project, _) = call(
+        app,
+        "POST",
+        "/api/error-projects",
+        json!({"name": "Sorting", "platform": "php"})
+            .to_string()
+            .into_bytes(),
+        Some(cookie),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    let id = project["id"].as_str().unwrap();
+    let key = project["publicKey"].as_str().unwrap();
+    let auth = format!("Sentry sentry_key={key}, sentry_version=7");
+    let hour_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        - 3600.0;
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        let mut event = sample();
+        event["fingerprint"] = json!(["busy"]);
+        event["exception"]["values"][0]["value"] = json!("busy volume");
+        event["timestamp"] = json!(hour_ago);
+        events.push(event);
+    }
+    for index in 0..200 {
+        let mut event = sample();
+        event["fingerprint"] = json!([format!("quiet-{index}")]);
+        events.push(event);
+    }
+    for mut event in events {
+        event["event_id"] = json!(hex_id());
+        let (status, _, _) = call(
+            app,
+            "POST",
+            &format!("/api/{id}/store/"),
+            event.to_string().into_bytes(),
+            None,
+            &[
+                ("content-type", "application/json"),
+                ("x-sentry-auth", &auth),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let feed_uri =
+        format!("/api/error-issues?project_id={id}&since=14d&sort=events&status=unresolved");
+    let (status, feed, _) = call(app, "GET", &feed_uri, Vec::new(), Some(cookie), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    let issues = feed["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 200);
+    assert_eq!(issues[0]["title"], json!("RuntimeException: busy volume"));
+    assert_eq!(issues[0]["periodEventCount"], json!(3));
+    assert_eq!(issues[1]["periodEventCount"], json!(1));
+    assert_eq!(feed["truncated"], json!(true));
+    assert_eq!(
+        feed["counts"],
+        json!({"unresolved": 201, "resolved": 0, "ignored": 0})
+    );
+
+    let busy = issues[0]["id"].as_str().unwrap();
+    let (status, _, _) = call(
+        app,
+        "POST",
+        "/api/error-issues/bulk",
+        json!({"ids": [busy], "status": "resolved"})
+            .to_string()
+            .into_bytes(),
+        Some(cookie),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let (_, feed, _) = call(app, "GET", &feed_uri, Vec::new(), Some(cookie), &[]).await;
+    assert_eq!(feed["issues"].as_array().unwrap().len(), 200);
+    assert_eq!(feed["truncated"], json!(false));
+    assert_eq!(
+        feed["counts"],
+        json!({"unresolved": 200, "resolved": 1, "ignored": 0})
+    );
 }
 
 #[tokio::test]
@@ -378,7 +480,7 @@ async fn postgres_ingest_groups_events() {
         "data/ignored-errors-postgres.sqlite",
     ));
     config.database_url = Some(url);
-    let state = boot(config).await.expect("postgres boot");
+    let state = boot(fast_ingest(config)).await.expect("postgres boot");
     let token = initialize_setup_token(&state.db, TimestampMillis::now())
         .await
         .unwrap()
