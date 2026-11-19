@@ -2280,13 +2280,26 @@ async fn is_editor(state: &AppState, user: &User) -> Result<bool, AppError> {
     Ok(present::UserResponse::with_access(user, root_id).installation_admin)
 }
 
-/// Request headers and bodies often carry API tokens, so members get monitors without them.
+/// Request headers, bodies, and URL credentials often carry API tokens, so
+/// members get monitors without them.
 fn monitor_view(editor: bool, mut response: present::MonitorResponse) -> present::MonitorResponse {
     if !editor {
         response.headers.clear();
         response.body.clear();
+        response.url = without_credentials(&response.url);
     }
     response
+}
+
+fn without_credentials(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_owned(),
+    }
 }
 
 pub(crate) async fn require_user(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
