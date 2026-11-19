@@ -437,6 +437,23 @@ export type InsightSite = {
   used_today: number;
   quota_exceeded: boolean;
   resets_at: string;
+  intake: IntakeCounts;
+};
+
+export type DropReason =
+  | "client_rate_limit"
+  | "source_rate_limit"
+  | "daily_quota"
+  | "malformed"
+  | "origin_not_allowed"
+  | "unverified_domain"
+  | "storage_failed";
+
+/** Counts since the server started. */
+export type IntakeCounts = {
+  stored: number;
+  dropped: number;
+  last_drop: { at: string; reason: DropReason } | null;
 };
 
 export type InsightPoint = {
@@ -528,6 +545,7 @@ export type ErrorApp = {
   issueCount: number;
   eventCount: number;
   lastEventAt: string | null;
+  intake: IntakeCounts;
 };
 
 export type Issue = {

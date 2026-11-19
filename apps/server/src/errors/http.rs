@@ -37,6 +37,7 @@ pub struct AppView {
     pub issue_count: i64,
     pub event_count: i64,
     pub last_event_at: Option<String>,
+    pub intake: crate::intake::IntakeCounts,
 }
 
 pub async fn list_apps(
@@ -122,6 +123,7 @@ async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
         issue_count: activity.issue_count,
         event_count: activity.event_count,
         last_event_at: activity.last_event_at,
+        intake: state.error_intake.get(&app.id),
         id: app.id,
         project_id: app.project_id,
         name: app.name,

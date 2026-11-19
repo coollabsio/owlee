@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::store;
 use crate::error::AppError;
+use crate::intake::DropReason;
 use crate::peer::Client;
 use crate::quota;
 use crate::state::AppState;
@@ -84,6 +85,7 @@ pub async fn ingest_envelope(
                         Ok(Accepted::Stored(id)) => last_id = Some(id),
                         Ok(Accepted::Limited(response)) => return response,
                         Err(error) => {
+                            state.error_intake.dropped(&app.id, DropReason::StorageFailed);
                             tracing::error!(error = %error, "failed to store sentry event");
                             return ingest_error(
                                 &headers,
@@ -94,6 +96,7 @@ pub async fn ingest_envelope(
                     }
                 }
                 Err(error) => {
+                    state.error_intake.dropped(&app.id, DropReason::Malformed);
                     tracing::warn!(error = %error, "skipped malformed event item");
                 }
             },
@@ -159,6 +162,7 @@ pub async fn ingest_store(
         Ok(Accepted::Stored(id)) => json_ok(&headers, json!({ "id": id })),
         Ok(Accepted::Limited(response)) => response,
         Err(error) => {
+            state.error_intake.dropped(&app.id, DropReason::StorageFailed);
             tracing::error!(error = %error, "failed to store sentry event");
             ingest_error(
                 &headers,
@@ -188,12 +192,14 @@ fn enforce_rate(
         .error_ip_limit
         .check(&format!("error-ip:{}", client.ip));
     if !ip_limit.allowed {
+        state.error_intake.dropped(app_id, DropReason::ClientRateLimit);
         return Some(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
     }
     let app_limit = state
         .error_project_limit
         .check(&format!("error-app:{app_id}"));
     if !app_limit.allowed {
+        state.error_intake.dropped(app_id, DropReason::SourceRateLimit);
         return Some(rate_limited(headers, app_limit.retry_after_secs, "key", ""));
     }
     None
@@ -221,6 +227,7 @@ async fn accept_event(
     .await
     .map_err(|error| error.to_string())?;
     if ingested.quota_exceeded {
+        state.error_intake.dropped(&app.id, DropReason::DailyQuota);
         return Ok(Accepted::Limited(rate_limited(
             headers,
             ingested.retry_after_secs,
@@ -228,6 +235,7 @@ async fn accept_event(
             "quota_exceeded",
         )));
     }
+    state.error_intake.stored(&app.id);
     Ok(Accepted::Stored(ingested.id))
 }
 

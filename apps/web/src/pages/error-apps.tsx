@@ -8,7 +8,7 @@ import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select,
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
-import { cn, fullTime, timeAgo } from "@/lib/utils";
+import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function ErrorAppsPage() {
@@ -409,6 +409,7 @@ function AppQuota({ app }: { app: ErrorApp }) {
         {app.usedToday.toLocaleString()} of {app.dailyQuota.toLocaleString()} errors accepted today.
         {app.quotaExceeded ? " Further events are rejected until the counter resets." : ""} Resets {resetWhen(app.resetsAt)}.
       </p>
+      <p className="mb-3 text-[13px] text-[var(--ui-fg-faint)]">{intakeSummary(app.intake)}</p>
       {canEdit ? <form
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
         onSubmit={(event) => {

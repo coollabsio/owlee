@@ -6,7 +6,7 @@ import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, 
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { useCanEdit } from "@/lib/me";
-import { cn } from "@/lib/utils";
+import { cn, intakeSummary } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 const ranges = [
@@ -530,6 +530,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
         {site.quota_override == null ? " (instance default)" : " (this site)"}
         {site.quota_exceeded ? ". Further events are rejected until the counter resets." : "."} Resets {resetWhen(site.resets_at)}.
       </p>
+      <p className="mb-3 text-[13px] text-[var(--ui-fg-faint)]">{intakeSummary(site.intake)}</p>
       {canEdit ? <form
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
         onSubmit={(event) => {

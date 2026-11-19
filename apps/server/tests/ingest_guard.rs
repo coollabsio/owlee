@@ -347,6 +347,19 @@ async fn burst_is_429(mut config: Config) {
         "{:?}",
         blocked.rate_limits
     );
+    let listed = send(
+        &app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    let intake = &listed.body["intake"];
+    assert_eq!(intake["stored"], 2, "{intake}");
+    assert_eq!(intake["dropped"], 1, "{intake}");
+    assert_eq!(intake["last_drop"]["reason"], "client_rate_limit", "{intake}");
 }
 
 async fn wrong_origin(config: Config) {
@@ -410,6 +423,19 @@ async fn wrong_origin(config: Config) {
         .unwrap();
     let count: i64 = rows.try_get("n").unwrap();
     assert_eq!(count, 1, "the rejected origin was not stored");
+    let site = send(
+        &app,
+        "GET",
+        &format!("/api/sites/{site_id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    let intake = &site.body["intake"];
+    assert_eq!(intake["stored"], 1, "{intake}");
+    assert_eq!(intake["dropped"], 1, "{intake}");
+    assert_eq!(intake["last_drop"]["reason"], "origin_not_allowed", "{intake}");
 }
 
 async fn flood_is_capped(config: Config) {

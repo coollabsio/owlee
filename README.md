@@ -230,6 +230,8 @@ Issues still group on a fingerprint. `event_count` increases for every accepted 
 
 Each project may accept `OWLEE_ERROR_DAILY_QUOTA` events per UTC day (100,000) until the root user sets another number under Settings → Ingest quotas, or the project sets its own cap. One error a second all day is about 86,400, so normal use does not reach 100,000. The projects list and the dashboard show when today's counter has hit that cap, and when it resets (00:00 UTC).
 
+The daily cap panel of a project also shows how many events were stored and dropped since the server started, and the reason for the last drop (rate limit, daily cap, invalid event, or a storage error). Owlee counts only requests with a valid project key. The counts are kept in memory.
+
 `examples/` has PHP, Node, browser, and Rust SDK programs. Set `SENTRY_DSN` to the project DSN.
 
 Short-link hostnames only take over a request when the `Host` is a configured link domain and not Owlee's own origin, and only after `/api` and `/go` have already been routed. Sentry ingest stays on `/api/...`.
@@ -247,6 +249,8 @@ The script posts JSON to `POST /api/receive` on the same origin as `/data.js`. I
 Events are accepted only when `Origin` (or `Referer`, if `Origin` is missing) matches the site domain or a subdomain of it, or an enabled link domain attached to that site. In development, `localhost` and `127.0.0.1` are also accepted (`OWLEE_INGEST_ALLOW_LOCALHOST`, on in development and off in production). A new site is unverified. Development still collects, and the site page says so. Production returns `403` until you add the TXT record shown on the site (`_owlee-verify.example.com` TXT `owlee-verify=<token>`) and press Verify. Owlee re-checks verified domains every `OWLEE_DOMAIN_RECHECK_SECS` (1 hour) and clears the flag when DNS answers without the token. A lookup error does not clear it. Status pages have no custom hostname, so there is nothing to verify there.
 
 The same site key and the same client IP each have a token bucket. A full bucket or a full daily quota answers `429` with `Retry-After`. The default is `OWLEE_ANALYTICS_DAILY_QUOTA` (1,000,000 per site). A million pageviews a day is a large site for this install; a site can set a lower or higher cap of its own. The counter resets at 00:00 UTC. `window.owleeEvent(name, data)` records a custom event.
+
+The quota panel of a site also shows how many events were stored and dropped since the server started, and the reason for the last drop (rate limit, daily cap, origin not allowed, unverified domain, or a storage error). Bots are not counted as drops. A request for an unknown site or one blocked by the per-IP bucket is not counted, because no site is known for it yet. The counts are kept in memory.
 
 Raw `insight_events` rows, including link clicks, older than `OWLEE_ANALYTICS_RETENTION_DAYS` (90) are deleted in batches, with their visits and per-day visitor ids. Daily rollups (`insight_daily`, `insight_link_daily`, and the dimension tables) stay, and those are what the overview reads. `insight_events(timestamp)` is indexed for the delete.
 

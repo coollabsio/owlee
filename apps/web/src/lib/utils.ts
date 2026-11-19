@@ -1,6 +1,8 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+import type { DropReason, IntakeCounts } from "@/lib/api";
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -31,6 +33,22 @@ export function duration(iso?: string | null) {
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours}h`;
   return `${Math.round(hours / 24)}d`;
+}
+
+const DROP_REASONS: Record<DropReason, string> = {
+  client_rate_limit: "one client sent too fast",
+  source_rate_limit: "too many events for this source",
+  daily_quota: "daily cap reached",
+  malformed: "the event was not valid",
+  origin_not_allowed: "the page origin is not allowed",
+  unverified_domain: "the domain is not verified",
+  storage_failed: "the server could not store it",
+};
+
+export function intakeSummary(intake: IntakeCounts) {
+  const counts = `Since the server started: ${intake.stored.toLocaleString()} stored, ${intake.dropped.toLocaleString()} dropped.`;
+  if (!intake.last_drop) return counts;
+  return `${counts} Last drop ${timeAgo(intake.last_drop.at)}: ${DROP_REASONS[intake.last_drop.reason]}.`;
 }
 
 export function timeAgo(iso?: string | null) {

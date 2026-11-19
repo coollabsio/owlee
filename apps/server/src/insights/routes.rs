@@ -23,6 +23,7 @@ use sqlx::Row;
 use super::geo;
 use super::record;
 use crate::error::AppError;
+use crate::intake::DropReason;
 use crate::peer::Client;
 use crate::quota;
 use crate::state::AppState;
@@ -178,12 +179,6 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
     if !ip_limit.allowed {
         return with_cors(AppError::limited(ip_limit.retry_after_secs).into_response());
     }
-    let site_limit = state
-        .analytics_site_limit
-        .check(&format!("analytics-site:{}", payload.site));
-    if !site_limit.allowed {
-        return with_cors(AppError::limited(site_limit.retry_after_secs).into_response());
-    }
     match accept_event(&state, &headers, &client, payload).await {
         Ok(status) => with_cors(status.into_response()),
         Err(error) => with_cors(error.into_response()),
@@ -226,6 +221,14 @@ async fn accept_event(
         return Err(AppError::field("site", "Unknown site."));
     };
     let site_id: String = site.try_get("id")?;
+    let intake = &state.analytics_intake;
+    let site_limit = state
+        .analytics_site_limit
+        .check(&format!("analytics-site:{site_id}"));
+    if !site_limit.allowed {
+        intake.dropped(&site_id, DropReason::SourceRateLimit);
+        return Err(AppError::limited(site_limit.retry_after_secs));
+    }
     let domain: String = site.try_get("domain")?;
     let verified: i64 = site.try_get("verified")?;
     let custom_quota: Option<i64> = site.try_get("daily_quota")?;
@@ -236,9 +239,11 @@ async fn accept_event(
         &allowed,
         state.config.ingest.allow_localhost,
     ) {
+        intake.dropped(&site_id, DropReason::OriginNotAllowed);
         return Err(AppError::Forbidden("Origin is not allowed for this site."));
     }
     if verified == 0 && state.config.environment != EnvironmentMode::Development {
+        intake.dropped(&site_id, DropReason::UnverifiedDomain);
         return Err(AppError::Forbidden(
             "Verify this domain before it can collect analytics.",
         ));
@@ -253,6 +258,7 @@ async fn accept_event(
     let global = quota::analytics_quota(&state.db).await?;
     let daily = quota::effective(global, custom_quota);
     if !quota::reserve(state.db.pool(), quota::ANALYTICS, &site_id, daily).await? {
+        intake.dropped(&site_id, DropReason::DailyQuota);
         return Err(AppError::limited(quota::secs_until_utc_midnight()));
     }
     let page = payload.url.as_deref().and_then(parse_page);
@@ -330,7 +336,9 @@ async fn accept_event(
             ..Incoming::default()
         },
     )
-    .await?;
+    .await
+    .inspect_err(|_| intake.dropped(&site_id, DropReason::StorageFailed))?;
+    intake.stored(&site_id);
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -1741,6 +1749,7 @@ async fn site_json(state: &AppState, row: &sqlx::any::AnyRow) -> Result<Value, A
         "verify_name": verify_name,
         "verify_value": verify_value,
         "ingest_open": verified || dev,
+        "intake": state.analytics_intake.get(&id),
         "daily_quota": quota,
         "quota_override": custom,
         "used_today": used,

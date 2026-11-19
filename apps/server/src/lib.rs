@@ -13,6 +13,7 @@ mod engine;
 mod error;
 mod errors;
 mod insights;
+mod intake;
 mod instance_settings;
 mod invitations;
 mod limit;

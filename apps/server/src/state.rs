@@ -27,6 +27,8 @@ pub struct AppState {
     pub error_ip_limit: Arc<TokenBucket>,
     pub analytics_site_limit: Arc<TokenBucket>,
     pub analytics_ip_limit: Arc<TokenBucket>,
+    pub error_intake: Arc<crate::intake::IntakeStats>,
+    pub analytics_intake: Arc<crate::intake::IntakeStats>,
     pub login_ip_limit: Arc<TokenBucket>,
     pub login_account_limit: Arc<TokenBucket>,
     /// Account mails per address, so the auth routes cannot flood an inbox.
@@ -123,6 +125,8 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         http: HttpClients::new()?,
         scheduler_id: owlee_platform::Id::new().to_string(),
         inflight: Inflight::default(),
+        error_intake: Arc::default(),
+        analytics_intake: Arc::default(),
         connectivity: Connectivity::new(config.connectivity_targets.clone()),
         passwords,
         insights_salt: Arc::default(),
