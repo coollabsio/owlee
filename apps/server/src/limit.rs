@@ -39,12 +39,7 @@ impl TokenBucket {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if buckets.len() >= MAX_KEYS && !buckets.contains_key(key) {
-            buckets.retain(|_, (updated, tokens)| {
-                now.duration_since(*updated).as_secs() < 600 || *tokens >= 1.0
-            });
-            if buckets.len() >= MAX_KEYS {
-                buckets.clear();
-            }
+            self.evict(&mut buckets, now);
         }
         let entry = buckets
             .entry(key.to_owned())
@@ -69,6 +64,32 @@ impl TokenBucket {
     }
 }
 
+impl TokenBucket {
+    fn level(&self, (updated, tokens): (Instant, f64), now: Instant) -> f64 {
+        (tokens + now.duration_since(updated).as_secs_f64() * self.per_sec).min(self.burst)
+    }
+
+    /// Frees room without resetting a client that is at its limit, so many new
+    /// keys cannot clear the buckets of the keys being limited.
+    fn evict(&self, buckets: &mut HashMap<String, (Instant, f64)>, now: Instant) {
+        // A bucket that has refilled is the same as a new one.
+        buckets.retain(|_, bucket| self.level(*bucket, now) < self.burst);
+        if buckets.len() < MAX_KEYS {
+            return;
+        }
+        // Still full: drop the half used least recently. A client that keeps
+        // sending while it is limited stays recent, so it stays limited.
+        let mut ages: Vec<(Instant, String)> = buckets
+            .iter()
+            .map(|(key, (updated, _))| (*updated, key.clone()))
+            .collect();
+        ages.sort_by_key(|(updated, _)| *updated);
+        for (_, key) in ages.into_iter().take(MAX_KEYS / 2) {
+            buckets.remove(&key);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +102,19 @@ mod tests {
         let denied = bucket.check("project");
         assert!(!denied.allowed);
         assert!(denied.retry_after_secs >= 1);
+    }
+
+    #[test]
+    fn new_keys_do_not_reset_a_limited_key() {
+        let bucket = TokenBucket::per_minute(1, 1);
+        assert!(bucket.check("attacker").allowed);
+        assert!(!bucket.check("attacker").allowed);
+        for index in 0..MAX_KEYS * 2 {
+            bucket.check(&format!("other-{index}"));
+            if index % 100 == 0 {
+                assert!(!bucket.check("attacker").allowed, "reset after {index} keys");
+            }
+        }
+        assert!(!bucket.check("attacker").allowed);
     }
 }

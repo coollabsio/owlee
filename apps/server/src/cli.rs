@@ -107,7 +107,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let bound = listener.local_addr()?;
             tracing::info!("Owlee listening on http://{bound}");
-            axum::serve(listener, crate::routes::router(state))
+            axum::serve(
+                listener,
+                crate::routes::router(state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
                 .with_graceful_shutdown(async {
                     let _ = tokio::signal::ctrl_c().await;
                     tracing::info!("shutting down");

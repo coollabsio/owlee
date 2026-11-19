@@ -398,19 +398,7 @@ pub async fn ingest_event(
             retry_after_secs: 0,
         });
     }
-    let day = crate::quota::today();
-    let usage = sqlx::query(
-        "SELECT count FROM ingest_usage WHERE kind = 'error' AND subject_id = $1 AND day = $2",
-    )
-    .bind(&project.id)
-    .bind(&day)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let used = usage
-        .map(|row| row.try_get::<i64, _>("count"))
-        .transpose()?
-        .unwrap_or(0);
-    if used >= quota {
+    if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &project.id, quota).await? {
         tx.commit().await?;
         return Ok(Ingested {
             id: String::new(),
@@ -418,14 +406,6 @@ pub async fn ingest_event(
             retry_after_secs: crate::quota::secs_until_utc_midnight(),
         });
     }
-    sqlx::query(
-        "INSERT INTO ingest_usage (kind, subject_id, day, count) VALUES ('error', $1, $2, 1) \
-         ON CONFLICT (kind, subject_id, day) DO UPDATE SET count = ingest_usage.count + 1",
-    )
-    .bind(&project.id)
-    .bind(&day)
-    .execute(&mut *tx)
-    .await?;
     let issue_id = Uuid::new_v4().to_string();
     let seq_sql = statement(
         db,

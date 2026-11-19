@@ -249,9 +249,8 @@ async fn accept_event(
     }
     let global = quota::analytics_quota(&state.db).await?;
     let daily = quota::effective(global, custom_quota);
-    let charge = quota::charge(&state.db, quota::ANALYTICS, &site_id, daily).await?;
-    if !charge.allowed {
-        return Err(AppError::limited(charge.retry_after_secs));
+    if !quota::reserve(state.db.pool(), quota::ANALYTICS, &site_id, daily).await? {
+        return Err(AppError::limited(quota::secs_until_utc_midnight()));
     }
     let page = payload.url.as_deref().and_then(parse_page);
     let referrer = payload

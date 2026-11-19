@@ -13,15 +13,6 @@ use crate::error::AppError;
 pub const ERROR: &str = "error";
 pub const ANALYTICS: &str = "analytics";
 
-pub struct Charge {
-    pub allowed: bool,
-    pub retry_after_secs: u64,
-    #[allow(dead_code)]
-    pub used: i64,
-    #[allow(dead_code)]
-    pub quota: i64,
-}
-
 pub struct UsageHit {
     pub kind: &'static str,
     pub id: String,
@@ -72,52 +63,31 @@ pub async fn used(db: &Database, kind: &str, subject_id: &str) -> Result<i64, Ap
         .unwrap_or(0))
 }
 
-/// Reserves one event. `allowed` is false when today's count is already at the quota.
-pub async fn charge(
-    db: &Database,
+/// Adds one event to today's counter unless it is already at `quota`.
+/// One statement, so parallel requests cannot pass the cap together.
+/// Returns false when the cap is reached.
+pub async fn reserve<'e, E>(
+    executor: E,
     kind: &str,
     subject_id: &str,
     quota: i64,
-) -> Result<Charge, AppError> {
-    let day = today();
-    let mut tx = db.pool().begin().await?;
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
     let row = sqlx::query(
-        "SELECT count FROM ingest_usage WHERE kind = $1 AND subject_id = $2 AND day = $3",
-    )
-    .bind(kind)
-    .bind(subject_id)
-    .bind(&day)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let used = row
-        .map(|row| row.try_get::<i64, _>("count"))
-        .transpose()?
-        .unwrap_or(0);
-    if used >= quota {
-        tx.commit().await?;
-        return Ok(Charge {
-            allowed: false,
-            retry_after_secs: secs_until_utc_midnight(),
-            used,
-            quota,
-        });
-    }
-    sqlx::query(
         "INSERT INTO ingest_usage (kind, subject_id, day, count) VALUES ($1, $2, $3, 1) \
-         ON CONFLICT (kind, subject_id, day) DO UPDATE SET count = ingest_usage.count + 1",
+         ON CONFLICT (kind, subject_id, day) DO UPDATE SET count = ingest_usage.count + 1 \
+         WHERE ingest_usage.count < $4 \
+         RETURNING count",
     )
     .bind(kind)
     .bind(subject_id)
-    .bind(&day)
-    .execute(&mut *tx)
+    .bind(today())
+    .bind(quota)
+    .fetch_optional(executor)
     .await?;
-    tx.commit().await?;
-    Ok(Charge {
-        allowed: true,
-        retry_after_secs: 0,
-        used: used + 1,
-        quota,
-    })
+    Ok(row.is_some())
 }
 
 pub async fn hits(db: &Database) -> Result<Vec<UsageHit>, AppError> {
