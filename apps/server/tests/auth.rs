@@ -340,7 +340,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
         "POST",
         "/api/monitors",
         Some(json!({
-            "name": "API", "job_type": "http", "url": "https://ops:hunter2@example.com/health", "method": "POST",
+            "name": "API", "job_type": "http", "url": "https://ops:hunter2@example.com/health?api_key=abc", "method": "POST",
             "headers": [{"name": "Authorization", "value": "Bearer secret"}],
             "body": "{\"token\":\"secret\"}"
         })),
@@ -358,18 +358,37 @@ async fn members_read_monitors_without_request_headers_or_body() {
         json!([{"name": "Authorization", "value": "Bearer secret"}])
     );
     assert_eq!(admin.body["body"], "{\"token\":\"secret\"}");
-    assert_eq!(admin.body["url"], "https://ops:hunter2@example.com/health");
+    assert_eq!(
+        admin.body["url"],
+        "https://ops:hunter2@example.com/health?api_key=abc"
+    );
 
     let seen = call(&app.router, "GET", &detail, None, Some(&member), &[]).await;
     assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
     assert_eq!(seen.body["headers"], json!([]));
     assert_eq!(seen.body["body"], "");
     assert_eq!(seen.body["url"], "https://example.com/health");
-    let list = call(&app.router, "GET", "/api/monitors", None, Some(&member), &[]).await;
+    let list = call(
+        &app.router,
+        "GET",
+        "/api/monitors",
+        None,
+        Some(&member),
+        &[],
+    )
+    .await;
     assert_eq!(list.body[0]["headers"], json!([]));
     assert_eq!(list.body[0]["body"], "");
     assert_eq!(list.body[0]["url"], "https://example.com/health");
-    let overview = call(&app.router, "GET", "/api/overview", None, Some(&member), &[]).await;
+    let overview = call(
+        &app.router,
+        "GET",
+        "/api/overview",
+        None,
+        Some(&member),
+        &[],
+    )
+    .await;
     assert_eq!(overview.body["monitors"][0]["headers"], json!([]));
     assert_eq!(overview.body["monitors"][0]["body"], "");
 }
