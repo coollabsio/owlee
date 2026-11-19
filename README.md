@@ -22,6 +22,14 @@ Owlee is a self-hosted uptime monitor, status page, incident desk, error tracker
 - A link shortener. Links live on a hostname you add, and also at `/go/{slug}` on this server, with click counts, referrers, and an optional public page.
 - Error tracking. Create a project, copy its Sentry DSN, and point an official Sentry SDK at it. Issues group on a fingerprint, with a short id such as `CHECKOUT-1`, stack traces, breadcrumbs, tags, and the raw event.
 
+## Planned
+
+These features are not built yet. The idea comes from [DataCat](https://github.com/replit/datacat). The design is in [docs/specs/2026-11-19-observability-design.md](docs/specs/2026-11-19-observability-design.md).
+
+- Metrics. Receive OpenTelemetry (OTLP/HTTP) metrics, show charts, and alert when a value crosses a line.
+- Logs. Receive OTLP logs, search and filter them, show a live tail, and link a log line to its trace and error.
+- Traces. Receive OTLP traces, show a service list and a span waterfall, and link a trace to its error issue.
+
 ## Run it
 
 You need Rust 1.99 (see `rust-toolchain.toml`) and [Bun](https://bun.sh) 1.2 or newer.
