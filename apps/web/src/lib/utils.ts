@@ -5,6 +5,17 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
+  return allowed.find((item) => item === value) ?? fallback;
+}
+
+/** Splits an issue title like `TypeError: x is undefined` into its type and message. */
+export function splitTitle(title: string) {
+  const index = title.indexOf(": ");
+  if (index <= 0) return { type: title, message: "" };
+  return { type: title.slice(0, index), message: title.slice(index + 2) };
+}
+
 export function percent(value?: number | null) {
   if (value == null || Number.isNaN(value)) return "-";
   return `${(value * 100).toFixed(2)}%`;

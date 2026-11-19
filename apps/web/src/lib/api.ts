@@ -516,7 +516,8 @@ export type IssueFeed = {
   truncated: boolean;
 };
 
-export type TagCount = { key: string; value: string; count: number };
+/** One tag key with its most common values among the events in range. */
+export type TagGroup = { key: string; values: { value: string; count: number }[] };
 
 export type EventSummary = {
   id: string;
@@ -525,6 +526,8 @@ export type EventSummary = {
   title: string;
   environment?: string | null;
   release?: string | null;
+  /** Email, username, or id from the event's user. */
+  user?: string | null;
 };
 
 export type Frame = {
@@ -582,11 +585,17 @@ export type NormalizedEvent = {
   raw: unknown;
 };
 
+/** `periodEventCount` and `userCount` cover the filtered range. */
 export type IssueDetail = Issue & {
+  /** Newest first, filtered, at most 100. */
   events: EventSummary[];
+  /** The newest filtered event. */
   latest: NormalizedEvent | null;
+  /** The issue's oldest and newest stored events, ignoring filters. */
+  firstEventId: string | null;
+  latestEventId: string | null;
+  /** Every environment in the issue's project. */
+  environments: string[];
   histogram: number[];
-  periodEvents: number;
-  users: number;
-  tags: TagCount[];
+  tags: TagGroup[];
 };

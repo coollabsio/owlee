@@ -7,7 +7,8 @@ import { Badge } from "@/components/issue-badge";
 import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
 import { api, type Issue, type IssueFeed, type Project } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
-import { cn, fullTime, timeAgo } from "@/lib/utils";
+import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
+import type { IssueLocationState } from "@/pages/issue-detail";
 
 const statuses = [
   { id: "unresolved", label: "Unresolved" },
@@ -36,10 +37,6 @@ type Filters = {
 };
 
 const defaults: Filters = { status: "unresolved", project: "", environment: "", since: "14d", q: "", sort: "last_seen" };
-
-function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
-  return allowed.find((item) => item === value) ?? fallback;
-}
 
 function parseFilters(params: URLSearchParams): Filters {
   return {
@@ -318,7 +315,9 @@ export function IssuesPage() {
                     onCheck={
                       canEdit ? (checked) => select(checked ? [...selected, issue.id] : selected.filter((id) => id !== issue.id)) : undefined
                     }
-                    onOpen={() => navigate(`/errors/${issue.shortId || issue.id}`)}
+                    onOpen={() =>
+                      navigate(`/errors/${issue.shortId || issue.id}`, { state: { listSearch: viewQuery } satisfies IssueLocationState })
+                    }
                   />
                 ))}
               </tbody>
@@ -483,10 +482,4 @@ function Token({ label, onRemove }: { label: string; onRemove: () => void }) {
       </button>
     </span>
   );
-}
-
-export function splitTitle(title: string) {
-  const index = title.indexOf(": ");
-  if (index <= 0) return { type: title, message: "" };
-  return { type: title.slice(0, index), message: title.slice(index + 2) };
 }

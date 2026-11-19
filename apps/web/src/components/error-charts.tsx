@@ -20,7 +20,7 @@ export function Sparkline({ values }: { values: number[] }) {
 export function Histogram({ values }: { values: number[] }) {
   const max = Math.max(1, ...values);
   return (
-    <div className="flex h-24 items-end gap-px">
+    <div className="flex h-14 items-end gap-px">
       {values.map((value, index) => (
         <div
           key={index}

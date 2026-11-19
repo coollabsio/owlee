@@ -514,6 +514,14 @@ textarea.input {
   background: rgb(255 255 255 / 0.05);
 }
 
+.cool-table tbody tr[aria-selected="true"] td {
+  background: var(--ui-hover);
+}
+
+.cool-table tbody tr[aria-selected="true"] td:first-child {
+  box-shadow: inset 2px 0 0 var(--ui-accent);
+}
+
 .cool-table tbody tr.clickable-row:focus-within td {
   box-shadow: inset 0 1px 0 var(--color-accent), inset 0 -1px 0 var(--color-accent);
 }

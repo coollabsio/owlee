@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
+import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, useCopy } from "@/components/ui";
 import { api, type Project } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
@@ -316,7 +316,7 @@ function GuideStep({ number, title, children }: { number: number; title: string;
 }
 
 function CodeBlock({ file, code }: GuideCode) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
   return (
     <div className="min-w-0">
       <div className="field-label">
@@ -324,11 +324,7 @@ function CodeBlock({ file, code }: GuideCode) {
         <button
           type="button"
           className="ml-auto text-[11px] font-normal hover:text-[var(--ui-fg)]"
-          onClick={async () => {
-            await navigator.clipboard.writeText(code);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
-          }}
+          onClick={() => copy(code)}
         >
           {copied ? "Copied" : "Copy"}
         </button>
@@ -341,7 +337,7 @@ function CodeBlock({ file, code }: GuideCode) {
 }
 
 function DsnCard({ dsn }: { dsn: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopy();
   return (
     <LayerCard
       title="Sentry DSN"
@@ -349,10 +345,7 @@ function DsnCard({ dsn }: { dsn: string }) {
       actions={
         <Button
           variant="highlighted"
-          onClick={async () => {
-            await navigator.clipboard.writeText(dsn);
-            setCopied(true);
-          }}
+          onClick={() => copy(dsn)}
         >
           {copied ? "Copied" : "Copy DSN"}
         </Button>

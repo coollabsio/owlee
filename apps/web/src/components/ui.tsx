@@ -352,3 +352,17 @@ export function ErrorText({ error }: { error: unknown }) {
   if (!error) return null;
   return <p className="field-error">{error instanceof Error ? error.message : "Something went wrong."}</p>;
 }
+
+/** `copied` stays true for a moment after each successful `copy`, for "Copied" feedback. */
+export function useCopy() {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  async function copy(text: string) {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1500);
+  }
+  return { copied, copy };
+}
