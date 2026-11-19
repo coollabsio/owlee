@@ -18,7 +18,7 @@ use maxminddb::Reader;
 use sqlx::Row;
 
 pub use limit::RateLimiter;
-pub use routes::{api_routes, fallback, public_routes};
+pub use routes::{api_routes, fallback, ingest_routes, public_routes};
 pub use seed::seed_demo;
 
 pub struct Runtime {

@@ -29,6 +29,10 @@ pub struct AppState {
     pub analytics_ip_limit: Arc<TokenBucket>,
     pub login_ip_limit: Arc<TokenBucket>,
     pub login_account_limit: Arc<TokenBucket>,
+    /// Account mails per address, so the auth routes cannot flood an inbox.
+    pub mail_address_limit: Arc<TokenBucket>,
+    /// Tests set this to read account mails instead of sending them.
+    pub outbox: Option<crate::notify::Outbox>,
     pub dns: Arc<dyn TxtResolver>,
     pub geo: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
 }
@@ -101,7 +105,7 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
     let insights = crate::insights::prepare(&database, &config)
         .await
         .map_err(|error| BootError::Config(error.to_string()))?;
-    crate::instance_settings::apply_quota_env(&database, &config.ingest)
+    crate::instance_settings::apply_quota_env(&database, &config.ingest, &config.app_key)
         .await
         .map_err(|error| BootError::Config(error.to_string()))?;
     let ingest = &config.ingest;
@@ -138,6 +142,8 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
             ingest.login_rate_account_per_min,
             ingest.login_rate_account_burst,
         )),
+        mail_address_limit: Arc::new(TokenBucket::per_hour(3, 3)),
+        outbox: None,
         dns: Arc::new(SystemResolver::from_system()),
         geo: insights.geo,
         config: Arc::new(config),
@@ -184,7 +190,35 @@ pub fn testing_config(path: PathBuf) -> Config {
         trusted_proxies: owlee_platform::default_trusted_proxies(),
         geoip_path: None,
         ingest: owlee_platform::IngestConfig::default(),
+        app_key: owlee_platform::AppKey::DEVELOPMENT,
     }
+}
+
+/// Signs in a new admin without mail, for tests on a reused database where
+/// setup already ran. Returns the `name=value` cookie pair.
+pub async fn editor_session(state: &AppState) -> Result<String, sqlx::Error> {
+    use owlee_platform::{Id, TimestampMillis, generate_token, hash_token};
+
+    let now = TimestampMillis::now();
+    let id = Id::new();
+    let email = format!("editor-{id}@example.com");
+    crate::repo::insert_user(
+        &state.db, id, &email, &email, "Editor", "unusable", "admin", now,
+    )
+    .await?;
+    let token = generate_token();
+    let later = TimestampMillis::from_millis(now.as_millis() + 86_400_000);
+    crate::repo::insert_session(
+        &state.db,
+        Id::new(),
+        &hash_token(&token),
+        id,
+        now,
+        later,
+        later,
+    )
+    .await?;
+    Ok(format!("owlee_session={token}"))
 }
 
 #[derive(Debug, Error)]

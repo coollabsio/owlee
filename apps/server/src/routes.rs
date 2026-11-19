@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post, put};
+use axum::extract::{Path, Request, State};
+use axum::http::header::{AUTHORIZATION, ORIGIN};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post, put};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use owlee_domain::{
     Assertion, CheckType, HeaderPair, IncidentImpact, IncidentStatus, JobType, MonitorInput,
@@ -22,9 +24,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::engine;
 use crate::error::AppError;
-use crate::peer::Client;
 use crate::instance_settings::{self, SmtpInput};
 use crate::notify;
+use crate::peer::Client;
 use crate::present::{self, Stats};
 use crate::repo::{
     self, Agent, Channel, Incident, IncidentUpdate, Maintenance, Monitor, Page, User,
@@ -33,20 +35,25 @@ use crate::seed::{DEMO_EMAIL, DEMO_PASSWORD};
 use crate::setup::{self, NewOwner};
 use crate::state::{self, AppState};
 
-const COOKIE: &str = "owlee_session";
 const DAY_MS: i64 = 86_400_000;
 
 pub fn router(state: AppState) -> Router {
-    let api = Router::new()
+    let cookie_api = Router::new()
         .route("/health", get(health))
         .route("/health/ready", get(ready))
         .route("/meta", get(meta))
         .route("/auth/register", post(register))
+        .route("/auth/register/complete", post(register_complete))
+        .route("/auth/recovery", post(recovery))
+        .route("/auth/recovery/complete", post(recovery_complete))
         .route("/auth/login", post(login))
         .route("/setup/status", get(setup_status))
         .route("/setup/complete", post(setup_complete))
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
+        .route("/auth/password", post(change_password))
+        .route("/auth/sessions", get(list_sessions))
+        .route("/auth/sessions/{id}", delete(revoke_session))
         .route("/admin/settings", get(admin_settings))
         .route("/admin/settings/registration", put(set_registration))
         .route("/admin/settings/quotas", put(set_quotas))
@@ -63,10 +70,7 @@ pub fn router(state: AppState) -> Router {
         .route("/monitors/{id}/checks", post(run_check))
         .route("/monitors/{id}/active", post(set_active))
         .route("/agents", get(list_agents).post(create_agent))
-        .route("/agents/{id}", axum::routing::delete(delete_agent))
-        .route("/agent/checks", post(agent_checks))
-        .route("/agent/heartbeat", post(agent_heartbeat))
-        .route("/agent/results", post(agent_result))
+        .route("/agents/{id}", delete(delete_agent))
         .route("/pages", get(list_pages).post(create_page))
         .route(
             "/pages/{id}",
@@ -79,19 +83,24 @@ pub fn router(state: AppState) -> Router {
             "/maintenances",
             get(list_maintenances).post(create_maintenance),
         )
-        .route(
-            "/maintenances/{id}",
-            axum::routing::delete(delete_maintenance),
-        )
+        .route("/maintenances/{id}", delete(delete_maintenance))
         .route("/notifications", get(list_channels).post(create_channel))
         .route(
             "/notifications/{id}",
-            axum::routing::put(update_channel).delete(delete_channel),
+            put(update_channel).delete(delete_channel),
         )
         .route("/notifications/{id}/test", post(test_channel))
         .route("/public/{slug}", get(public_page))
         .merge(crate::insights::api_routes())
         .merge(crate::errors::api_routes())
+        .route_layer(middleware::from_fn_with_state(state.clone(), same_origin));
+    // Bearer-token agents and public ingest are called from other origins on purpose.
+    let api = cookie_api
+        .route("/agent/checks", post(agent_checks))
+        .route("/agent/heartbeat", post(agent_heartbeat))
+        .route("/agent/results", post(agent_result))
+        .merge(crate::insights::ingest_routes())
+        .merge(crate::errors::ingest_routes())
         .fallback(api_missing);
     Router::new()
         .nest("/api", api)
@@ -104,6 +113,30 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Cross-site request forgery guard for the cookie routes. `SameSite=Lax`
+/// alone still lets a sibling subdomain post with the cookie.
+async fn same_origin(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if !matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        return next.run(request).await;
+    }
+    let headers = request.headers();
+    let allowed = match headers.get(ORIGIN) {
+        Some(origin) => {
+            origin.as_bytes() == state.config.public_origin.trim_end_matches('/').as_bytes()
+        }
+        None => headers
+            .get("sec-fetch-site")
+            .is_none_or(|site| site.as_bytes() != b"cross-site"),
+    };
+    if !allowed {
+        return AppError::Forbidden("This request came from another site.").into_response();
+    }
+    next.run(request).await
 }
 
 async fn health() -> Json<Value> {
@@ -119,7 +152,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
 
 async fn meta(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let setup_complete = setup::is_complete(&state.db).await?;
-    let settings = instance_settings::load(&state.db).await?;
+    let settings = instance_settings::load(&state.db, &state.config.app_key).await?;
     let demo = if state.config.environment.as_str() == "development" && setup_complete {
         json!({ "email": DEMO_EMAIL, "password": DEMO_PASSWORD })
     } else {
@@ -140,45 +173,110 @@ async fn api_missing() -> AppError {
 }
 
 #[derive(Deserialize)]
-struct AuthBody {
+struct LoginBody {
     email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct EmailBody {
+    email: String,
+}
+
+const REGISTER_LINK_MS: i64 = DAY_MS;
+const RECOVERY_LINK_MS: i64 = 3_600_000;
+
+/// Always 202 while registration is open, so the answer does not tell whether
+/// the address has an account. Both cases send one mail.
+async fn register(
+    State(state): State<AppState>,
+    client: Client,
+    Json(body): Json<EmailBody>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    limit_auth_ip(&state, &client.ip)?;
+    let normalized = request_email(&body.email)?;
+    ensure_signup_open(&state).await?;
+    if mail_allowed(&state, &normalized) {
+        let origin = &state.config.public_origin;
+        let (subject, text) = if repo::user_by_email(&state.db, &normalized).await?.is_some() {
+            (
+                "You already have an Owlee account",
+                format!(
+                    "Someone asked to create an Owlee account with this email address, but you already have one.\n\n\
+                     Sign in: {origin}/login\n\
+                     Forgot your password? Reset it: {origin}/forgot-password\n\n\
+                     If this was not you, ignore this email."
+                ),
+            )
+        } else {
+            let token = generate_token();
+            let now = TimestampMillis::now();
+            repo::insert_email_token(
+                &state.db,
+                &hash_token(&token),
+                repo::Purpose::Register,
+                &normalized,
+                None,
+                now,
+                TimestampMillis::from_millis(now.as_millis() + REGISTER_LINK_MS),
+            )
+            .await?;
+            (
+                "Finish creating your Owlee account",
+                format!(
+                    "Open this link to finish creating your Owlee account:\n\n\
+                     {origin}/register/complete?token={token}\n\n\
+                     The link works once, for 24 hours. If you did not ask for it, ignore this email."
+                ),
+            )
+        };
+        notify::send_account_mail(&state, &normalized, subject, text).await;
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({}))))
+}
+
+#[derive(Deserialize)]
+struct RegisterCompleteBody {
+    token: String,
     password: String,
     display_name: Option<String>,
 }
 
-async fn register(
+async fn register_complete(
     State(state): State<AppState>,
     client: Client,
     jar: CookieJar,
-    Json(body): Json<AuthBody>,
-) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
+    Json(body): Json<RegisterCompleteBody>,
+) -> Result<(StatusCode, CookieJar, Json<present::UserResponse>), AppError> {
     limit_auth_ip(&state, &client.ip)?;
-    let account = account_fields(&body.email, body.display_name)?;
-    if let Err(error) = state.passwords.validate(&body.password) {
-        return Err(password_field(error));
-    }
-    // The first account is created only with the setup token. Later accounts need
-    // the root user to open registration after a mail server is saved.
-    let settings = instance_settings::load(&state.db).await?;
-    let setup_complete = setup::is_complete(&state.db).await?;
-    if !settings.signup_open(state.config.smtp.is_some(), setup_complete) {
-        return Err(AppError::RegistrationClosed);
-    }
-    let count = repo::count_users(&state.db).await?;
-    if repo::user_by_email(&state.db, &account.normalized)
-        .await?
-        .is_some()
-    {
-        return Err(AppError::Conflict(
-            "An account with that email already exists.".into(),
-        ));
-    }
+    state
+        .passwords
+        .validate(&body.password)
+        .map_err(password_field)?;
+    let display_name = display_name_field(body.display_name)?;
+    ensure_signup_open(&state).await?;
     let hash = state::hash_password(&state.passwords, body.password)
         .await
         .map_err(password_field)?;
     let now = TimestampMillis::now();
+    let Some(token) = repo::consume_email_token(
+        &state.db,
+        &hash_token(&body.token),
+        repo::Purpose::Register,
+        now,
+    )
+    .await?
+    else {
+        return Err(invalid_link());
+    };
+    let account = account_fields(&token.email, display_name)?;
+    if repo::user_by_email(&state.db, &account.normalized)
+        .await?
+        .is_some()
+    {
+        return Err(invalid_link());
+    }
     let id = Id::new();
-    let role = if count == 0 { "owner" } else { "member" };
     repo::insert_user(
         &state.db,
         id,
@@ -186,11 +284,11 @@ async fn register(
         &account.normalized,
         &account.display_name,
         &hash,
-        role,
+        "member",
         now,
     )
     .await?;
-    let user = repo::user_by_email(&state.db, &account.normalized)
+    let user = repo::user_by_id(&state.db, id)
         .await?
         .ok_or(AppError::Internal)?;
     let jar = issue_session(&state, jar, &user, now).await?;
@@ -203,7 +301,234 @@ async fn register(
         now,
     )
     .await;
+    Ok((
+        StatusCode::CREATED,
+        jar,
+        Json(user_response(&state, &user).await?),
+    ))
+}
+
+/// Always 202, with or without an account for the address.
+async fn recovery(
+    State(state): State<AppState>,
+    client: Client,
+    Json(body): Json<EmailBody>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    limit_auth_ip(&state, &client.ip)?;
+    let normalized = request_email(&body.email)?;
+    if mail_allowed(&state, &normalized)
+        && let Some(user) = repo::user_by_email(&state.db, &normalized).await?
+    {
+        let token = generate_token();
+        let now = TimestampMillis::now();
+        repo::insert_email_token(
+            &state.db,
+            &hash_token(&token),
+            repo::Purpose::Recovery,
+            &normalized,
+            Some(user.id),
+            now,
+            TimestampMillis::from_millis(now.as_millis() + RECOVERY_LINK_MS),
+        )
+        .await?;
+        let origin = &state.config.public_origin;
+        let text = format!(
+            "Open this link to choose a new Owlee password:\n\n\
+             {origin}/reset-password?token={token}\n\n\
+             The link works once, for 1 hour. If you did not ask for it, ignore this email; your password stays the same."
+        );
+        notify::send_account_mail(&state, &normalized, "Reset your Owlee password", text).await;
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({}))))
+}
+
+#[derive(Deserialize)]
+struct RecoveryCompleteBody {
+    token: String,
+    password: String,
+}
+
+async fn recovery_complete(
+    State(state): State<AppState>,
+    client: Client,
+    jar: CookieJar,
+    Json(body): Json<RecoveryCompleteBody>,
+) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
+    limit_auth_ip(&state, &client.ip)?;
+    state
+        .passwords
+        .validate(&body.password)
+        .map_err(password_field)?;
+    let hash = state::hash_password(&state.passwords, body.password)
+        .await
+        .map_err(password_field)?;
+    let now = TimestampMillis::now();
+    let token = repo::consume_email_token(
+        &state.db,
+        &hash_token(&body.token),
+        repo::Purpose::Recovery,
+        now,
+    )
+    .await?;
+    let Some(user_id) = token.and_then(|token| token.user_id) else {
+        return Err(invalid_link());
+    };
+    let Some(user) = repo::user_by_id(&state.db, user_id).await? else {
+        return Err(invalid_link());
+    };
+    repo::revoke_user_sessions(&state.db, user.id, None, now).await?;
+    repo::set_password(&state.db, user.id, &hash, now).await?;
+    state
+        .login_account_limit
+        .forget(&login_account_key(&normalize_email(&user.email)));
+    let jar = issue_session(&state, jar, &user, now).await?;
+    let _ = repo::insert_audit(
+        &state.db,
+        Some(user.id),
+        "auth.password_reset",
+        "user",
+        Some(&user.id.to_string()),
+        now,
+    )
+    .await;
     Ok((jar, Json(user_response(&state, &user).await?)))
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<PasswordBody>,
+) -> Result<StatusCode, AppError> {
+    let user = require_user(&state, &jar).await?;
+    let account_key = login_account_key(&normalize_email(&user.email));
+    let account_limit = state.login_account_limit.peek(&account_key);
+    if !account_limit.allowed {
+        return Err(AppError::limited(account_limit.retry_after_secs));
+    }
+    let valid = state::verify_password(
+        &state.passwords,
+        body.current_password,
+        user.password_hash.clone(),
+    )
+    .await
+    .unwrap_or(false);
+    if !valid {
+        state.login_account_limit.check(&account_key);
+        return Err(AppError::field(
+            "current_password",
+            "The current password is wrong.",
+        ));
+    }
+    state
+        .passwords
+        .validate(&body.new_password)
+        .map_err(|error| AppError::field("new_password", error.to_string()))?;
+    let hash = state::hash_password(&state.passwords, body.new_password)
+        .await
+        .map_err(|error| AppError::field("new_password", error.to_string()))?;
+    let now = TimestampMillis::now();
+    repo::set_password(&state.db, user.id, &hash, now).await?;
+    let current = session_token_hash(&state, &jar);
+    repo::revoke_user_sessions(&state.db, user.id, current.as_deref(), now).await?;
+    let _ = repo::insert_audit(
+        &state.db,
+        Some(user.id),
+        "auth.password_changed",
+        "user",
+        Some(&user.id.to_string()),
+        now,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Json<Value>, AppError> {
+    let user = require_user(&state, &jar).await?;
+    let current = session_token_hash(&state, &jar);
+    let sessions = repo::list_sessions(&state.db, user.id, TimestampMillis::now()).await?;
+    Ok(Json(json!(
+        sessions
+            .iter()
+            .map(|session| json!({
+                "id": session.id,
+                "created_at": session.created_at,
+                "last_activity_at": session.last_activity_at,
+                "current": current.as_deref() == Some(session.token_hash.as_str()),
+            }))
+            .collect::<Vec<_>>()
+    )))
+}
+
+/// Only the caller's own live sessions are found, so another user's id is a 404.
+async fn revoke_session(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<Id>,
+) -> Result<(CookieJar, StatusCode), AppError> {
+    let user = require_user(&state, &jar).await?;
+    let now = TimestampMillis::now();
+    let session = repo::list_sessions(&state.db, user.id, now)
+        .await?
+        .into_iter()
+        .find(|session| session.id == id)
+        .ok_or(AppError::NotFound)?;
+    repo::revoke_token(&state.db, &session.token_hash, now).await?;
+    let jar = if session_token_hash(&state, &jar).as_deref() == Some(session.token_hash.as_str()) {
+        jar.remove(expired_cookie(&state))
+    } else {
+        jar
+    };
+    Ok((jar, StatusCode::NO_CONTENT))
+}
+
+fn request_email(email: &str) -> Result<String, AppError> {
+    let normalized = normalize_email(email);
+    if valid_email(&normalized) {
+        Ok(normalized)
+    } else {
+        Err(AppError::field("email", "Enter a valid email address."))
+    }
+}
+
+/// The first account is created only with the setup token. Later accounts need
+/// the root user to open registration after a mail server is saved.
+async fn ensure_signup_open(state: &AppState) -> Result<(), AppError> {
+    let settings = instance_settings::load(&state.db, &state.config.app_key).await?;
+    let setup_complete = setup::is_complete(&state.db).await?;
+    if settings.signup_open(state.config.smtp.is_some(), setup_complete) {
+        Ok(())
+    } else {
+        Err(AppError::RegistrationClosed)
+    }
+}
+
+/// A few account mails per address an hour. Over that, the route still
+/// answers 202 and sends nothing.
+fn mail_allowed(state: &AppState, normalized_email: &str) -> bool {
+    state
+        .mail_address_limit
+        .check(&hash_token(normalized_email))
+        .allowed
+}
+
+fn invalid_link() -> AppError {
+    AppError::field(
+        "token",
+        "This link is invalid or has expired. Ask for a new one.",
+    )
+}
+
+fn login_account_key(normalized_email: &str) -> String {
+    format!("login-account:{}", hash_token(normalized_email))
 }
 
 async fn setup_status(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
@@ -275,13 +600,13 @@ async fn login(
     State(state): State<AppState>,
     client: Client,
     jar: CookieJar,
-    Json(body): Json<AuthBody>,
+    Json(body): Json<LoginBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
     let normalized = normalize_email(&body.email);
     limit_auth_ip(&state, &client.ip)?;
     // Only failed passwords cost the account a token, so a user who types the
     // right password is not locked out by someone else's guesses for long.
-    let account_key = format!("login-account:{}", hash_token(&normalized));
+    let account_key = login_account_key(&normalized);
     let account_limit = state.login_account_limit.peek(&account_key);
     if !account_limit.allowed {
         return Err(AppError::limited(account_limit.retry_after_secs));
@@ -315,7 +640,7 @@ async fn login(
     Ok((jar, Json(user_response(&state, &user).await?)))
 }
 
-/// Login, register, and setup share one bucket per client IP.
+/// Login, register, recovery, and setup share one bucket per client IP.
 fn limit_auth_ip(state: &AppState, ip: &str) -> Result<(), AppError> {
     let decision = state.login_ip_limit.check(&format!("auth-ip:{ip}"));
     if decision.allowed {
@@ -342,12 +667,10 @@ async fn logout(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<(CookieJar, StatusCode), AppError> {
-    if let Some(token) = jar.get(COOKIE).map(|cookie| cookie.value().to_owned()) {
-        repo::revoke_token(&state.db, &hash_token(&token), TimestampMillis::now()).await?;
+    if let Some(token_hash) = session_token_hash(&state, &jar) {
+        repo::revoke_token(&state.db, &token_hash, TimestampMillis::now()).await?;
     }
-    let mut expired = Cookie::from(COOKIE);
-    expired.set_path("/");
-    Ok((jar.remove(expired), StatusCode::NO_CONTENT))
+    Ok((jar.remove(expired_cookie(&state)), StatusCode::NO_CONTENT))
 }
 
 async fn me(
@@ -420,7 +743,7 @@ async fn save_smtp(
     Json(body): Json<SmtpBody>,
 ) -> Result<Json<Value>, AppError> {
     let actor = require_root(&state, &jar).await?;
-    let input = smtp_input(&body)?;
+    let input = smtp_input(&body, &state.config.app_key)?;
     let now = TimestampMillis::now();
     instance_settings::save_smtp(&state.db, input, now).await?;
     let _ = repo::insert_audit(
@@ -458,7 +781,7 @@ async fn admin_users(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Value>, AppError> {
-    require_installation_admin(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let root_id = instance_settings::root_user_id(&state.db).await?;
     let accounts = repo::list_accounts(&state.db).await?;
     let users = accounts
@@ -514,7 +837,7 @@ async fn set_installation_admin(
 }
 
 async fn settings_body(state: &AppState) -> Result<Value, AppError> {
-    let settings = instance_settings::load(&state.db).await?;
+    let settings = instance_settings::load(&state.db, &state.config.app_key).await?;
     let env_smtp = state.config.smtp.is_some();
     Ok(json!({
         "registration_open": settings.registration_open,
@@ -610,7 +933,7 @@ fn account_body(account: &repo::Account, root_id: Option<Id>) -> Value {
     })
 }
 
-fn smtp_input(body: &SmtpBody) -> Result<SmtpInput, AppError> {
+fn smtp_input(body: &SmtpBody, key: &owlee_platform::AppKey) -> Result<SmtpInput, AppError> {
     let host = body.host.trim();
     if host.is_empty()
         || host.len() > 253
@@ -656,18 +979,26 @@ fn smtp_input(body: &SmtpBody) -> Result<SmtpInput, AppError> {
         host: host.to_owned(),
         port,
         username,
-        password,
+        sealed_password: password.map(|password| {
+            crate::secret_box::seal(key, instance_settings::SMTP_PASSWORD_AAD, &password)
+        }),
         from: from.to_owned(),
     })
 }
 
 async fn overview(State(state): State<AppState>, jar: CookieJar) -> Result<Json<Value>, AppError> {
-    let _user = require_user(&state, &jar).await?;
+    let user = require_user(&state, &jar).await?;
+    let editor = is_editor(&state, &user).await?;
     let stats = load_stats(&state).await?;
     let monitors = repo::list_monitors(&state.db).await?;
     let monitors = monitors
         .iter()
-        .map(|monitor| present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()))
+        .map(|monitor| {
+            monitor_view(
+                editor,
+                present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
+            )
+        })
         .collect::<Vec<_>>();
     let incidents = open_incident_views(&state).await?;
     let activity = repo::recent_audit(&state.db, 12).await?;
@@ -701,13 +1032,19 @@ async fn list_monitors(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Vec<present::MonitorResponse>>, AppError> {
-    require_user(&state, &jar).await?;
+    let user = require_user(&state, &jar).await?;
+    let editor = is_editor(&state, &user).await?;
     let stats = load_stats(&state).await?;
     let monitors = repo::list_monitors(&state.db).await?;
     Ok(Json(
         monitors
             .iter()
-            .map(|monitor| present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()))
+            .map(|monitor| {
+                monitor_view(
+                    editor,
+                    present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
+                )
+            })
             .collect(),
     ))
 }
@@ -717,7 +1054,7 @@ async fn create_monitor(
     jar: CookieJar,
     Json(body): Json<MonitorBody>,
 ) -> Result<(StatusCode, Json<present::MonitorResponse>), AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let input = monitor_input(body);
     validate_monitor(&input).map_err(AppError::Validation)?;
     let now = TimestampMillis::now();
@@ -749,8 +1086,9 @@ async fn get_monitor(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    require_user(&state, &jar).await?;
-    Ok(Json(detail(&state, id).await?))
+    let user = require_user(&state, &jar).await?;
+    let editor = is_editor(&state, &user).await?;
+    Ok(Json(monitor_view(editor, detail(&state, id).await?)))
 }
 
 async fn update_monitor(
@@ -759,7 +1097,7 @@ async fn update_monitor(
     Path(id): Path<Id>,
     Json(body): Json<MonitorBody>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let existing = repo::get_monitor(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -789,7 +1127,7 @@ async fn delete_monitor(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     if !repo::delete_monitor(&state.db, id).await? {
         return Err(AppError::NotFound);
     }
@@ -810,7 +1148,7 @@ async fn run_check(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let monitor = repo::get_monitor(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -840,7 +1178,7 @@ async fn create_agent(
     jar: CookieJar,
     Json(body): Json<AgentBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let name = body.name.trim();
     if name.is_empty() || name.chars().count() > 60 {
         return Err(AppError::field("name", "Use 1 to 60 characters."));
@@ -877,7 +1215,7 @@ async fn delete_agent(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let agent = repo::get_agent(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1020,7 +1358,7 @@ async fn set_active(
     Path(id): Path<Id>,
     Json(body): Json<ActiveBody>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let monitor = repo::get_monitor(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1063,7 +1401,7 @@ async fn create_page(
     jar: CookieJar,
     Json(body): Json<PageBody>,
 ) -> Result<(StatusCode, Json<present::PageResponse>), AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let (title, description, slug, homepage) = validate_page(&body)?;
     if repo::page_by_slug(&state.db, &slug).await?.is_some() {
         return Err(AppError::Conflict(
@@ -1119,7 +1457,7 @@ async fn update_page(
     Path(id): Path<Id>,
     Json(body): Json<PageBody>,
 ) -> Result<Json<present::PageResponse>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let existing = repo::get_page(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1154,7 +1492,7 @@ async fn delete_page(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     if !repo::delete_page(&state.db, id).await? {
         return Err(AppError::NotFound);
     }
@@ -1192,7 +1530,7 @@ async fn create_incident(
     jar: CookieJar,
     Json(body): Json<IncidentBody>,
 ) -> Result<(StatusCode, Json<present::IncidentResponse>), AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let (title, message) = validate_incident(&body.title, &body.message)?;
     ensure_links(&state, body.page_id, body.monitor_id).await?;
     let now = TimestampMillis::now();
@@ -1256,7 +1594,7 @@ async fn add_update(
     Path(id): Path<Id>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<present::IncidentResponse>, AppError> {
-    let user = require_user(&state, &jar).await?;
+    let user = require_editor(&state, &jar).await?;
     let incident = repo::get_incident(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1306,7 +1644,7 @@ async fn delete_incident(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let result = sqlx::query("DELETE FROM incidents WHERE id = $1")
         .bind(id.to_string())
         .execute(state.db.pool())
@@ -1346,7 +1684,7 @@ async fn create_maintenance(
     jar: CookieJar,
     Json(body): Json<MaintenanceBody>,
 ) -> Result<(StatusCode, Json<present::MaintenanceResponse>), AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let title = body.title.trim().to_owned();
     let message = body.message.trim().to_owned();
     let mut fields = BTreeMap::new();
@@ -1402,7 +1740,7 @@ async fn delete_maintenance(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     if !repo::delete_maintenance(&state.db, id).await? {
         return Err(AppError::NotFound);
     }
@@ -1422,7 +1760,7 @@ async fn list_channels(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Vec<present::ChannelResponse>>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let channels = repo::list_channels(&state.db).await?;
     let mut response = Vec::new();
     for channel in channels {
@@ -1436,7 +1774,7 @@ async fn create_channel(
     jar: CookieJar,
     Json(body): Json<ChannelBody>,
 ) -> Result<(StatusCode, Json<present::ChannelResponse>), AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let (name, provider, config) = validate_channel(&body)?;
     ensure_monitors(&state, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
@@ -1461,7 +1799,7 @@ async fn update_channel(
     Path(id): Path<Id>,
     Json(body): Json<ChannelBody>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let existing = repo::get_channel(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1490,7 +1828,7 @@ async fn delete_channel(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     if !repo::delete_channel(&state.db, id).await? {
         return Err(AppError::NotFound);
     }
@@ -1502,7 +1840,7 @@ async fn test_channel(
     jar: CookieJar,
     Path(id): Path<Id>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let channel = repo::get_channel(&state.db, id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1927,25 +2265,57 @@ async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppErro
     Ok(user)
 }
 
-async fn require_installation_admin(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
+/// Members only read. Every other cookie route that changes data, or shows a
+/// secret, goes through here.
+pub(crate) async fn require_editor(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
     let user = require_user(state, jar).await?;
-    let root_id = instance_settings::root_user_id(&state.db).await?;
-    let admin = root_id == Some(user.id) || user.role == "owner" || user.role == "admin";
-    if !admin {
-        return Err(AppError::Forbidden(
-            "Only an installation admin can view accounts.",
-        ));
+    if !is_editor(state, &user).await? {
+        return Err(AppError::Forbidden("Only an admin can change this."));
     }
     Ok(user)
 }
 
+async fn is_editor(state: &AppState, user: &User) -> Result<bool, AppError> {
+    let root_id = instance_settings::root_user_id(&state.db).await?;
+    Ok(present::UserResponse::with_access(user, root_id).installation_admin)
+}
+
+/// Request headers and bodies often carry API tokens, so members get monitors without them.
+fn monitor_view(editor: bool, mut response: present::MonitorResponse) -> present::MonitorResponse {
+    if !editor {
+        response.headers.clear();
+        response.body.clear();
+    }
+    response
+}
+
 pub(crate) async fn require_user(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
-    let Some(token) = jar.get(COOKIE).map(|cookie| cookie.value().to_owned()) else {
-        return Err(AppError::Unauthorized);
-    };
-    repo::authenticate(&state.db, &hash_token(&token), TimestampMillis::now())
+    let token_hash = session_token_hash(state, jar).ok_or(AppError::Unauthorized)?;
+    repo::authenticate(&state.db, &token_hash, TimestampMillis::now())
         .await?
         .ok_or(AppError::Unauthorized)
+}
+
+/// `__Host-` makes the browser refuse the cookie unless it is Secure, for path
+/// `/`, and set by this host, so a sibling subdomain cannot plant one.
+fn cookie_name(state: &AppState) -> &'static str {
+    if state.config.secure_cookies() {
+        "__Host-owlee_session"
+    } else {
+        "owlee_session"
+    }
+}
+
+fn session_token_hash(state: &AppState, jar: &CookieJar) -> Option<String> {
+    jar.get(cookie_name(state))
+        .map(|cookie| hash_token(cookie.value()))
+}
+
+fn expired_cookie(state: &AppState) -> Cookie<'static> {
+    Cookie::build(cookie_name(state))
+        .path("/")
+        .secure(state.config.secure_cookies())
+        .build()
 }
 
 async fn issue_session(
@@ -1971,11 +2341,12 @@ async fn issue_session(
 }
 
 fn session_jar(state: &AppState, jar: CookieJar, token: String) -> CookieJar {
-    let cookie = Cookie::build((COOKIE, token))
+    let cookie = Cookie::build((cookie_name(state), token))
         .http_only(true)
         .same_site(SameSite::Lax)
         .path("/")
         .secure(state.config.secure_cookies())
+        .max_age(time::Duration::days(90))
         .build();
     jar.add(cookie)
 }
@@ -1992,26 +2363,30 @@ fn account_fields(email: &str, display_name: Option<String>) -> Result<AccountFi
     if !valid_email(&normalized) {
         return Err(AppError::field("email", "Enter a valid email address."));
     }
-    let display_name = display_name.unwrap_or_default().trim().to_owned();
-    let display_name = if display_name.is_empty() {
+    let display_name = display_name_field(display_name)?.unwrap_or_else(|| {
         normalized
             .split('@')
             .next()
             .unwrap_or("Operator")
             .to_owned()
-    } else if display_name.chars().count() > 80 {
-        return Err(AppError::field(
-            "display_name",
-            "Use at most 80 characters.",
-        ));
-    } else {
-        display_name
-    };
+    });
     Ok(AccountFields {
         email: email.to_owned(),
         normalized,
         display_name,
     })
+}
+
+/// `None` when blank, so the caller picks a default.
+fn display_name_field(display_name: Option<String>) -> Result<Option<String>, AppError> {
+    let display_name = display_name.unwrap_or_default().trim().to_owned();
+    if display_name.chars().count() > 80 {
+        return Err(AppError::field(
+            "display_name",
+            "Use at most 80 characters.",
+        ));
+    }
+    Ok(Some(display_name).filter(|name| !name.is_empty()))
 }
 
 fn valid_email(email: &str) -> bool {

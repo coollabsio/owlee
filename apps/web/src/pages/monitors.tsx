@@ -5,6 +5,7 @@ import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
 import { ApiError, api, type Assertion, listAgents, type Monitor } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
 
 type Draft = {
@@ -115,6 +116,7 @@ function MonitorRow({ monitor, subtitle }: { monitor: Monitor; subtitle: string 
 export function MonitorsPage() {
   const query = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors"), refetchInterval: 10_000 });
   const label = useMonitorLabel();
+  const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const needle = search.trim().toLowerCase();
@@ -126,10 +128,10 @@ export function MonitorsPage() {
       <PageHeader
         title="Monitors"
         description="HTTP and TCP checks from this server. Agents add checks from their own config files."
-        actions={<Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button>}
+        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : null}
       />
       {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
-        <Empty title="No monitors" body="Point one at an HTTP URL or a host:port. Checks start on the next scheduler tick." action={<Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button>} />
+        <Empty title="No monitors" body="Point one at an HTTP URL or a host:port. Checks start on the next scheduler tick." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : undefined} />
       ) : (
         <LayerCard title="All monitors" description={query.data ? `${query.data.length} total` : undefined} flush>
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--ui-divider)] p-2">
@@ -164,7 +166,7 @@ export function MonitorsPage() {
           )}
         </LayerCard>
       )}
-      <MonitorDialog open={open} onClose={() => setOpen(false)} />
+      {canEdit ? <MonitorDialog open={open} onClose={() => setOpen(false)} /> : null}
     </div>
   );
 }
@@ -172,6 +174,7 @@ export function MonitorsPage() {
 export function MonitorDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [checksPage, setChecksPage] = useState(0);
@@ -211,10 +214,14 @@ export function MonitorDetailPage() {
         actions={
           <>
             <StatusBadge tone={monitor.active ? stateToneName : "neutral"}>{monitor.active ? stateLabel[monitor.state] : "Paused"}</StatusBadge>
-            {monitor.agent_id ? null : <Button variant="primary" onClick={() => run.mutate()} disabled={run.isPending}>{run.isPending ? "Checking…" : "Run check"}</Button>}
-            <Button onClick={() => pause.mutate(!monitor.active)}>{monitor.active ? "Pause" : "Resume"}</Button>
-            {monitor.agent_id ? null : <Button onClick={() => setEditing(true)}>Edit</Button>}
-            <Button variant="danger" onClick={() => remove.mutate()}>Delete</Button>
+            {canEdit ? (
+              <>
+                {monitor.agent_id ? null : <Button variant="primary" onClick={() => run.mutate()} disabled={run.isPending}>{run.isPending ? "Checking…" : "Run check"}</Button>}
+                <Button onClick={() => pause.mutate(!monitor.active)}>{monitor.active ? "Pause" : "Resume"}</Button>
+                {monitor.agent_id ? null : <Button onClick={() => setEditing(true)}>Edit</Button>}
+                <Button variant="danger" onClick={() => remove.mutate()}>Delete</Button>
+              </>
+            ) : null}
           </>
         }
       />
@@ -279,7 +286,7 @@ export function MonitorDetailPage() {
           </div>
         ) : null}
       </LayerCard>
-      {monitor.agent_id ? null : <MonitorDialog open={editing} onClose={() => setEditing(false)} monitor={monitor} />}
+      {monitor.agent_id || !canEdit ? null : <MonitorDialog open={editing} onClose={() => setEditing(false)} monitor={monitor} />}
     </div>
   );
 }

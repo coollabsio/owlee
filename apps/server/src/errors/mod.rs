@@ -34,6 +34,11 @@ pub fn api_routes() -> Router<AppState> {
             get(http::get_issue).patch(http::update_issue),
         )
         .route("/error-events/{id}", get(http::get_event))
+}
+
+/// Sentry SDK paths. They take a DSN key, not the session cookie.
+pub fn ingest_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/{project_id}/envelope",
             post(ingest::ingest_envelope).options(ingest::ingest_options),

@@ -23,11 +23,17 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn per_minute(per_minute: u32, burst: u32) -> Self {
-        let per_minute = per_minute.max(1);
-        let burst = burst.max(1);
+        Self::new(f64::from(per_minute.max(1)) / 60.0, burst)
+    }
+
+    pub fn per_hour(per_hour: u32, burst: u32) -> Self {
+        Self::new(f64::from(per_hour.max(1)) / 3600.0, burst)
+    }
+
+    fn new(per_sec: f64, burst: u32) -> Self {
         Self {
-            per_sec: f64::from(per_minute) / 60.0,
-            burst: f64::from(burst),
+            per_sec,
+            burst: f64::from(burst.max(1)),
             buckets: Mutex::new(HashMap::new()),
         }
     }
@@ -77,9 +83,7 @@ impl TokenBucket {
         if buckets.len() >= MAX_KEYS && !buckets.contains_key(key) {
             self.evict(&mut buckets, now);
         }
-        let entry = buckets
-            .entry(key.to_owned())
-            .or_insert((now, self.burst));
+        let entry = buckets.entry(key.to_owned()).or_insert((now, self.burst));
         let level = self.level(*entry, now);
         *entry = (now, level);
         let decision = self.decide(level);
@@ -149,7 +153,10 @@ mod tests {
         for index in 0..MAX_KEYS * 2 {
             bucket.check(&format!("other-{index}"));
             if index % 100 == 0 {
-                assert!(!bucket.check("attacker").allowed, "reset after {index} keys");
+                assert!(
+                    !bucket.check("attacker").allowed,
+                    "reset after {index} keys"
+                );
             }
         }
         assert!(!bucket.check("attacker").allowed);

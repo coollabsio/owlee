@@ -3,7 +3,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use owlee_platform::TimestampMillis;
-use owlee_server::{boot, initialize_setup_token, permit_signup, router, testing_config};
+use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -287,10 +287,7 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             "title": "Docs"
         })),
         None,
-        &[
-            ("user-agent", BROWSER),
-            ("origin", "https://coolify.io"),
-        ],
+        &[("user-agent", BROWSER), ("origin", "https://coolify.io")],
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
@@ -406,9 +403,10 @@ async fn postgres_dashboard_query_runs_when_configured() {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
+    let editor = match token {
+        Some(_) => None,
+        None => Some(editor_session(&state).await.unwrap()),
+    };
     let app = router(state);
     let email = format!("dash-{}@coollabs.io", owlee_platform::Id::new());
     let (status, user, cookie, _) = if let Some(token) = token {
@@ -427,19 +425,9 @@ async fn postgres_dashboard_query_runs_when_configured() {
         )
         .await
     } else {
-        call(
-            &app,
-            "POST",
-            "/api/auth/register",
-            Some(json!({
-                "email": email,
-                "password": "correct-horse-battery",
-                "display_name": "Postgres"
-            })),
-            None,
-            &[],
-        )
-        .await
+        let (status, user, _, location) =
+            call(&app, "GET", "/api/auth/me", None, editor.as_deref(), &[]).await;
+        (status, user, editor, location)
     };
     assert!(status.is_success(), "{status} {user}");
     let (status, body, _, _) =

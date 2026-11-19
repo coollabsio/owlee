@@ -5,6 +5,7 @@ import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
 import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
 import { api, type Issue, type IssueFeed, type Project } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { cn, formatTime, fullTime } from "@/lib/utils";
 
 const ranges = ["24h", "7d", "14d", "30d"] as const;
@@ -36,6 +37,7 @@ export function IssuesPage() {
   const [draft, setDraft] = useState("");
   const [sort, setSort] = useState("last_seen");
   const [trend, setTrend] = useState<"24h" | "14d">("14d");
+  const canEdit = useCanEdit();
   const [selected, setSelected] = useState<string[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
@@ -101,7 +103,7 @@ export function IssuesPage() {
         flush
         actions={
           <>
-            {selected.length > 0 ? (
+            {canEdit && selected.length > 0 ? (
               <>
                 <span className="text-[12px] text-[var(--ui-fg-faint)]">{selected.length} selected</span>
                 <Button variant="highlighted" size="sm" onClick={() => bulk.mutate("resolved")}>
@@ -207,15 +209,17 @@ export function IssuesPage() {
             <table className="cool-table min-w-[960px]">
               <thead>
                 <tr>
-                  <th className="w-10 !pr-0">
-                    <input
-                      type="checkbox"
-                      className="align-middle"
-                      checked={allChecked}
-                      onChange={() => setSelected(allChecked ? [] : issues.map((issue) => issue.id))}
-                      aria-label="Select all issues"
-                    />
-                  </th>
+                  {canEdit ? (
+                    <th className="w-10 !pr-0">
+                      <input
+                        type="checkbox"
+                        className="align-middle"
+                        checked={allChecked}
+                        onChange={() => setSelected(allChecked ? [] : issues.map((issue) => issue.id))}
+                        aria-label="Select all issues"
+                      />
+                    </th>
+                  ) : null}
                   <th>Issue</th>
                   <th>Last seen</th>
                   <th>Age</th>
@@ -251,8 +255,10 @@ export function IssuesPage() {
                     issue={issue}
                     trend={trend}
                     checked={selected.includes(issue.id)}
-                    onCheck={(checked) =>
-                      setSelected((current) => (checked ? [...current, issue.id] : current.filter((id) => id !== issue.id)))
+                    onCheck={
+                      canEdit
+                        ? (checked) => setSelected((current) => (checked ? [...current, issue.id] : current.filter((id) => id !== issue.id)))
+                        : undefined
                     }
                     onOpen={() => navigate(`/errors/${issue.shortId || issue.id}`)}
                   />
@@ -276,15 +282,17 @@ function IssueRowView({
   issue: Issue;
   trend: "24h" | "14d";
   checked: boolean;
-  onCheck: (checked: boolean) => void;
+  onCheck?: (checked: boolean) => void;
   onOpen: () => void;
 }) {
   const parts = splitTitle(issue.title);
   return (
     <tr className="clickable-row" onClick={onOpen}>
-      <td className="!pr-0" onClick={(event) => event.stopPropagation()}>
-        <input type="checkbox" className="align-middle" checked={checked} aria-label={`Select ${issue.shortId}`} onChange={(event) => onCheck(event.target.checked)} />
-      </td>
+      {onCheck ? (
+        <td className="!pr-0" onClick={(event) => event.stopPropagation()}>
+          <input type="checkbox" className="align-middle" checked={checked} aria-label={`Select ${issue.shortId}`} onChange={(event) => onCheck(event.target.checked)} />
+        </td>
+      ) : null}
       <td>
         <div className="font-medium text-[var(--ui-fg)]">{parts.type}</div>
         {parts.message ? <div className="text-[13px] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}

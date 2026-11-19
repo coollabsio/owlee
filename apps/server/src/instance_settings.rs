@@ -8,7 +8,9 @@
 
 use std::ops::DerefMut;
 
-use owlee_platform::{Database, Id, IngestConfig, ParseIdError, SmtpConfig, TimestampMillis};
+use owlee_platform::{
+    AppKey, Database, Id, IngestConfig, ParseIdError, SmtpConfig, TimestampMillis,
+};
 use sqlx::{Any, Row, Transaction};
 use thiserror::Error;
 
@@ -33,12 +35,15 @@ impl From<SmtpSettings> for SmtpConfig {
     }
 }
 
+pub const SMTP_PASSWORD_AAD: &[u8] = b"instance_settings.smtp_password";
+
 /// Mail server fields from Settings. `password: None` keeps the stored password.
 pub struct SmtpInput {
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Already sealed with [`SMTP_PASSWORD_AAD`].
+    pub sealed_password: Option<String>,
     pub from: String,
 }
 
@@ -81,7 +86,7 @@ pub enum InstanceError {
     Database(#[from] sqlx::Error),
 }
 
-pub async fn load(db: &Database) -> Result<InstanceView, sqlx::Error> {
+pub async fn load(db: &Database, key: &AppKey) -> Result<InstanceView, sqlx::Error> {
     ensure_row(db).await?;
     let row = sqlx::query(
         "SELECT registration_open, smtp_host, smtp_port, smtp_username, smtp_password, smtp_from, \
@@ -93,11 +98,20 @@ pub async fn load(db: &Database) -> Result<InstanceView, sqlx::Error> {
     let registration_open: i64 = row.try_get("registration_open")?;
     let error_daily_quota: i64 = row.try_get("error_daily_quota")?;
     let analytics_daily_quota: i64 = row.try_get("analytics_daily_quota")?;
+    let password = blank_to_none(row.try_get("smtp_password")?).and_then(|stored| {
+        let opened = crate::secret_box::open(key, SMTP_PASSWORD_AAD, &stored);
+        if opened.is_none() {
+            tracing::warn!(
+                "the saved SMTP password does not open with OWLEE_APP_KEY; the root user must enter it again in Settings"
+            );
+        }
+        opened
+    });
     let smtp = smtp_from_row(
         row.try_get("smtp_host")?,
         row.try_get("smtp_port")?,
         row.try_get("smtp_username")?,
-        row.try_get("smtp_password")?,
+        password,
         row.try_get("smtp_from")?,
     );
     let state = sqlx::query(
@@ -138,11 +152,15 @@ pub async fn load(db: &Database) -> Result<InstanceView, sqlx::Error> {
 }
 
 /// Copies `OWLEE_*_DAILY_QUOTA` into the row until the root user saves quotas.
-pub async fn apply_quota_env(db: &Database, ingest: &IngestConfig) -> Result<(), sqlx::Error> {
+pub async fn apply_quota_env(
+    db: &Database,
+    ingest: &IngestConfig,
+    key: &AppKey,
+) -> Result<(), sqlx::Error> {
     if ingest.error_daily_quota.is_none() && ingest.analytics_daily_quota.is_none() {
         return Ok(());
     }
-    let current = load(db).await?;
+    let current = load(db, key).await?;
     let row = sqlx::query("SELECT quotas_updated_at FROM instance_settings WHERE id = 1")
         .fetch_one(db.pool())
         .await?;
@@ -150,7 +168,9 @@ pub async fn apply_quota_env(db: &Database, ingest: &IngestConfig) -> Result<(),
     if saved.is_some() {
         return Ok(());
     }
-    let error = ingest.error_daily_quota.unwrap_or(current.error_daily_quota);
+    let error = ingest
+        .error_daily_quota
+        .unwrap_or(current.error_daily_quota);
     let analytics = ingest
         .analytics_daily_quota
         .unwrap_or(current.analytics_daily_quota);
@@ -234,7 +254,7 @@ pub async fn save_smtp(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin_immediate().await?;
     ensure_row_tx(&mut tx).await?;
-    let password = match input.password {
+    let password = match input.sealed_password {
         Some(password) => Some(password),
         None => {
             let row = sqlx::query("SELECT smtp_password FROM instance_settings WHERE id = 1")
@@ -285,7 +305,7 @@ pub async fn permit_signup(db: &Database) -> Result<(), sqlx::Error> {
             host: "smtp.example.com".to_owned(),
             port: 587,
             username: None,
-            password: None,
+            sealed_password: None,
             from: "status@example.com".to_owned(),
         },
         now,

@@ -176,6 +176,32 @@ export type User = {
   installation_admin: boolean;
 };
 
+const post = <T>(path: string, body: unknown) => api<T>(path, { method: "POST", body: JSON.stringify(body) });
+
+export const requestRegistration = (email: string) => post<Record<string, never>>("/api/auth/register", { email });
+
+export const completeRegistration = (input: { token: string; password: string; display_name?: string }) =>
+  post<User>("/api/auth/register/complete", input);
+
+export const requestRecovery = (email: string) => post<Record<string, never>>("/api/auth/recovery", { email });
+
+export const completeRecovery = (input: { token: string; password: string }) =>
+  post<User>("/api/auth/recovery/complete", input);
+
+export const changePassword = (input: { current_password: string; new_password: string }) =>
+  post<void>("/api/auth/password", input);
+
+export type AuthSession = {
+  id: string;
+  created_at: string;
+  last_activity_at: string;
+  current: boolean;
+};
+
+export const listSessions = () => api<AuthSession[]>("/api/auth/sessions");
+
+export const revokeSession = (id: string) => api<void>(`/api/auth/sessions/${id}`, { method: "DELETE" });
+
 export type InstanceSmtp = {
   host: string;
   port: number;

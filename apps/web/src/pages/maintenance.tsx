@@ -2,10 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
 import { ApiError, api, type Maintenance, type Monitor, type StatusPage } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { formatTime, fromLocalInput, toLocalInput } from "@/lib/utils";
 
 export function MaintenancePage() {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const query = useQuery({ queryKey: ["maintenances"], queryFn: () => api<Maintenance[]>("/api/maintenances") });
   const pages = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages") });
   const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors") });
@@ -52,7 +54,7 @@ export function MaintenancePage() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Maintenance" description="Checks inside a window are recorded, not counted as downtime, and do not page anyone." />
-      <div className="grid items-start gap-6 lg:grid-cols-[1fr_340px]">
+      <div className={canEdit ? "grid items-start gap-6 lg:grid-cols-[1fr_340px]" : "grid items-start gap-6"}>
         <LayerCard title="Windows" description={query.data ? `${windows.length} scheduled` : undefined} flush>
           {query.isLoading ? (
             <CardText title="Loading windows…" />
@@ -66,7 +68,7 @@ export function MaintenancePage() {
                     <th>Window</th>
                     <th className="hidden md:table-cell">When</th>
                     <th>Status</th>
-                    <th />
+                    {canEdit ? <th /> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -81,9 +83,11 @@ export function MaintenancePage() {
                       <td>
                         <StatusBadge tone={item.active ? "info" : "neutral"}>{item.active ? "In progress" : "Scheduled"}</StatusBadge>
                       </td>
-                      <td className="text-right">
-                        <Button size="sm" onClick={() => remove.mutate(item.id)}>Remove</Button>
-                      </td>
+                      {canEdit ? (
+                        <td className="text-right">
+                          <Button size="sm" onClick={() => remove.mutate(item.id)}>Remove</Button>
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>
@@ -91,7 +95,7 @@ export function MaintenancePage() {
             </div>
           )}
         </LayerCard>
-        <LayerCard title="Schedule a window" description="Shown on the status page while it runs.">
+        {canEdit ? <LayerCard title="Schedule a window" description="Shown on the status page while it runs.">
           <form className="space-y-3" onSubmit={submit}>
             <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
             <Field label="Message" error={fields.message}><Textarea value={message} onChange={(event) => setMessage(event.target.value)} required /></Field>
@@ -118,7 +122,7 @@ export function MaintenancePage() {
               <Button type="submit" variant="primary" disabled={save.isPending || !pageId}>{save.isPending ? "Saving…" : "Schedule"}</Button>
             </div>
           </form>
-        </LayerCard>
+        </LayerCard> : null}
       </div>
     </div>
   );

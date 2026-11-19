@@ -1,9 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { Logo } from "@/app/Shell";
 import { Button, ErrorText, Field, Input } from "@/components/ui";
-import { ApiError, api, type Meta, type User } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  completeRecovery,
+  completeRegistration,
+  requestRecovery,
+  requestRegistration,
+  type Meta,
+  type User,
+} from "@/lib/api";
 
 export function LoginPage() {
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
@@ -20,7 +29,7 @@ export function LoginPage() {
       subtitle="Status pages and uptime for the coolLabs stack."
       footer={footer}
     >
-      <AuthForm mode="login" />
+      <LoginForm />
     </AuthShell>
   );
 }
@@ -61,8 +70,101 @@ export function RegisterPage() {
         </>
       }
     >
-      <AuthForm mode="register" />
+      <EmailLinkForm
+        submitLabel="Send sign-up link"
+        request={requestRegistration}
+        sent={(email) => (
+          <>
+            We sent a message to <span className="text-[var(--ui-fg)]">{email}</span>. Open the link inside to continue. It works for 24 hours.
+          </>
+        )}
+      />
     </AuthShell>
+  );
+}
+
+export function RegisterCompletePage() {
+  const token = useConsumedToken();
+  return (
+    <AuthShell
+      title="Finish your account"
+      subtitle="Choose a name and a password."
+      footer={
+        <>
+          Already registered? <Link className="auth-text-link" to="/login">Sign in</Link>
+        </>
+      }
+    >
+      {token ? (
+        <TokenPasswordForm
+          withName
+          submitLabel="Create account"
+          restart={{ to: "/register", label: "Request a new sign-up link" }}
+          submit={(password, displayName) =>
+            completeRegistration({ token, password, display_name: displayName || undefined })
+          }
+        />
+      ) : (
+        <MissingLink to="/register" label="Request a new sign-up link" />
+      )}
+    </AuthShell>
+  );
+}
+
+export function ForgotPasswordPage() {
+  return (
+    <AuthShell
+      title="Reset your password"
+      subtitle="We email a link to set a new password."
+      footer={
+        <>
+          Remembered it? <Link className="auth-text-link" to="/login">Sign in</Link>
+        </>
+      }
+    >
+      <EmailLinkForm
+        submitLabel="Send reset link"
+        request={requestRecovery}
+        sent={(email) => (
+          <>
+            If an account exists for <span className="text-[var(--ui-fg)]">{email}</span>, we sent a link to reset its password. It works for one hour.
+          </>
+        )}
+      />
+    </AuthShell>
+  );
+}
+
+export function ResetPasswordPage() {
+  const token = useConsumedToken();
+  return (
+    <AuthShell
+      title="Set a new password"
+      subtitle="Every other device is signed out."
+      footer={
+        <>
+          Remembered it? <Link className="auth-text-link" to="/login">Sign in</Link>
+        </>
+      }
+    >
+      {token ? (
+        <TokenPasswordForm
+          submitLabel="Set password"
+          restart={{ to: "/forgot-password", label: "Request a new reset link" }}
+          submit={(password) => completeRecovery({ token, password })}
+        />
+      ) : (
+        <MissingLink to="/forgot-password" label="Request a new reset link" />
+      )}
+    </AuthShell>
+  );
+}
+
+function MissingLink({ to, label }: { to: string; label: string }) {
+  return (
+    <p className="text-sm text-[var(--ui-fg-faint)]">
+      Open the link from the email. <Link className="auth-text-link" to={to}>{label}</Link>
+    </p>
   );
 }
 
@@ -207,26 +309,20 @@ function SetupForm({ token }: { token: string }) {
   );
 }
 
-function AuthForm({ mode }: { mode: "login" | "register" }) {
+function LoginForm() {
   const navigate = useNavigate();
+  const location = useLocation();
   const client = useQueryClient();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
+  const from = (location.state as { from?: unknown } | null)?.from;
   const mutation = useMutation({
     mutationFn: () =>
-      api<User>(mode === "login" ? "/api/auth/login" : "/api/auth/register", {
-        method: "POST",
-        body: JSON.stringify({
-          email,
-          password,
-          display_name: mode === "register" ? displayName : undefined,
-        }),
-      }),
-    onSuccess: async (user) => {
+      api<User>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+    onSuccess: (user) => {
       client.setQueryData(["me"], user);
-      navigate("/");
+      navigate(typeof from === "string" && from.startsWith("/") ? from : "/", { replace: true });
     },
     onError: (error) => {
       setFields(error instanceof ApiError ? (error.fields ?? {}) : {});
@@ -241,20 +337,119 @@ function AuthForm({ mode }: { mode: "login" | "register" }) {
 
   return (
     <form className="space-y-4" onSubmit={submit}>
-      {mode === "register" ? (
-        <Field label="Name" error={fields.display_name}>
-          <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Andras Bacsai" />
-        </Field>
-      ) : null}
       <Field label="Email" error={fields.email}>
         <Input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@coollabs.io" />
       </Field>
-      <Field label="Password" hint={mode === "register" ? "12+ characters" : undefined} error={fields.password}>
+      <Field label="Password" error={fields.password}>
         <Input type="password" required value={password} onChange={(event) => setPassword(event.target.value)} />
       </Field>
       <ErrorText error={mutation.error} />
       <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? "Working…" : mode === "login" ? "Sign in" : "Create account"}
+        {mutation.isPending ? "Working…" : "Sign in"}
+      </Button>
+      <p className="text-center text-[13px]">
+        <Link className="auth-text-link" to="/forgot-password">Forgot password?</Link>
+      </p>
+    </form>
+  );
+}
+
+function EmailLinkForm({
+  submitLabel,
+  request,
+  sent,
+}: {
+  submitLabel: string;
+  request: (email: string) => Promise<unknown>;
+  sent: (email: string) => ReactNode;
+}) {
+  const [email, setEmail] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const mutation = useMutation({
+    mutationFn: () => request(email),
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+
+  if (mutation.isSuccess) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-[var(--ui-fg)]">Check your email</p>
+        <p className="text-sm text-[var(--ui-fg-faint)]">{sent(email)}</p>
+      </div>
+    );
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    mutation.mutate();
+  }
+
+  return (
+    <form className="space-y-4" onSubmit={submit}>
+      <Field label="Email" error={fields.email}>
+        <Input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@coollabs.io" />
+      </Field>
+      <ErrorText error={mutation.error} />
+      <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
+        {mutation.isPending ? "Sending…" : submitLabel}
+      </Button>
+    </form>
+  );
+}
+
+function TokenPasswordForm({
+  withName = false,
+  submitLabel,
+  restart,
+  submit: send,
+}: {
+  withName?: boolean;
+  submitLabel: string;
+  restart: { to: string; label: string };
+  submit: (password: string, displayName: string) => Promise<User>;
+}) {
+  const navigate = useNavigate();
+  const client = useQueryClient();
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const mutation = useMutation({
+    mutationFn: () => send(password, displayName),
+    onSuccess: (user) => {
+      client.setQueryData(["me"], user);
+      navigate("/", { replace: true });
+    },
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    mutation.mutate();
+  }
+
+  if (fields.token) {
+    return (
+      <p className="text-sm text-[var(--ui-fg-faint)]">
+        This link is invalid, expired, or already used. <Link className="auth-text-link" to={restart.to}>{restart.label}</Link>
+      </p>
+    );
+  }
+
+  return (
+    <form className="space-y-4" onSubmit={submit}>
+      {withName ? (
+        <Field label="Name" error={fields.display_name}>
+          <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Andras Bacsai" />
+        </Field>
+      ) : null}
+      <Field label="Password" hint="12+ characters" error={fields.password}>
+        <Input type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      </Field>
+      <ErrorText error={mutation.error} />
+      <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
+        {mutation.isPending ? "Working…" : submitLabel}
       </Button>
     </form>
   );

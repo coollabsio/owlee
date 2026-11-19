@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { cn } from "@/lib/utils";
 
 const ranges = [
@@ -43,6 +44,7 @@ function CardEmpty({ title, body }: { title: string; body?: string }) {
 
 function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: boolean; error: unknown }) {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("");
@@ -60,11 +62,11 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
       <PageHeader
         title="Sites"
         description="Cookieless page views. Visitors are a daily hash of address and browser, and the address is not stored."
-        actions={<Button variant="primary" onClick={() => setOpen(true)}>New site</Button>}
+        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : null}
       />
       <ErrorText error={error} />
       {sites.length === 0 && !loading ? (
-        <Empty title="No sites yet" body="Add the site you want to measure, then paste the tracker snippet." action={<Button variant="primary" onClick={() => setOpen(true)}>New site</Button>} />
+        <Empty title="No sites yet" body="Add the site you want to measure, then paste the tracker snippet." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : undefined} />
       ) : (
         <LayerCard title="Sites" description="Open a site to see its traffic." flush>
           {loading ? <CardEmpty title="Loading sites..." /> : (
@@ -99,7 +101,7 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
           )}
         </LayerCard>
       )}
-      <Dialog open={open} title="New site" description="The domain is used to ignore your own referrer." onClose={() => setOpen(false)}>
+      <Dialog open={canEdit && open} title="New site" description="The domain is used to ignore your own referrer." onClose={() => setOpen(false)}>
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
           <Field label="Name"><Input required value={name} onChange={(event) => setName(event.target.value)} placeholder="coolLabs website" /></Field>
           <Field label="Domain"><Input required value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="coolify.io" /></Field>
@@ -453,6 +455,7 @@ export function VisitorPage() {
 
 function DomainCard({ site }: { site: InsightSite }) {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const verify = useMutation({
     mutationFn: () => api<InsightSite>(`/api/sites/${site.id}/verify`, { method: "POST" }),
     onSuccess: async () => {
@@ -482,9 +485,11 @@ function DomainCard({ site }: { site: InsightSite }) {
       <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] text-[var(--ui-fg)]">{site.verify_name}</pre>
       <p className="mb-1 text-[11px] font-medium text-[var(--ui-fg-faint)]">Value</p>
       <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] text-[var(--ui-fg)]">{site.verify_value}</pre>
-      <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
-        Verify
-      </Button>
+      {canEdit ? (
+        <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
+          Verify
+        </Button>
+      ) : null}
       <ErrorText error={verify.error} />
     </LayerCard>
   );
@@ -498,6 +503,7 @@ function resetWhen(iso: string) {
 
 function SiteQuota({ site }: { site: InsightSite }) {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const [value, setValue] = useState(site.quota_override == null ? "" : String(site.quota_override));
   const save = useMutation({
     mutationFn: (daily: number | null) =>
@@ -518,7 +524,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
         {site.quota_override == null ? " (instance default)" : " (this site)"}
         {site.quota_exceeded ? ". Further events are rejected until the counter resets." : "."} Resets {resetWhen(site.resets_at)}.
       </p>
-      <form
+      {canEdit ? <form
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
         onSubmit={(event) => {
           event.preventDefault();
@@ -535,7 +541,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
         {site.quota_override != null ? (
           <Button type="button" disabled={save.isPending} onClick={() => save.mutate(null)}>Inherit</Button>
         ) : null}
-      </form>
+      </form> : null}
       <ErrorText error={save.error} />
     </div>
   );
@@ -543,6 +549,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
 
 function TrackerPanel({ site }: { site: InsightSite }) {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const [enabled, setEnabled] = useState(site.public_enabled);
   const snippet = `<script defer src="${window.location.origin}/data.js" data-site="${site.public_id}"></script>`;
   const save = useMutation({
@@ -569,7 +576,7 @@ function TrackerPanel({ site }: { site: InsightSite }) {
       <LayerCard title="Public dashboard" description="Share aggregate numbers without a login.">
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); save.mutate(); }}>
           <label className="flex items-center gap-2 text-[13px] font-medium text-[var(--ui-fg-dim)]">
-            <input type="checkbox" className="accent-[var(--ui-accent)]" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <input type="checkbox" className="accent-[var(--ui-accent)]" disabled={!canEdit} checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
             Public page enabled
           </label>
           {site.public_enabled ? (
@@ -578,7 +585,7 @@ function TrackerPanel({ site }: { site: InsightSite }) {
             </p>
           ) : null}
           <ErrorText error={save.error} />
-          <Button type="submit" variant="primary" disabled={save.isPending}>Save sharing</Button>
+          {canEdit ? <Button type="submit" variant="primary" disabled={save.isPending}>Save sharing</Button> : null}
         </form>
       </LayerCard>
     </div>

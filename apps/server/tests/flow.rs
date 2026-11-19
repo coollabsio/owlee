@@ -3,11 +3,11 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
 use owlee_platform::TimestampMillis;
 use owlee_server::{
-    DEMO_PASSWORD, boot, initialize_setup_token, permit_signup, router, testing_config,
+    DEMO_PASSWORD, boot, editor_session, initialize_setup_token, router, testing_config,
 };
-use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -335,9 +335,10 @@ async fn postgres_accepts_the_same_api() {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
+    let editor = match token {
+        Some(_) => None,
+        None => Some(editor_session(&state).await.unwrap()),
+    };
     let app = router(state);
     let email = format!("pg-{}@coollabs.io", owlee_platform::Id::new());
     let (status, user, _) = if let Some(token) = token {
@@ -355,18 +356,8 @@ async fn postgres_accepts_the_same_api() {
         )
         .await
     } else {
-        call(
-            &app,
-            "POST",
-            "/api/auth/register",
-            Some(serde_json::json!({
-                "email": email,
-                "password": "correct-horse-battery",
-                "display_name": "Postgres"
-            })),
-            None,
-        )
-        .await
+        let (status, user, _) = call(&app, "GET", "/api/auth/me", None, editor.as_deref()).await;
+        (status, user, editor)
     };
     assert!(status.is_success(), "{status} {user}");
     let (status, ready, _) = call(&app, "GET", "/api/health/ready", None, None).await;

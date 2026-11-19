@@ -5,9 +5,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use flate2::Compression;
 use flate2::write::{DeflateEncoder, GzEncoder};
-use owlee_platform::TimestampMillis;
-use owlee_server::{boot, initialize_setup_token, permit_signup, router, testing_config};
 use http_body_util::BodyExt;
+use owlee_platform::TimestampMillis;
+use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -129,30 +129,26 @@ fn sample() -> Value {
     })
 }
 
-async fn exercise(app: Router, setup_token: Option<String>) {
-    let email = format!("errors-{}@coollabs.io", owlee_platform::Id::new());
-    let (path, body) = if let Some(token) = setup_token {
-        (
-            "/api/setup/complete",
-            json!({"token": token, "email": email, "password": "correct-horse-battery", "display_name": "Ada"}),
-        )
-    } else {
-        (
-            "/api/auth/register",
-            json!({"email": email, "password": "correct-horse-battery", "display_name": "Ada"}),
-        )
+/// `setup_token` is `None` on a reused Postgres database, where `editor` signs in instead.
+async fn exercise(app: Router, setup_token: Option<String>, editor: Option<String>) {
+    let cookie = match (setup_token, editor) {
+        (Some(token), _) => {
+            let email = format!("errors-{}@coollabs.io", owlee_platform::Id::new());
+            let body = json!({"token": token, "email": email, "password": "correct-horse-battery", "display_name": "Ada"});
+            let (status, _, cookie) = call(
+                &app,
+                "POST",
+                "/api/setup/complete",
+                body.to_string().into_bytes(),
+                None,
+                &[("content-type", "application/json")],
+            )
+            .await;
+            assert!(status.is_success(), "{status}");
+            cookie.unwrap()
+        }
+        (None, editor) => editor.expect("editor session"),
     };
-    let (status, _, cookie) = call(
-        &app,
-        "POST",
-        path,
-        body.to_string().into_bytes(),
-        None,
-        &[("content-type", "application/json")],
-    )
-    .await;
-    assert!(status.is_success(), "{status}");
-    let cookie = cookie.unwrap();
 
     let (status, _, _) = call(&app, "GET", "/api/error-projects", Vec::new(), None, &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -334,7 +330,7 @@ async fn exercise(app: Router, setup_token: Option<String>) {
 #[tokio::test]
 async fn sqlite_ingest_groups_events() {
     let (app, token) = app().await;
-    exercise(app, token).await;
+    exercise(app, token, None).await;
 }
 
 #[tokio::test]
@@ -354,8 +350,9 @@ async fn postgres_ingest_groups_events() {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
-    exercise(router(state), token).await;
+    let editor = match token {
+        Some(_) => None,
+        None => Some(editor_session(&state).await.unwrap()),
+    };
+    exercise(router(state), token, editor).await;
 }

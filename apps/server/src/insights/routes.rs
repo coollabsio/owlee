@@ -8,6 +8,8 @@ use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::http::{Method, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::CookieJar;
+use http_body_util::BodyExt;
+use isbot::Bots;
 use owlee_insights::{
     Bounds, EventPayload, Incoming, LINK_SECTIONS, SITE_SECTIONS, clean_color, clean_destination,
     clean_host, clean_name, clean_public_slug, clean_slug, clean_vitals, clip, flatten, now_secs,
@@ -15,8 +17,6 @@ use owlee_insights::{
     session_id, slugify,
 };
 use owlee_platform::{Database, EnvironmentMode, Id, generate_token};
-use http_body_util::BodyExt;
-use isbot::Bots;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -26,7 +26,7 @@ use super::record;
 use crate::error::AppError;
 use crate::peer::Client;
 use crate::quota;
-use crate::routes::require_user;
+use crate::routes::{require_editor, require_user};
 use crate::state::AppState;
 
 const SCRIPT: &str = include_str!("tracker.js");
@@ -98,7 +98,11 @@ pub fn api_routes() -> Router<AppState> {
             "/public/links/{slug}/{dimension}",
             axum::routing::get(public_link_dimension),
         )
-        .route("/receive", axum::routing::post(receive).options(preflight))
+}
+
+/// The tracker posts here from the tracked site's origin.
+pub fn ingest_routes() -> Router<AppState> {
+    Router::new().route("/receive", axum::routing::post(receive).options(preflight))
 }
 
 pub fn public_routes() -> Router<AppState> {
@@ -169,7 +173,9 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
             return with_cors(AppError::field("body", "Event JSON is invalid.").into_response());
         }
     };
-    let ip_limit = state.analytics_ip_limit.check(&format!("analytics-ip:{}", client.ip));
+    let ip_limit = state
+        .analytics_ip_limit
+        .check(&format!("analytics-ip:{}", client.ip));
     if !ip_limit.allowed {
         return with_cors(AppError::limited(ip_limit.retry_after_secs).into_response());
     }
@@ -231,9 +237,7 @@ async fn accept_event(
         &allowed,
         state.config.ingest.allow_localhost,
     ) {
-        return Err(AppError::Forbidden(
-            "Origin is not allowed for this site.",
-        ));
+        return Err(AppError::Forbidden("Origin is not allowed for this site."));
     }
     if verified == 0 && state.config.environment != EnvironmentMode::Development {
         return Err(AppError::Forbidden(
@@ -284,7 +288,13 @@ async fn accept_event(
             site_id: Some(site_id.clone()),
             timestamp: now,
             event_type: payload.kind,
-            session_id: Some(session_id(&state.insights_secret, &site_id, &client.ip, ua, now)),
+            session_id: Some(session_id(
+                &state.insights_secret,
+                &site_id,
+                &client.ip,
+                ua,
+                now,
+            )),
             pathname: page.as_ref().map(|page| page.path.clone()),
             url_query: page.as_ref().and_then(|page| page.query.clone()),
             title: payload
@@ -328,7 +338,15 @@ async fn short_link(
     headers: HeaderMap,
     client: Client,
 ) -> Response<Body> {
-    resolve_slug(&state, method, &headers, &client, None, slug.trim_matches('/')).await
+    resolve_slug(
+        &state,
+        method,
+        &headers,
+        &client,
+        None,
+        slug.trim_matches('/'),
+    )
+    .await
 }
 
 async fn host_redirect(
@@ -513,7 +531,7 @@ async fn create_site(
     jar: CookieJar,
     Json(body): Json<SiteBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let id = Id::new().to_string();
     let public_id = public_token();
     let name = field("name", clean_name(&body.name))?;
@@ -560,7 +578,7 @@ async fn update_site(
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let name = field("name", clean_name(&body.name))?;
     let domain = field("domain", clean_host(&body.domain))?;
     let color = match body.color {
@@ -577,10 +595,10 @@ async fn update_site(
     .bind(domain)
     .bind(color)
     .bind(&id)
-            .execute(state.db.pool())
-            .await
-            .map_err(map_db)?
-            .rows_affected();
+    .execute(state.db.pool())
+    .await
+    .map_err(map_db)?
+    .rows_affected();
     if changed == 0 {
         return Err(AppError::NotFound);
     }
@@ -592,7 +610,7 @@ async fn delete_site(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let changed = sqlx::query("DELETE FROM insight_sites WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -609,7 +627,7 @@ async fn reset_site(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     fetch_site(&state, &id).await?;
     for sql in [
         "DELETE FROM insight_events WHERE site_id = $1",
@@ -629,7 +647,7 @@ async fn update_site_public(
     Path(id): Path<String>,
     Json(body): Json<PublicBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     save_public(
         &state.db,
         "UPDATE insight_sites SET public_enabled = $1, public_slug = $2, public_threshold = $3, public_sections = $4 WHERE id = $5",
@@ -947,7 +965,7 @@ async fn create_domain(
     jar: CookieJar,
     Json(body): Json<DomainBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let id = Id::new().to_string();
     let hostname = field("hostname", clean_host(&body.hostname))?;
     let note = body.note.unwrap_or_default();
@@ -978,7 +996,7 @@ async fn update_domain(
     Path(id): Path<String>,
     Json(body): Json<DomainBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let hostname = field("hostname", clean_host(&body.hostname))?;
     let changed = sqlx::query(
         "UPDATE insight_domains SET hostname = $1, note = $2, enabled = $3, site_id = $4 WHERE id = $5",
@@ -1003,7 +1021,7 @@ async fn delete_domain(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let changed = sqlx::query("DELETE FROM insight_domains WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -1028,7 +1046,7 @@ async fn create_link(
     jar: CookieJar,
     Json(body): Json<LinkBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let id = insert_link(&state.db, &body).await?;
     Ok((StatusCode::CREATED, Json(fetch_link(&state.db, &id).await?)))
 }
@@ -1048,7 +1066,7 @@ async fn update_link(
     Path(id): Path<String>,
     Json(body): Json<LinkBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let slug = field("slug", clean_slug(&body.slug))?;
     let destination = field("destination", clean_destination(&body.destination))?;
     let redirect_type = redirect_type(body.redirect_type.as_deref())?;
@@ -1076,7 +1094,7 @@ async fn delete_link(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let changed = sqlx::query("DELETE FROM insight_links WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -1094,7 +1112,7 @@ async fn update_link_public(
     Path(id): Path<String>,
     Json(body): Json<PublicBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     save_public(
         &state.db,
         "UPDATE insight_links SET public_enabled = $1, public_slug = $2, public_threshold = $3, public_sections = $4 WHERE id = $5",
@@ -1677,7 +1695,7 @@ async fn set_site_quota(
     Path(id): Path<String>,
     Json(body): Json<QuotaBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     if let Some(quota) = body.daily_quota {
         if !(1..=100_000_000).contains(&quota) {
             return Err(AppError::field(
@@ -1703,7 +1721,7 @@ async fn verify_site(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let ok = crate::verify::verify_site(&state, &id).await?;
     let site = fetch_site(&state, &id).await?;
     if ok {
@@ -1839,14 +1857,17 @@ fn header_text<'a>(headers: &'a HeaderMap, name: impl header::AsHeaderName) -> O
     headers.get(name)?.to_str().ok()
 }
 
-async fn allowed_hosts(db: &Database, site_id: &str, domain: &str) -> Result<Vec<String>, AppError> {
+async fn allowed_hosts(
+    db: &Database,
+    site_id: &str,
+    domain: &str,
+) -> Result<Vec<String>, AppError> {
     let mut hosts = vec![domain.to_owned()];
-    let rows = sqlx::query(
-        "SELECT hostname FROM insight_domains WHERE site_id = $1 AND enabled = 1",
-    )
-    .bind(site_id)
-    .fetch_all(db.pool())
-    .await?;
+    let rows =
+        sqlx::query("SELECT hostname FROM insight_domains WHERE site_id = $1 AND enabled = 1")
+            .bind(site_id)
+            .fetch_all(db.pool())
+            .await?;
     for row in &rows {
         let hostname: String = row.try_get("hostname")?;
         if !hosts.iter().any(|host| host == &hostname) {
@@ -1871,7 +1892,9 @@ fn origin_allowed(
     if allow_localhost && is_local_host(&host) {
         return true;
     }
-    allowed.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    allowed
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 fn host_of(value: &str) -> Option<String> {
@@ -1879,7 +1902,10 @@ fn host_of(value: &str) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let rest = value.split_once("://").map(|(_, rest)| rest).unwrap_or(value);
+    let rest = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value);
     let hostport = rest.split(['/', '?', '#']).next()?;
     if let Some(host) = hostport.strip_prefix('[') {
         return Some(host.split(']').next()?.to_ascii_lowercase());

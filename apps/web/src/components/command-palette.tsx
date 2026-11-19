@@ -14,6 +14,7 @@ import {
   type Project,
   type StatusPage,
 } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { cn } from "@/lib/utils";
 
 type Item = { group: string; label: string; meta?: string; to: string };
@@ -38,13 +39,14 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const links = useQuery({ queryKey: ["links"], queryFn: () => api<InsightLink[]>("/api/links"), enabled: open });
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/api/error-projects"), enabled: open });
   const agents = useQuery({ queryKey: ["agents"], queryFn: listAgents, enabled: open });
+  const canEdit = useCanEdit();
 
   const items = useMemo<Item[]>(() => {
     const pagesNav = [
       { group: "Go to", label: "Dashboard", to: "/" },
       ...products.flatMap((product) =>
         product.groups.flatMap((group) =>
-          group.links.map((link) => ({ group: "Go to", label: link.label, meta: product.label, to: link.to })),
+          group.links.filter((link) => canEdit || !link.editorOnly).map((link) => ({ group: "Go to", label: link.label, meta: product.label, to: link.to })),
         ),
       ),
       ...manage.map((link) => ({ group: "Go to", label: link.label, to: link.to })),
@@ -59,7 +61,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       ...(sites.data ?? []).map((s) => ({ group: "Sites", label: s.name, meta: s.domain, to: `/analytics/${s.id}` })),
       ...(links.data ?? []).map((l) => ({ group: "Links", label: `/${l.slug}`, meta: l.destination, to: `/links/${l.id}` })),
     ];
-  }, [monitors.data, pages.data, incidents.data, agents.data, projects.data, sites.data, links.data]);
+  }, [canEdit, monitors.data, pages.data, incidents.data, agents.data, projects.data, sites.data, links.data]);
 
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase();

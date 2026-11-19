@@ -2,10 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, Empty, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
 import { ApiError, createAgent, type CreatedAgent, deleteAgent, listAgents } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { timeAgo } from "@/lib/utils";
 
 export function AgentsPage() {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const query = useQuery({ queryKey: ["agents"], queryFn: listAgents, refetchInterval: 10_000 });
   const [name, setName] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
@@ -36,7 +38,7 @@ export function AgentsPage() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Agents" description="Agents run checks inside private networks. Each agent reads its checks from a config file on its host and reports results over outbound HTTPS, so nothing needs to be exposed." />
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className={canEdit ? "grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]" : "grid items-start gap-6"}>
         {query.isLoading ? (
           <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading agents…</p>
         ) : (query.data?.length ?? 0) === 0 ? (
@@ -54,7 +56,7 @@ export function AgentsPage() {
                     <th>Status</th>
                     <th className="hidden sm:table-cell">Monitors</th>
                     <th className="hidden md:table-cell">Last seen</th>
-                    <th className="w-0" />
+                    {canEdit ? <th className="w-0" /> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -64,10 +66,12 @@ export function AgentsPage() {
                       <td><StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge></td>
                       <td className="hidden sm:table-cell">{agent.monitor_count}</td>
                       <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
-                      <td className="text-right">
-                        <Button variant="danger" onClick={() => remove.mutate(agent.id)} disabled={remove.isPending && remove.variables === agent.id}>Delete</Button>
-                        {remove.variables === agent.id ? <ErrorText error={remove.error} /> : null}
-                      </td>
+                      {canEdit ? (
+                        <td className="text-right">
+                          <Button variant="danger" onClick={() => remove.mutate(agent.id)} disabled={remove.isPending && remove.variables === agent.id}>Delete</Button>
+                          {remove.variables === agent.id ? <ErrorText error={remove.error} /> : null}
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                   {agents.length === 0 ? (
@@ -80,7 +84,7 @@ export function AgentsPage() {
             </div>
           </LayerCard>
         )}
-        {created ? (
+        {!canEdit ? null : created ? (
           <AgentToken agent={created} onDone={() => setCreated(null)} />
         ) : (
           <LayerCard title="Add an agent" description="The name is shown as the check region.">

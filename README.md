@@ -85,7 +85,13 @@ owlee setup-token rotate
 
 `setup-token init` prints a URL only when setup is unfinished and no unused token is stored. Rotation invalidates the previous unused token.
 
-The root user opens registration in Settings. It stays closed until a mail server is saved there, or `OWLEE_SMTP_HOST` and `OWLEE_SMTP_FROM` are set, and the root user turns Open registration on. Clearing the saved mail server closes registration again. `OWLEE_OPEN_SIGNUP` is ignored. Owlee does not email a sign-up link; a person who can open `/register` chooses their own password. The root user can also mark another account as an installation admin. The root account itself cannot be changed.
+The root user opens registration in Settings. It stays closed until a mail server is saved there, or `OWLEE_SMTP_HOST` and `OWLEE_SMTP_FROM` are set, and the root user turns Open registration on. Clearing the saved mail server closes registration again. `OWLEE_OPEN_SIGNUP` is ignored. A person who opens `/register` enters an email address, and Owlee mails a link that works once, for 24 hours. The link opens a page where they choose a password. If the address already has an account, the mail says so instead, and the page shows the same message in both cases. `/forgot-password` mails a reset link that works once, for 1 hour, and the reset signs out every session of that account. Without a mail server, no reset mail is sent and the server logs a warning. Each address gets at most about 3 of these mails an hour.
+
+New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings. The root account itself cannot be changed. Every account can change its own password in Settings, which signs out its other sessions, and can sign out any of its sessions there.
+
+Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
+
+Secrets saved in the database are encrypted with `OWLEE_APP_KEY`, base64 of 32 bytes (`openssl rand -base64 32`). Production does not start without it. Development uses a fixed public key and logs a warning. Keep the key with your backups. With another key, Owlee cannot read the saved SMTP password; it logs a warning, and the root user must enter the password again in Settings. A password saved by an older Owlee in plain text is treated the same way.
 
 When a check cannot connect (DNS, connect, or timeout error), Owlee first tries a TCP connection to `1.1.1.1:443`, `8.8.8.8:443` and `9.9.9.9:443`. If none of them answer, the problem is the Owlee host's own network. Owlee then does not record the check, does not change the monitor state, and sends no alert. The result is cached for 10 seconds. If the host cannot reach the internet by design, set hosts that it can always reach, or turn the check off:
 
@@ -112,7 +118,7 @@ Frontend dev proxies `/api` to the Rust process. Production does not proxy: the 
 cargo test --workspace
 ```
 
-Domain tests cover assertions, the failure threshold, uptime math (maintenance is excluded), slugs, and incident resolution. Server tests create the owner with a setup token, run an HTTP check against a local server, open an incident after a failure, publish a status page, skip a check during maintenance, deliver a signed webhook, skip checks when the host is offline, and sync agent checks. Other server tests cover setup tokens, registration and SMTP settings, error ingest, and analytics with short links.
+Domain tests cover assertions, the failure threshold, uptime math (maintenance is excluded), slugs, and incident resolution. Server tests create the owner with a setup token, run an HTTP check against a local server, open an incident after a failure, publish a status page, skip a check during maintenance, deliver a signed webhook, skip checks when the host is offline, and sync agent checks. Other server tests cover setup tokens, registration and SMTP settings, read-only members, email links for registration and password reset, sessions, the origin check, error ingest, and analytics with short links.
 
 Postgres tests run only when these are set:
 
@@ -127,7 +133,9 @@ export OWLEE_APP_POSTGRES_URL=postgres://status:status@127.0.0.1:5432/status_app
 
 ```bash
 docker build -t owlee:local .
-docker run --rm -p 8080:8080 -v owlee-data:/var/lib/owlee owlee:local
+export OWLEE_APP_KEY="$(openssl rand -base64 32)"   # once; store it with your backups
+docker run --rm -p 8080:8080 -v owlee-data:/var/lib/owlee \
+  -e OWLEE_APP_KEY="$OWLEE_APP_KEY" owlee:local
 ```
 
 Pushes to `main` publish `ghcr.io/coollabsio/owlee` (`linux/amd64` and `linux/arm64`), tagged `latest`, `main`, and the seven-character commit SHA. The same workflow can be run by hand from the Actions tab. If the package is not linked to this repository automatically, link it from the package settings.
@@ -146,6 +154,7 @@ If you miss the URL, stop the container (required for the default SQLite volume;
 docker stop <container>
 docker run --rm -v owlee-data:/var/lib/owlee \
   -e OWLEE_PUBLIC_ORIGIN=https://status.example.com \
+  -e OWLEE_APP_KEY="$OWLEE_APP_KEY" \
   ghcr.io/coollabsio/owlee:latest setup-token rotate
 ```
 
@@ -238,7 +247,7 @@ Raw `insight_events` rows, including link clicks, older than `OWLEE_ANALYTICS_RE
 
 Visitor ids rotate monthly. A visit ends after 30 minutes of idle time. Set `OWLEE_PROXY_HOPS` when Owlee sits behind a reverse proxy (`1` for Traefik or Coolify, which is the default in `deploy/compose.yaml`; `2` when Cloudflare is also in front, which enables `cf-ipcountry` / `cf-region` / `cf-ipcity`). `0` ignores `X-Forwarded-For` and treats the proxy as the client, so every visitor shares one rate-limit bucket. `X-Forwarded-For` and the Cloudflare headers are read only when the TCP peer is in `OWLEE_TRUSTED_PROXIES` (comma-separated CIDRs; the default is loopback and private networks, `none` trusts no proxy, `0.0.0.0/0` is refused). A client that reaches the port directly cannot fake its address or location. Add the Cloudflare ranges only if Cloudflare connects to Owlee with no proxy between them. Point `OWLEE_GEOIP_PATH` at a MaxMind or DB-IP city `.mmdb` if you want country, region, and city without Cloudflare. DB-IP Lite data is published by [DB-IP](https://db-ip.com).
 
-Login, registration, and setup share one limit per client IP (`OWLEE_LOGIN_RATE_IP_*`). Login also has a limit per account (`OWLEE_LOGIN_RATE_ACCOUNT_*`) that only failed passwords use, and a successful login resets it. Both limits are checked before the password hash. A login with an unknown email still checks a hash, so the response time does not show which emails have an account. A full bucket answers `429` with `Retry-After`.
+Login, registration, password reset, and setup share one limit per client IP (`OWLEE_LOGIN_RATE_IP_*`). Login also has a limit per account (`OWLEE_LOGIN_RATE_ACCOUNT_*`) that only failed passwords use, and a successful login or a password reset resets it. A wrong current password on the change-password form uses the same account limit. Both limits are checked before the password hash. A login with an unknown email still checks a hash, so the response time does not show which emails have an account. A full bucket answers `429` with `Retry-After`.
 
 A request that runs longer than 60 seconds gets `408`. The server stops cleanly on Ctrl+C or SIGTERM (`docker stop`).
 

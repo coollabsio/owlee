@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::store::{self, EventSummary, IssueRow, Project};
 use crate::error::AppError;
-use crate::routes::require_user;
+use crate::routes::{require_editor, require_user};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -52,7 +52,7 @@ pub async fn create_project(
     jar: CookieJar,
     Json(body): Json<NewProject>,
 ) -> Result<Json<ProjectView>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let project = store::create_project(&state.db, &body.name, &body.platform).await?;
     Ok(Json(project_view(&state, project).await?))
 }
@@ -79,7 +79,7 @@ pub async fn set_project_quota(
     Path(id): Path<String>,
     Json(body): Json<QuotaBody>,
 ) -> Result<Json<ProjectView>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     if let Some(quota) = body.daily_quota {
         if !(1..=100_000_000).contains(&quota) {
             return Err(AppError::field(
@@ -97,7 +97,7 @@ pub async fn delete_project(
     jar: CookieJar,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     store::delete_project(&state.db, &id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -254,7 +254,7 @@ pub async fn bulk_update(
     jar: CookieJar,
     Json(body): Json<BulkBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     let updated = store::update_many_status(&state.db, &body.ids, &body.status).await?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
@@ -265,7 +265,7 @@ pub async fn update_issue(
     Path(id): Path<String>,
     Json(body): Json<StatusBody>,
 ) -> Result<Json<IssueRow>, AppError> {
-    require_user(&state, &jar).await?;
+    require_editor(&state, &jar).await?;
     Ok(Json(
         store::update_issue_status(&state.db, &id, &body.status).await?,
     ))

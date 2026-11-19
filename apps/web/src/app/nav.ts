@@ -20,6 +20,7 @@ export type NavLinkItem = {
   label: string;
   icon: IconComponent;
   end?: boolean;
+  editorOnly?: boolean;
 };
 
 export type NavGroup = {
@@ -58,7 +59,7 @@ export const products: Product[] = [
         links: [
           { to: "/incidents", label: "Incidents", icon: Siren },
           { to: "/maintenance", label: "Maintenance", icon: CalendarDays },
-          { to: "/notifications", label: "Notifications", icon: Bell },
+          { to: "/notifications", label: "Notifications", icon: Bell, editorOnly: true },
         ],
       },
     ],

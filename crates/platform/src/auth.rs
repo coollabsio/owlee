@@ -8,16 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
 
-const COMMON_PASSWORDS: &[&str] = &[
-    "password",
-    "password123",
-    "password1234",
-    "123456789012",
-    "qwertyuiop12",
-    "letmeinletmein",
-    "adminadminadmin",
-    "changeme1234",
-];
+const COMMON_PASSWORDS: &str = include_str!("common-passwords-2026-09-04.v1.txt");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum PasswordError {
@@ -66,7 +57,7 @@ impl PasswordService {
             return Err(PasswordError::InvalidLength);
         }
         if COMMON_PASSWORDS
-            .iter()
+            .lines()
             .any(|common| password.eq_ignore_ascii_case(common))
         {
             return Err(PasswordError::CommonPassword);
@@ -129,6 +120,11 @@ mod tests {
             passwords.validate("password1234").unwrap_err(),
             PasswordError::CommonPassword
         );
+        assert_eq!(
+            passwords.validate("ChangeMe1234").unwrap_err(),
+            PasswordError::CommonPassword
+        );
+        assert_eq!(passwords.validate("owlee-unique-phrase"), Ok(()));
     }
 
     #[test]

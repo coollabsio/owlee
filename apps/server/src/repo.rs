@@ -356,6 +356,160 @@ pub async fn revoke_token(
     Ok(())
 }
 
+pub async fn user_by_id(db: &Database, id: Id) -> Result<Option<User>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, email, display_name, role, password_hash, created_at FROM users WHERE id = $1",
+    )
+    .bind(id.to_string())
+    .fetch_optional(db.pool())
+    .await?;
+    row.as_ref().map(map_user).transpose()
+}
+
+pub async fn set_password(
+    db: &Database,
+    user_id: Id,
+    password_hash: &str,
+    now: TimestampMillis,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
+        .bind(password_hash)
+        .bind(now.as_millis())
+        .bind(user_id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub id: Id,
+    pub token_hash: String,
+    pub created_at: TimestampMillis,
+    pub last_activity_at: TimestampMillis,
+}
+
+/// Live sessions of one user, newest first.
+pub async fn list_sessions(
+    db: &Database,
+    user_id: Id,
+    now: TimestampMillis,
+) -> Result<Vec<Session>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, token_hash, created_at, last_activity_at FROM sessions \
+         WHERE user_id = $1 AND revoked_at IS NULL AND idle_expires_at > $2 AND absolute_expires_at > $2 \
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(user_id.to_string())
+    .bind(now.as_millis())
+    .fetch_all(db.pool())
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(Session {
+                id: parse_id(row, "id")?,
+                token_hash: row.try_get("token_hash")?,
+                created_at: TimestampMillis::from_millis(row.try_get("created_at")?),
+                last_activity_at: TimestampMillis::from_millis(row.try_get("last_activity_at")?),
+            })
+        })
+        .collect()
+}
+
+/// Revokes every live session of the user except the one with `keep_token_hash`.
+pub async fn revoke_user_sessions(
+    db: &Database,
+    user_id: Id,
+    keep_token_hash: Option<&str>,
+    now: TimestampMillis,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE sessions SET revoked_at = $1 \
+         WHERE user_id = $2 AND revoked_at IS NULL AND token_hash <> $3",
+    )
+    .bind(now.as_millis())
+    .bind(user_id.to_string())
+    .bind(keep_token_hash.unwrap_or(""))
+    .execute(db.pool())
+    .await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Purpose {
+    Register,
+    Recovery,
+}
+
+impl Purpose {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EmailToken {
+    pub email: String,
+    pub user_id: Option<Id>,
+}
+
+pub async fn insert_email_token(
+    db: &Database,
+    token_hash: &str,
+    purpose: Purpose,
+    email: &str,
+    user_id: Option<Id>,
+    now: TimestampMillis,
+    expires_at: TimestampMillis,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO email_tokens (token_hash, purpose, email, user_id, expires_at, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(token_hash)
+    .bind(purpose.as_str())
+    .bind(email)
+    .bind(user_id.map(|id| id.to_string()))
+    .bind(expires_at.as_millis())
+    .bind(now.as_millis())
+    .execute(db.pool())
+    .await?;
+    Ok(())
+}
+
+/// Marks a live token used and returns it. A second call for the same token,
+/// even a concurrent one, gets `None`.
+pub async fn consume_email_token(
+    db: &Database,
+    token_hash: &str,
+    purpose: Purpose,
+    now: TimestampMillis,
+) -> Result<Option<EmailToken>, sqlx::Error> {
+    let used = sqlx::query(
+        "UPDATE email_tokens SET used_at = $1 \
+         WHERE token_hash = $2 AND purpose = $3 AND used_at IS NULL AND expires_at > $1",
+    )
+    .bind(now.as_millis())
+    .bind(token_hash)
+    .bind(purpose.as_str())
+    .execute(db.pool())
+    .await?;
+    if used.rows_affected() != 1 {
+        return Ok(None);
+    }
+    let row = sqlx::query("SELECT email, user_id FROM email_tokens WHERE token_hash = $1")
+        .bind(token_hash)
+        .fetch_one(db.pool())
+        .await?;
+    Ok(Some(EmailToken {
+        email: row.try_get("email")?,
+        user_id: optional_id(&row, "user_id")?,
+    }))
+}
+
 pub async fn list_monitors(db: &Database) -> Result<Vec<Monitor>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {MONITOR_COLUMNS} FROM monitors ORDER BY lower(name), id"

@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
 import { ApiError, api, type Incident, type Monitor, type StatusPage } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { formatTime, stateLabel } from "@/lib/utils";
 
 const statuses = ["investigating", "identified", "monitoring", "resolved"].map((item) => ({ value: item, label: stateLabel[item] }));
@@ -32,6 +33,7 @@ function CardText({ title, body }: { title: string; body?: string }) {
 
 export function IncidentsPage() {
   const query = useQuery({ queryKey: ["incidents"], queryFn: () => api<Incident[]>("/api/incidents") });
+  const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const needle = search.trim().toLowerCase();
@@ -41,7 +43,7 @@ export function IncidentsPage() {
       <PageHeader
         title="Incidents"
         description="A timeline customers read on the status page. Automatic incidents open after repeated failures."
-        actions={<Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button>}
+        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : null}
       />
       {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
         <Empty title="No incidents" body="When a monitor crosses its failure threshold, Owlee files one. You can also write one by hand." />
@@ -104,7 +106,7 @@ export function IncidentsPage() {
           )}
         </LayerCard>
       )}
-      <IncidentDialog open={open} onClose={() => setOpen(false)} />
+      {canEdit ? <IncidentDialog open={open} onClose={() => setOpen(false)} /> : null}
     </div>
   );
 }
@@ -112,6 +114,7 @@ export function IncidentsPage() {
 export function IncidentDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["incident", id], queryFn: () => api<Incident>(`/api/incidents/${id}`) });
   const [status, setStatus] = useState("monitoring");
@@ -144,10 +147,10 @@ export function IncidentDetailPage() {
         title={incident.title}
         keepTitle
         description={`Opened ${formatTime(incident.started_at)}${incident.auto ? " by the scheduler" : ""}`}
-        actions={<Button variant="danger" onClick={() => remove.mutate()}>Delete</Button>}
+        actions={canEdit ? <Button variant="danger" onClick={() => remove.mutate()}>Delete</Button> : null}
       />
       <ErrorText error={remove.error} />
-      <div className="grid items-start gap-6 lg:grid-cols-[1fr_360px]">
+      <div className={canEdit ? "grid items-start gap-6 lg:grid-cols-[1fr_360px]" : "grid items-start gap-6"}>
         <LayerCard
           title="Timeline"
           actions={
@@ -167,7 +170,7 @@ export function IncidentDetailPage() {
             ))}
           </ol>
         </LayerCard>
-        <LayerCard title="Post an update" description="Updates are added to the public timeline.">
+        {canEdit ? <LayerCard title="Post an update" description="Updates are added to the public timeline.">
           <div className="space-y-3">
             <Field label="Status">
               <Select value={status} options={statuses} onChange={setStatus} aria-label="Status" />
@@ -182,7 +185,7 @@ export function IncidentDetailPage() {
               </Button>
             </div>
           </div>
-        </LayerCard>
+        </LayerCard> : null}
       </div>
     </div>
   );

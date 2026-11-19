@@ -1,5 +1,6 @@
 //! Deletes raw ingest rows in batches. Issue counts and analytics daily
-//! rollups stay, because those are what the dashboards read.
+//! rollups stay, because those are what the dashboards read. Dead sessions
+//! and used or expired email links go too.
 
 use owlee_platform::Database;
 
@@ -22,7 +23,22 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
             .ingest
             .analytics_retention_days
             .saturating_mul(86_400);
+    prune_auth(&state.db, now.timestamp_millis()).await?;
     prune_before(&state.db, &error_before, analytics_before).await
+}
+
+async fn prune_auth(db: &Database, now_ms: i64) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM sessions WHERE revoked_at IS NOT NULL OR idle_expires_at <= $1 OR absolute_expires_at <= $1",
+    )
+    .bind(now_ms)
+    .execute(db.pool())
+    .await?;
+    sqlx::query("DELETE FROM email_tokens WHERE used_at IS NOT NULL OR expires_at <= $1")
+        .bind(now_ms)
+        .execute(db.pool())
+        .await?;
+    Ok(())
 }
 
 pub async fn prune_before(

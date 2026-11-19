@@ -4,9 +4,11 @@ import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 
 export function LinksPage() {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const domains = useQuery({ queryKey: ["domains"], queryFn: () => api<InsightDomain[]>("/api/domains") });
   const links = useQuery({ queryKey: ["links"], queryFn: () => api<InsightLink[]>("/api/links") });
   const [openDomain, setOpenDomain] = useState(false);
@@ -46,7 +48,7 @@ export function LinksPage() {
       <LayerCard
         title="Short links"
         description="Open a link to see its clicks and referrers."
-        actions={<Button variant="primary" onClick={() => setOpenLink(true)} disabled={domainRows.length === 0}>New link</Button>}
+        actions={canEdit ? <Button variant="primary" onClick={() => setOpenLink(true)} disabled={domainRows.length === 0}>New link</Button> : null}
         flush
       >
         {linkRows.length === 0 ? (
@@ -84,7 +86,7 @@ export function LinksPage() {
       <LayerCard
         title="Domains"
         description="A hostname here is only used for redirects when it is not this server's own host."
-        actions={<Button onClick={() => setOpenDomain(true)}>New domain</Button>}
+        actions={canEdit ? <Button onClick={() => setOpenDomain(true)}>New domain</Button> : null}
         flush
       >
         {domainRows.length === 0 ? <CardEmpty title="No domains" body="Add a domain before you create a link." /> : (
@@ -106,14 +108,14 @@ export function LinksPage() {
           </table>
         )}
       </LayerCard>
-      <Dialog open={openDomain} title="New domain" onClose={() => setOpenDomain(false)}>
+      <Dialog open={canEdit && openDomain} title="New domain" onClose={() => setOpenDomain(false)}>
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); createDomain.mutate(); }}>
           <Field label="Hostname"><Input required value={hostname} onChange={(event) => setHostname(event.target.value)} placeholder="go.example.com" /></Field>
           <ErrorText error={createDomain.error} />
           <Button variant="primary" type="submit">Save domain</Button>
         </form>
       </Dialog>
-      <Dialog open={openLink} title="New link" onClose={() => setOpenLink(false)}>
+      <Dialog open={canEdit && openLink} title="New link" onClose={() => setOpenLink(false)}>
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); createLink.mutate(); }}>
           <Field label="Domain">
             <Select

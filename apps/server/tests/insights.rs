@@ -1,9 +1,9 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use owlee_platform::TimestampMillis;
-use owlee_server::{boot, initialize_setup_token, permit_signup, router, testing_config};
 use http_body_util::BodyExt;
+use owlee_platform::TimestampMillis;
+use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -263,9 +263,10 @@ async fn postgres_collects_a_pageview_when_configured() {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
+    let editor = match token {
+        Some(_) => None,
+        None => Some(editor_session(&state).await.unwrap()),
+    };
     let app = router(state);
     let email = format!("insights-{}@coollabs.io", owlee_platform::Id::new());
     let (status, _user, cookie, _) = if let Some(token) = token {
@@ -284,19 +285,16 @@ async fn postgres_collects_a_pageview_when_configured() {
         )
         .await
     } else {
-        call(
+        let (status, user, _, location) = call(
             &app,
-            "POST",
-            "/api/auth/register",
-            Some(json!({
-                "email": email,
-                "password": "correct-horse-battery",
-                "display_name": "Postgres"
-            })),
+            "GET",
+            "/api/auth/me",
             None,
+            editor.as_deref(),
             Some(BROWSER),
         )
-        .await
+        .await;
+        (status, user, editor, location)
     };
     assert!(status.is_success(), "{status}");
     let cookie = cookie.unwrap();

@@ -1,13 +1,13 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use owlee_platform::{SmtpConfig, TimestampMillis};
-use owlee_server::{boot, initialize_setup_token, router, testing_config};
 use http_body_util::BodyExt;
+use owlee_platform::{SmtpConfig, TimestampMillis};
+use owlee_server::{Outbox, boot, initialize_setup_token, router, testing_config};
 use serde_json::Value;
 use tower::ServiceExt;
 
-async fn started(env_smtp: bool) -> (Router, String) {
+async fn started(env_smtp: bool) -> (Router, String, Outbox) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("instance.sqlite");
     let _keep = Box::leak(Box::new(dir));
@@ -21,12 +21,58 @@ async fn started(env_smtp: bool) -> (Router, String) {
             from: "env@example.com".to_owned(),
         });
     }
-    let state = boot(config).await.unwrap();
+    let mut state = boot(config).await.unwrap();
+    let outbox = Outbox::default();
+    state.outbox = Some(outbox.clone());
     let token = initialize_setup_token(&state.db, TimestampMillis::now())
         .await
         .unwrap()
         .expect("setup token");
-    (router(state), token.token)
+    (router(state), token.token, outbox)
+}
+
+/// Asks for the link, then follows the one in the mail.
+async fn register(
+    app: &Router,
+    outbox: &Outbox,
+    email: &str,
+) -> (StatusCode, Value, Option<String>) {
+    let (status, body, _) = call(
+        app,
+        "POST",
+        "/api/auth/register",
+        Some(serde_json::json!({ "email": email })),
+        None,
+    )
+    .await;
+    if status != StatusCode::ACCEPTED {
+        return (status, body, None);
+    }
+    let text = outbox
+        .lock()
+        .unwrap()
+        .last()
+        .expect("register mail")
+        .text
+        .clone();
+    let token = text
+        .split("token=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("link in mail")
+        .to_owned();
+    call(
+        app,
+        "POST",
+        "/api/auth/register/complete",
+        Some(serde_json::json!({
+            "token": token,
+            "password": "correct-horse-battery",
+            "display_name": "Member"
+        })),
+        None,
+    )
+    .await
 }
 
 async fn call(
@@ -105,17 +151,9 @@ async fn root_session(app: &Router, token: &str) -> String {
     cookie.expect("session")
 }
 
-fn register_body(email: &str) -> Value {
-    serde_json::json!({
-        "email": email,
-        "password": "correct-horse-battery",
-        "display_name": "Member"
-    })
-}
-
 #[tokio::test]
 async fn root_opens_registration_only_after_smtp_and_members_cannot() {
-    let (app, token) = started(false).await;
+    let (app, token, outbox) = started(false).await;
     let root = root_session(&app, &token).await;
 
     let (status, _, _) = call(&app, "GET", "/api/admin/settings", None, None).await;
@@ -141,14 +179,7 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
     assert_eq!(status, StatusCode::CONFLICT, "{problem}");
     assert_eq!(problem["code"], "email_not_configured");
 
-    let (status, problem, _) = call(
-        &app,
-        "POST",
-        "/api/auth/register",
-        Some(register_body("second@coollabs.io")),
-        None,
-    )
-    .await;
+    let (status, problem, _) = register(&app, &outbox, "second@coollabs.io").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
     assert_eq!(problem["code"], "registration_closed");
 
@@ -187,15 +218,8 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
     assert_eq!(meta["signup_open"], true);
     let _ = status;
 
-    let (status, member, member_cookie) = call(
-        &app,
-        "POST",
-        "/api/auth/register",
-        Some(register_body("second@coollabs.io")),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{member}");
+    let (status, member, member_cookie) = register(&app, &outbox, "second@coollabs.io").await;
+    assert_eq!(status, StatusCode::CREATED, "{member}");
     assert_eq!(member["role"], "member");
     assert_eq!(member["root"], false);
     assert_eq!(member["installation_admin"], false);
@@ -316,14 +340,7 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
     let (status, meta, _) = call(&app, "GET", "/api/meta", None, None).await;
     assert_eq!(meta["signup_open"], false);
     let _ = status;
-    let (status, problem, _) = call(
-        &app,
-        "POST",
-        "/api/auth/register",
-        Some(register_body("third@coollabs.io")),
-        None,
-    )
-    .await;
+    let (status, problem, _) = register(&app, &outbox, "third@coollabs.io").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
     assert_eq!(problem["code"], "registration_closed");
 
@@ -341,7 +358,7 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
 
 #[tokio::test]
 async fn environment_smtp_can_open_registration_and_clearing_still_closes_it() {
-    let (app, token) = started(true).await;
+    let (app, token, outbox) = started(true).await;
     let root = root_session(&app, &token).await;
 
     let (status, settings, _) = call(&app, "GET", "/api/admin/settings", None, Some(&root)).await;
@@ -362,15 +379,8 @@ async fn environment_smtp_can_open_registration_and_clearing_still_closes_it() {
     assert_eq!(status, StatusCode::OK, "{opened}");
     assert_eq!(opened["registration_open"], true);
 
-    let (status, user, _) = call(
-        &app,
-        "POST",
-        "/api/auth/register",
-        Some(register_body("env@coollabs.io")),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{user}");
+    let (status, user, _) = register(&app, &outbox, "env@coollabs.io").await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
 
     let (status, cleared, _) = call(
         &app,
@@ -385,14 +395,7 @@ async fn environment_smtp_can_open_registration_and_clearing_still_closes_it() {
     assert_eq!(cleared["smtp"]["source"], "environment");
     assert_eq!(cleared["smtp_ready"], true);
 
-    let (status, problem, _) = call(
-        &app,
-        "POST",
-        "/api/auth/register",
-        Some(register_body("later@coollabs.io")),
-        None,
-    )
-    .await;
+    let (status, problem, _) = register(&app, &outbox, "later@coollabs.io").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
     assert_eq!(problem["code"], "registration_closed");
 }

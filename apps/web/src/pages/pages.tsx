@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, Navigate, useNavigate, useParams } from "react-router";
 import { Button, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
 import { ApiError, api, type Monitor, type StatusPage } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 
 export function PagesPage() {
   const query = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages") });
+  const canEdit = useCanEdit();
   const [search, setSearch] = useState("");
   const needle = search.trim().toLowerCase();
   const pages = (query.data ?? []).filter((page) => page.title.toLowerCase().includes(needle) || page.slug.toLowerCase().includes(needle));
@@ -14,12 +16,12 @@ export function PagesPage() {
       <PageHeader
         title="Status pages"
         description="Public pages at /status/your-slug."
-        actions={<Link to="/pages/new"><Button variant="highlighted">New page</Button></Link>}
+        actions={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : null}
       />
       {query.isLoading ? (
         <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading pages…</p>
       ) : (query.data?.length ?? 0) === 0 ? (
-        <Empty title="No status pages" body="Group monitors onto a page your customers can open without signing in." action={<Link to="/pages/new"><Button variant="highlighted">New page</Button></Link>} />
+        <Empty title="No status pages" body="Group monitors onto a page your customers can open without signing in." action={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : undefined} />
       ) : (
         <LayerCard title="All pages" description="Customers open these pages without signing in." flush>
           <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
@@ -45,7 +47,7 @@ export function PagesPage() {
                     <td><StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge></td>
                     <td>
                       <div className="flex justify-end gap-2">
-                        <Link to={`/pages/${page.id}`}><Button>Edit</Button></Link>
+                        {canEdit ? <Link to={`/pages/${page.id}`}><Button>Edit</Button></Link> : null}
                         {page.published ? <Link to={`/status/${page.slug}`}><Button>View</Button></Link> : null}
                       </div>
                     </td>
@@ -69,6 +71,7 @@ export function PageEditor() {
   const { id = "new" } = useParams();
   const creating = id === "new";
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const existing = useQuery({
     queryKey: ["page", id],
@@ -125,15 +128,17 @@ export function PageEditor() {
     save.mutate();
   }
 
+  if (creating && !canEdit) return <Navigate to="/pages" replace />;
   if (!creating && existing.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading page…</p>;
 
   return (
     <form className="mx-auto flex w-full max-w-3xl flex-col gap-6" onSubmit={submit}>
       <PageHeader
-        title={creating ? "New status page" : "Edit status page"}
+        title={creating ? "New status page" : canEdit ? "Edit status page" : "Status page"}
         description="Choose a slug and the monitors that appear on it."
         actions={!creating && page?.published ? <Link to={`/status/${page.slug}`}><Button type="button">View public page</Button></Link> : null}
       />
+      <fieldset disabled={!canEdit} className="contents">
       <LayerCard title="Details" description={!creating && page?.published ? `Public URL: /status/${page.slug}` : "What customers see at the top of the page."}>
         <div className="flex flex-col gap-4">
           <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
@@ -177,11 +182,14 @@ export function PageEditor() {
         )}
         {fields.monitor_ids ? <p className="field-error">{fields.monitor_ids}</p> : null}
       </LayerCard>
+      </fieldset>
       <ErrorText error={save.error || remove.error} />
-      <div className="flex justify-between gap-2">
-        {!creating ? <Button type="button" variant="danger" onClick={() => remove.mutate()}>Delete</Button> : <span />}
-        <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? "Saving…" : "Save page"}</Button>
-      </div>
+      {canEdit ? (
+        <div className="flex justify-between gap-2">
+          {!creating ? <Button type="button" variant="danger" onClick={() => remove.mutate()}>Delete</Button> : <span />}
+          <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? "Saving…" : "Save page"}</Button>
+        </div>
+      ) : null}
     </form>
   );
 }

@@ -9,6 +9,10 @@ services:
       OWLEE_ENV: production
       OWLEE_BIND: 0.0.0.0
       OWLEE_PORT: 8080
+      # Encrypts secrets saved in the database, such as the SMTP password.
+      # Make one with `openssl rand -base64 32` and keep it: a new key makes
+      # the saved SMTP password unreadable, and the root user must enter it again.
+      OWLEE_APP_KEY: ${OWLEE_APP_KEY:?Set OWLEE_APP_KEY}
       # Coolify publishes this container through Traefik, which appends one
       # X-Forwarded-For hop. Per-IP limits (ingest and login) read that hop.
       # Use 2 when Cloudflare sits in front of Traefik.

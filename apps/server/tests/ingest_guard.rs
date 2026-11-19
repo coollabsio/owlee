@@ -8,8 +8,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use owlee_platform::{Config, EnvironmentMode, TimestampMillis};
 use owlee_server::{
-    AppState, MapResolver, boot, initialize_setup_token, permit_signup, prune_before,
-    quota_today, recheck_verified, router, testing_config,
+    AppState, MapResolver, boot, editor_session, initialize_setup_token, prune_before, quota_today,
+    recheck_verified, router, testing_config,
 };
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -36,9 +36,6 @@ async fn boot_app(mut config: Config) -> (Router, AppState, Option<String>) {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
     let app = router(state.clone());
     (app, state, token)
 }
@@ -112,31 +109,20 @@ async fn send(
     }
 }
 
-async fn owner(app: &Router, setup_token: Option<&str>) -> String {
-    let (path, body) = if let Some(token) = setup_token {
-        (
-            "/api/setup/complete",
-            json!({
-                "token": token,
-                "email": format!("guard-{}@coollabs.io", owlee_platform::Id::new()),
-                "password": "correct-horse-battery",
-                "display_name": "Ada"
-            }),
-        )
-    } else {
-        (
-            "/api/auth/register",
-            json!({
-                "email": format!("guard-{}@coollabs.io", owlee_platform::Id::new()),
-                "password": "correct-horse-battery",
-                "display_name": "Ada"
-            }),
-        )
+async fn owner(app: &Router, state: &AppState, setup_token: Option<&str>) -> String {
+    let Some(token) = setup_token else {
+        return editor_session(state).await.unwrap();
     };
+    let body = json!({
+        "token": token,
+        "email": format!("guard-{}@coollabs.io", owlee_platform::Id::new()),
+        "password": "correct-horse-battery",
+        "display_name": "Ada"
+    });
     let hit = send(
         app,
         "POST",
-        path,
+        "/api/setup/complete",
         body.to_string().into_bytes(),
         None,
         &[("content-type", "application/json")],
@@ -225,16 +211,16 @@ async fn exercise(config: Config) {
 }
 
 async fn oversized_body(config: &Config) {
-    let (app, _, token) = boot_app(config.clone()).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config.clone()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     let mut huge = "x".repeat(config.ingest.error_max_body_bytes + 8);
     huge.insert_str(0, "{");
     let hit = post_event(&app, &id, &key, huge.into_bytes()).await;
     assert_eq!(hit.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", hit.body);
 
-    let (app, _, token) = boot_app(config.clone()).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config.clone()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let created = send(
         &app,
         "POST",
@@ -249,7 +235,9 @@ async fn oversized_body(config: &Config) {
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     let public_id = created.body["public_id"].as_str().unwrap();
     let fat = "y".repeat(config.ingest.analytics_max_body_bytes + 8);
-    let body = format!(r#"{{"site":"{public_id}","type":"pageview","url":"https://docs.example/","pad":"{fat}"}}"#);
+    let body = format!(
+        r#"{{"site":"{public_id}","type":"pageview","url":"https://docs.example/","pad":"{fat}"}}"#
+    );
     let rejected = send(
         &app,
         "POST",
@@ -263,7 +251,12 @@ async fn oversized_body(config: &Config) {
         ],
     )
     .await;
-    assert_eq!(rejected.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", rejected.body);
+    assert_eq!(
+        rejected.status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{}",
+        rejected.body
+    );
 
     // A chunked body has no Content-Length. The read must stop at the limit,
     // so an endless stream is answered 413 instead of being buffered forever.
@@ -294,8 +287,8 @@ async fn burst_is_429(mut config: Config) {
     config.ingest.error_rate_ip_burst = 2;
     config.ingest.error_rate_ip_per_min = 2;
     config.ingest.error_rate_project_burst = 100;
-    let (app, _, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     for index in 0..2 {
         let body = envelope(&event(&event_id(), "disk full").to_string());
@@ -309,7 +302,12 @@ async fn burst_is_429(mut config: Config) {
         envelope(&event(&event_id(), "disk full").to_string()),
     )
     .await;
-    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
     let retry = blocked.retry_after.as_deref().unwrap_or("");
     assert!(!retry.is_empty() && retry != "0", "{retry}");
     assert!(
@@ -325,7 +323,7 @@ async fn burst_is_429(mut config: Config) {
 
 async fn wrong_origin(config: Config) {
     let (app, state, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let created = send(
         &app,
         "POST",
@@ -388,13 +386,11 @@ async fn wrong_origin(config: Config) {
 
 async fn flood_is_capped(config: Config) {
     let keep = config.ingest.error_keep_first;
-    let (app, _, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     for _ in 0..8 {
-        let body = envelope(
-            &event(&event_id(), "disk full on volume 3").to_string(),
-        );
+        let body = envelope(&event(&event_id(), "disk full on volume 3").to_string());
         let hit = post_event(&app, &id, &key, body).await;
         assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
     }
@@ -427,7 +423,7 @@ async fn flood_is_capped(config: Config) {
 
 async fn retention_keeps_rollups(config: Config) {
     let (app, state, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     let first = post_event(
         &app,
@@ -534,7 +530,7 @@ async fn retention_keeps_rollups(config: Config) {
 async fn quota_is_enforced(config: Config) {
     let (app, state, token) = boot_app(config).await;
     let root = token.is_some();
-    let cookie = owner(&app, token.as_deref()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     if root {
         let before = send(
@@ -603,7 +599,12 @@ async fn quota_is_enforced(config: Config) {
         envelope(&event(&event_id(), "over quota").to_string()),
     )
     .await;
-    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
     assert!(blocked.retry_after.is_some());
     assert!(
         blocked
@@ -639,8 +640,8 @@ async fn quota_is_enforced(config: Config) {
 }
 
 async fn override_replaces_the_global_cap(config: Config) {
-    let (app, _, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = project(&app, &cookie).await;
     let first = send(
         &app,
@@ -654,7 +655,10 @@ async fn override_replaces_the_global_cap(config: Config) {
     assert_eq!(first.status, StatusCode::OK, "{}", first.body);
     assert!(first.body["quotaOverride"].is_null());
     let inherited = first.body["dailyQuota"].as_i64().unwrap();
-    assert!(inherited > 1, "global cap {inherited} should be above the override");
+    assert!(
+        inherited > 1,
+        "global cap {inherited} should be above the override"
+    );
     assert!(!first.body["resetsAt"].as_str().unwrap_or("").is_empty());
 
     let set = send(
@@ -685,18 +689,36 @@ async fn override_replaces_the_global_cap(config: Config) {
         envelope(&event(&event_id(), "over the project cap").to_string()),
     )
     .await;
-    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
     assert!(
-        blocked.rate_limits.as_deref().unwrap_or("").contains("quota_exceeded"),
+        blocked
+            .rate_limits
+            .as_deref()
+            .unwrap_or("")
+            .contains("quota_exceeded"),
         "{:?}",
         blocked.rate_limits
     );
 
-    let home = send(&app, "GET", "/api/dashboard", Vec::new(), Some(&cookie), &[]).await;
+    let home = send(
+        &app,
+        "GET",
+        "/api/dashboard",
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
     assert_eq!(home.status, StatusCode::OK, "{}", home.body);
     let hits = home.body["quota_hits"].as_array().unwrap();
     assert!(
-        hits.iter().any(|hit| hit["kind"] == "error" && hit["id"] == id),
+        hits.iter()
+            .any(|hit| hit["kind"] == "error" && hit["id"] == id),
         "{hits:?}"
     );
     assert!(!hits[0]["resets_at"].as_str().unwrap_or("").is_empty());
@@ -719,7 +741,9 @@ async fn override_replaces_the_global_cap(config: Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": domain.clone()}).to_string().into_bytes(),
+        json!({"name": "Docs", "domain": domain.clone()})
+            .to_string()
+            .into_bytes(),
         Some(&cookie),
         &[("content-type", "application/json")],
     )
@@ -744,14 +768,34 @@ async fn override_replaces_the_global_cap(config: Config) {
     assert_eq!(set_site.body["quota_override"], 1);
     let origin = format!("https://{domain}");
     let first_view = receive(&app, &public_id, &origin).await;
-    assert_eq!(first_view.status, StatusCode::ACCEPTED, "{}", first_view.body);
+    assert_eq!(
+        first_view.status,
+        StatusCode::ACCEPTED,
+        "{}",
+        first_view.body
+    );
     let second_view = receive(&app, &public_id, &origin).await;
-    assert_eq!(second_view.status, StatusCode::TOO_MANY_REQUESTS, "{}", second_view.body);
+    assert_eq!(
+        second_view.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        second_view.body
+    );
     assert!(second_view.retry_after.is_some());
-    let again = send(&app, "GET", "/api/dashboard", Vec::new(), Some(&cookie), &[]).await;
+    let again = send(
+        &app,
+        "GET",
+        "/api/dashboard",
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
     let site_hits = again.body["quota_hits"].as_array().unwrap();
     assert!(
-        site_hits.iter().any(|hit| hit["kind"] == "analytics" && hit["id"] == site_id),
+        site_hits
+            .iter()
+            .any(|hit| hit["kind"] == "analytics" && hit["id"] == site_id),
         "{site_hits:?}"
     );
 }
@@ -766,11 +810,8 @@ async fn txt_verification(mut config: Config) {
         .await
         .unwrap()
         .map(|issued| issued.token);
-    if token.is_none() {
-        permit_signup(&state.db).await.unwrap();
-    }
     let app = router(state.clone());
-    let cookie = owner(&app, token.as_deref()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let domain = site_host();
     let created = send(
         &app,
@@ -872,8 +913,8 @@ async fn login_is_limited(mut config: Config) {
     config.ingest.login_rate_ip_per_min = 2;
     config.ingest.login_rate_account_burst = 100;
     config.ingest.login_rate_account_per_min = 100;
-    let (app, _, token) = boot_app(config).await;
-    let _cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config).await;
+    let _cookie = owner(&app, &state, token.as_deref()).await;
     let body = json!({"email": "nobody@coollabs.io", "password": "wrong-password-1"})
         .to_string()
         .into_bytes();
@@ -904,7 +945,12 @@ async fn login_is_limited(mut config: Config) {
         ],
     )
     .await;
-    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
     assert!(blocked.retry_after.is_some());
     let other_ip = send(
         &app,
@@ -930,9 +976,14 @@ async fn login(app: &Router, email: &str, password: &str, ip: &str) -> Hit {
         app,
         "POST",
         "/api/auth/login",
-        json!({"email": email, "password": password}).to_string().into_bytes(),
+        json!({"email": email, "password": password})
+            .to_string()
+            .into_bytes(),
         None,
-        &[("content-type", "application/json"), ("x-forwarded-for", ip)],
+        &[
+            ("content-type", "application/json"),
+            ("x-forwarded-for", ip),
+        ],
     )
     .await
 }
@@ -941,8 +992,8 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
     config.proxy_hops = 1;
     config.ingest.login_rate_account_burst = 2;
     config.ingest.login_rate_account_per_min = 1;
-    let (app, _, token) = boot_app(config).await;
-    let cookie = owner(&app, token.as_deref()).await;
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
     let me = send(&app, "GET", "/api/auth/me", Vec::new(), Some(&cookie), &[]).await;
     let email = me.body["email"].as_str().expect("me.email").to_owned();
 
@@ -959,7 +1010,12 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
     let blocked = login(&app, &email, &guess, "203.0.113.22").await;
-    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        blocked.body
+    );
 
     // An unknown email is limited the same way, so the answer does not differ.
     for _ in 0..2 {
@@ -967,7 +1023,12 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
     let ghost = login(&app, "ghost@coollabs.io", &guess, "203.0.113.24").await;
-    assert_eq!(ghost.status, StatusCode::TOO_MANY_REQUESTS, "{}", ghost.body);
+    assert_eq!(
+        ghost.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        ghost.body
+    );
 }
 
 #[tokio::test]
@@ -986,12 +1047,18 @@ async fn postgres_ingest_guards() {
     let mut config = sqlite_config();
     // Own database so this test's owner is root and it does not share
     // instance_settings with the other Postgres suites.
-    let url = url.trim_end_matches('/').rsplit_once('/').map_or(url.clone(), |(base, _)| {
-        format!("{base}/owlee_ingest")
-    });
+    let url = url
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(url.clone(), |(base, _)| format!("{base}/owlee_ingest"));
     let admin = url.replacen("owlee_ingest", "postgres", 1);
     let _ = sqlx::query("CREATE DATABASE owlee_ingest")
-        .execute(&sqlx::postgres::PgPoolOptions::new().connect(&admin).await.unwrap())
+        .execute(
+            &sqlx::postgres::PgPoolOptions::new()
+                .connect(&admin)
+                .await
+                .unwrap(),
+        )
         .await;
     config.database_url = Some(url);
     exercise(config).await;

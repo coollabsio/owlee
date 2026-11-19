@@ -7,6 +7,7 @@ import { StackFrames } from "@/components/event-view";
 import { Badge } from "@/components/issue-badge";
 import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
 import { api, type ExceptionInfo, type IssueDetail, type NormalizedEvent } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { cn, fullTime } from "@/lib/utils";
 
 const ranges = ["24h", "7d", "14d", "30d"] as const;
@@ -14,6 +15,7 @@ const ranges = ["24h", "7d", "14d", "30d"] as const;
 export function IssueDetailPage() {
   const { id = "", eventId } = useParams();
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const [range, setRange] = useState<(typeof ranges)[number]>("14d");
   const [environment, setEnvironment] = useState("");
@@ -76,7 +78,7 @@ export function IssueDetailPage() {
           keepTitle
           description={parts.message || undefined}
           actions={
-            <>
+            canEdit ? <>
               {data.status !== "resolved" ? (
                 <Button variant="highlighted" onClick={() => update.mutate("resolved")}>
                   Resolve
@@ -89,7 +91,7 @@ export function IssueDetailPage() {
               ) : (
                 <Button onClick={() => update.mutate("unresolved")}>Unarchive</Button>
               )}
-            </>
+            </> : null
           }
         />
         <div className="-mt-3 flex flex-wrap items-center gap-2">

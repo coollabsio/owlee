@@ -4,9 +4,11 @@ import { Link, useNavigate, useParams } from "react-router";
 import { Badge } from "@/components/issue-badge";
 import { Button, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { api, type Project } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 
 export function ErrorProjectsPage() {
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/api/error-projects") });
   const [name, setName] = useState("");
@@ -29,7 +31,7 @@ export function ErrorProjectsPage() {
         title="Projects"
         description="Each project has a Sentry DSN. Paste it into an official SDK and errors land in Issues."
       />
-      <LayerCard title="New project" description="Pick the platform you will install the SDK on.">
+      {canEdit ? <LayerCard title="New project" description="Pick the platform you will install the SDK on.">
         <form
           className="flex flex-col gap-3 md:flex-row md:items-end"
           onSubmit={(event) => {
@@ -53,7 +55,7 @@ export function ErrorProjectsPage() {
           </Button>
         </form>
         {error ? <p className="field-error">{error}</p> : null}
-      </LayerCard>
+      </LayerCard> : null}
       <LayerCard title="All projects" flush>
         {projects.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading projects...</p> : null}
         {projects.data && projects.data.length === 0 ? (
@@ -105,6 +107,7 @@ export function ErrorProjectsPage() {
 export function ProjectDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const canEdit = useCanEdit();
   const client = useQueryClient();
   const project = useQuery({
     queryKey: ["project", id],
@@ -141,9 +144,11 @@ export function ProjectDetailPage() {
           keepTitle
           description={`Project id ${data.id} · ${platformLabel(data.platform)}`}
           actions={
-            <Button variant="danger" onClick={() => remove.mutate()} disabled={remove.isPending}>
-              Delete project
-            </Button>
+            canEdit ? (
+              <Button variant="danger" onClick={() => remove.mutate()} disabled={remove.isPending}>
+                Delete project
+              </Button>
+            ) : null
           }
         />
       </div>
@@ -197,6 +202,7 @@ function resetWhen(iso: string) {
 
 function ProjectQuota({ project }: { project: Project }) {
   const client = useQueryClient();
+  const canEdit = useCanEdit();
   const [value, setValue] = useState(project.quotaOverride == null ? "" : String(project.quotaOverride));
   const save = useMutation({
     mutationFn: (daily: number | null) =>
@@ -222,7 +228,7 @@ function ProjectQuota({ project }: { project: Project }) {
         {project.usedToday.toLocaleString()} of {project.dailyQuota.toLocaleString()} errors accepted today.
         {project.quotaExceeded ? " Further events are rejected until the counter resets." : ""} Resets {resetWhen(project.resetsAt)}.
       </p>
-      <form
+      {canEdit ? <form
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
         onSubmit={(event) => {
           event.preventDefault();
@@ -239,7 +245,7 @@ function ProjectQuota({ project }: { project: Project }) {
         {project.quotaOverride != null ? (
           <Button type="button" disabled={save.isPending} onClick={() => save.mutate(null)}>Inherit</Button>
         ) : null}
-      </form>
+      </form> : null}
       {save.error ? <p className="field-error">{(save.error as Error).message}</p> : null}
     </LayerCard>
   );

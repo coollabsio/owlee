@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use owlee_domain::{NotificationPayload, sign_body};
@@ -139,7 +140,7 @@ async fn post_json(state: &AppState, url: &str, body: serde_json::Value) -> Resu
 }
 
 async fn effective_smtp(state: &AppState) -> Option<owlee_platform::SmtpConfig> {
-    match crate::instance_settings::load(&state.db).await {
+    match crate::instance_settings::load(&state.db, &state.config.app_key).await {
         Ok(settings) => settings
             .smtp
             .map(owlee_platform::SmtpConfig::from)
@@ -149,6 +150,44 @@ async fn effective_smtp(state: &AppState) -> Option<owlee_platform::SmtpConfig> 
             state.config.smtp.clone()
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SentMail {
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+}
+
+pub type Outbox = Arc<Mutex<Vec<SentMail>>>;
+
+/// Registration and recovery mail. Sent in the background, so the response
+/// time does not tell whether the address has an account.
+pub(crate) async fn send_account_mail(state: &AppState, to: &str, subject: &str, text: String) {
+    let Some(smtp) = effective_smtp(state).await else {
+        tracing::warn!(
+            subject,
+            "no mail server is configured, so an account mail was not sent"
+        );
+        return;
+    };
+    let mail = SentMail {
+        to: to.to_owned(),
+        subject: subject.to_owned(),
+        text,
+    };
+    if let Some(outbox) = &state.outbox {
+        outbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(mail);
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(error) = send_email(&smtp, &mail.to, &mail.subject, &mail.text).await {
+            tracing::warn!(%error, subject = mail.subject, "sending an account mail failed");
+        }
+    });
 }
 
 async fn send_email(

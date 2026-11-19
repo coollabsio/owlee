@@ -2,12 +2,24 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { ApiError, api, type Channel, type Monitor } from "@/lib/api";
+import { useCanEdit } from "@/lib/me";
 import { formatTime } from "@/lib/utils";
 
 const providers = ["email", "webhook", "slack", "discord"] as const;
 const providerLabel: Record<(typeof providers)[number], string> = { email: "Email", webhook: "Webhook", slack: "Slack", discord: "Discord" };
 
 export function NotificationsPage() {
+  if (!useCanEdit()) {
+    return (
+      <div className="flex flex-col gap-6">
+        <PageHeader title="Notifications" description="Only an admin can view notification channels." />
+      </div>
+    );
+  }
+  return <NotificationChannels />;
+}
+
+function NotificationChannels() {
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["notifications"], queryFn: () => api<Channel[]>("/api/notifications") });
   const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors") });

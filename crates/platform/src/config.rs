@@ -45,6 +45,7 @@ const LOGIN_RATE_IP: &str = "OWLEE_LOGIN_RATE_IP_PER_MIN";
 const LOGIN_BURST_IP: &str = "OWLEE_LOGIN_RATE_IP_BURST";
 const LOGIN_RATE_ACCOUNT: &str = "OWLEE_LOGIN_RATE_ACCOUNT_PER_MIN";
 const LOGIN_BURST_ACCOUNT: &str = "OWLEE_LOGIN_RATE_ACCOUNT_BURST";
+const APP_KEY: &str = "OWLEE_APP_KEY";
 
 /// Limits for the public error and analytics ingest endpoints.
 #[derive(Clone, Debug)]
@@ -126,6 +127,8 @@ pub struct Config {
     /// Optional MaxMind or DB-IP city database (`.mmdb`) for analytics geolocation.
     pub geoip_path: Option<PathBuf>,
     pub ingest: IngestConfig,
+    /// Encrypts secrets saved in the database (`OWLEE_APP_KEY`).
+    pub app_key: AppKey,
 }
 
 impl Config {
@@ -148,6 +151,7 @@ impl Config {
             trusted_proxies: default_trusted_proxies(),
             geoip_path: None,
             ingest: IngestConfig::default(),
+            app_key: AppKey::DEVELOPMENT,
         }
     }
 
@@ -241,14 +245,24 @@ impl Config {
             })?;
         }
         if let Some(networks) = optional(TRUSTED_PROXIES) {
-            config.trusted_proxies =
-                parse_networks(&networks).ok_or(ConfigError::Invalid {
-                    name: TRUSTED_PROXIES,
-                    value: networks,
-                })?;
+            config.trusted_proxies = parse_networks(&networks).ok_or(ConfigError::Invalid {
+                name: TRUSTED_PROXIES,
+                value: networks,
+            })?;
         }
         if let Some(path) = optional(GEOIP_PATH) {
             config.geoip_path = Some(PathBuf::from(path));
+        }
+        match optional(APP_KEY) {
+            Some(value) => {
+                config.app_key = value.parse().map_err(|()| ConfigError::AppKey)?;
+            }
+            None if environment == EnvironmentMode::Production => {
+                return Err(ConfigError::AppKey);
+            }
+            None => tracing::warn!(
+                "OWLEE_APP_KEY is not set, so saved secrets use the public development key"
+            ),
         }
         apply_ingest_env(&mut config)?;
         Ok(config)
@@ -314,16 +328,66 @@ pub enum ConfigError {
         "OWLEE_DATABASE_URL must be a postgres:// or postgresql:// URL. SQLite is the default; set OWLEE_DATABASE_PATH to move the file"
     )]
     DatabaseUrl,
+    // The value is a secret, so the message does not repeat it.
+    #[error("OWLEE_APP_KEY must be base64 of 32 bytes. Make one with `openssl rand -base64 32`")]
+    AppKey,
+}
+
+/// The 32-byte key that encrypts secrets saved in the database. Set as base64 in `OWLEE_APP_KEY`.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AppKey([u8; 32]);
+
+impl AppKey {
+    /// Public, so anything sealed with it is only obscured. Development and tests only.
+    pub const DEVELOPMENT: Self = Self([0x0e; 32]);
+
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl FromStr for AppKey {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        use base64::Engine as _;
+
+        base64::engine::general_purpose::STANDARD
+            .decode(value.trim())
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .map(Self)
+            .ok_or(())
+    }
+}
+
+impl fmt::Debug for AppKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
 }
 
 /// Loopback and private networks: Docker, Traefik, and Coolify proxies live
 /// here, and a visitor from the internet does not.
 #[must_use]
 pub fn default_trusted_proxies() -> Vec<IpNet> {
-    ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
-        .iter()
-        .filter_map(|network| network.parse().ok())
-        .collect()
+    [
+        "127.0.0.0/8",
+        "::1/128",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    ]
+    .iter()
+    .filter_map(|network| network.parse().ok())
+    .collect()
 }
 
 /// Comma-separated CIDRs or plain addresses. `none` trusts no proxy. A network
@@ -580,6 +644,41 @@ mod tests {
         assert!(matches!(error, ConfigError::DatabaseUrl));
         unsafe {
             std::env::remove_var("OWLEE_DATABASE_URL");
+        }
+    }
+
+    #[test]
+    fn app_key_is_required_in_production_and_parsed_as_base64() {
+        let _env = lock_process_env();
+        // SAFETY: the lock above is the only other writer of these variables.
+        unsafe {
+            std::env::set_var("OWLEE_ENV", "production");
+            std::env::remove_var("OWLEE_APP_KEY");
+        }
+        let missing = Config::from_env().unwrap_err();
+        assert_eq!(
+            missing.to_string(),
+            "OWLEE_APP_KEY must be base64 of 32 bytes. Make one with `openssl rand -base64 32`"
+        );
+        unsafe {
+            std::env::set_var(
+                "OWLEE_APP_KEY",
+                "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            );
+        }
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.app_key, AppKey::new([1; 32]));
+        assert_eq!(format!("{:?}", config.app_key), "[REDACTED]");
+        unsafe {
+            std::env::set_var("OWLEE_APP_KEY", "c2hvcnQ=");
+        }
+        assert!(matches!(
+            Config::from_env().unwrap_err(),
+            ConfigError::AppKey
+        ));
+        unsafe {
+            std::env::remove_var("OWLEE_APP_KEY");
+            std::env::remove_var("OWLEE_ENV");
         }
     }
 

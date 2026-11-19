@@ -5,7 +5,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { dashboard, manage, type NavLinkItem, type Product, products } from "@/app/nav";
 import { CommandPalette, modKeyLabel } from "@/components/command-palette";
 import { ProfileMenu } from "@/components/profile-menu";
-import { api, type Meta, type User } from "@/lib/api";
+import { api, type Meta } from "@/lib/api";
+import { useMe } from "@/lib/me";
 import { cn } from "@/lib/utils";
 
 function linkActive(pathname: string, link: NavLinkItem) {
@@ -24,7 +25,9 @@ function NavItems({
   onOpenProduct,
   onBack,
   onNavigate,
+  canEdit,
 }: {
+  canEdit: boolean;
   pathname: string;
   shown: Product | null;
   swap: "" | "forward" | "back";
@@ -61,7 +64,7 @@ function NavItems({
             <li key={group.label ?? index}>
               {group.label ? <div className={cn("nav-section", index > 0 && "mt-3")}>{group.label}</div> : null}
               <ul className="flex flex-col gap-0.5">
-                {group.links.map((link) => (
+                {group.links.filter((link) => canEdit || !link.editorOnly).map((link) => (
                   <li key={link.to}>
                     <NavLink
                       to={link.to}
@@ -143,7 +146,8 @@ function NavItems({
 export function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
-  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") });
+  const me = useMe();
+  const canEdit = me.data?.installation_admin === true;
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState<string | "root" | null>(null);
@@ -237,6 +241,7 @@ export function Shell() {
       onOpenProduct={openProduct}
       onBack={backToProducts}
       onNavigate={onNavigate}
+      canEdit={canEdit}
     />
   );
 

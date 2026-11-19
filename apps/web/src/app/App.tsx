@@ -1,8 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 import { Shell } from "@/app/Shell";
-import { ApiError, api, type User } from "@/lib/api";
-import { LoginPage, RegisterPage, SetupPage } from "@/pages/auth";
+import { ApiError } from "@/lib/api";
+import { useMe } from "@/lib/me";
+import {
+  ForgotPasswordPage,
+  LoginPage,
+  RegisterCompletePage,
+  RegisterPage,
+  ResetPasswordPage,
+  SetupPage,
+} from "@/pages/auth";
 import { AgentsPage } from "@/pages/agents";
 import { AnalyticsPage, VisitorPage } from "@/pages/analytics";
 import { DashboardPage } from "@/pages/dashboard";
@@ -23,15 +30,12 @@ import { AppearancePage } from "@/pages/appearance";
 
 function RequireAuth() {
   const location = useLocation();
-  const me = useQuery({
-    queryKey: ["me"],
-    queryFn: () => api<User>("/api/auth/me"),
-  });
+  const me = useMe();
   if (me.isLoading) {
     return <div className="grid min-h-svh place-items-center text-sm text-muted-foreground">Opening Owlee…</div>;
   }
   if (me.error instanceof ApiError && me.error.status === 401) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
   }
   if (me.error) {
     return <div className="grid min-h-svh place-items-center px-6 text-sm text-destructive">{me.error.message}</div>;
@@ -44,6 +48,9 @@ export function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/register/complete" element={<RegisterCompletePage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/setup" element={<SetupPage />} />
       <Route path="/status/:slug" element={<PublicStatusPage />} />
       <Route path="/share/:kind/:slug" element={<SharePage />} />

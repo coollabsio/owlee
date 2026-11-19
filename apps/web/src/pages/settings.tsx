@@ -1,10 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Button, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge, Switch } from "@/components/ui";
-import { ApiError, api, type AdminUser, type InstanceSettings, type Meta, type User } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type AdminUser,
+  type AuthSession,
+  changePassword,
+  type InstanceSettings,
+  listSessions,
+  type Meta,
+  revokeSession,
+  type User,
+} from "@/lib/api";
+import { useMe } from "@/lib/me";
+import { formatTime, timeAgo } from "@/lib/utils";
 
 export function SettingsPage() {
-  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") });
+  const me = useMe();
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const root = me.data?.root === true;
   const installationAdmin = me.data?.installation_admin === true;
@@ -29,6 +42,8 @@ export function SettingsPage() {
           <Item label="Role">{roleLabel(me.data)}</Item>
         </dl>
       </LayerCard>
+      <PasswordCard />
+      <SessionsCard />
       <LayerCard title="Instance" description="The server this dashboard talks to.">
         <dl className="grid gap-4 sm:grid-cols-2">
           <Item label="Version">{meta.data?.version ?? "…"}</Item>
@@ -49,6 +64,83 @@ export function SettingsPage() {
       {root ? <QuotaCard settings={settings.data} /> : null}
       {installationAdmin ? <UsersCard users={users.data} error={users.error} canChange={root} /> : null}
     </div>
+  );
+}
+
+function PasswordCard() {
+  const client = useQueryClient();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const save = useMutation({
+    mutationFn: () => changePassword({ current_password: current, new_password: next }),
+    onSuccess: () => {
+      setCurrent("");
+      setNext("");
+      setFields({});
+      void client.invalidateQueries({ queryKey: ["auth-sessions"] });
+    },
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    save.mutate();
+  }
+  return (
+    <LayerCard title="Password" description="Changing it signs out every other device.">
+      <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
+        <Field label="Current password" error={fields.current_password}>
+          <Input type="password" required autoComplete="current-password" value={current} onChange={(event) => setCurrent(event.target.value)} />
+        </Field>
+        <Field label="New password" hint="12+ characters" error={fields.new_password}>
+          <Input type="password" required autoComplete="new-password" value={next} onChange={(event) => setNext(event.target.value)} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Button variant="primary" type="submit" disabled={save.isPending}>
+            {save.isPending ? "Saving…" : "Change password"}
+          </Button>
+          {save.isSuccess ? <p className="mt-2 text-xs text-[var(--ui-fg-faint)]">Password changed. Other devices are signed out.</p> : null}
+          {Object.keys(fields).length === 0 ? <ErrorText error={save.error} /> : null}
+        </div>
+      </form>
+    </LayerCard>
+  );
+}
+
+function SessionsCard() {
+  const client = useQueryClient();
+  const sessions = useQuery({ queryKey: ["auth-sessions"], queryFn: listSessions });
+  const revoke = useMutation({
+    mutationFn: revokeSession,
+    onSuccess: () => client.invalidateQueries({ queryKey: ["auth-sessions"] }),
+  });
+  return (
+    <LayerCard title="Sessions" description="Browsers signed in to your account.">
+      <ErrorText error={sessions.error || revoke.error} />
+      <ul className="divide-y divide-[var(--ui-well-border)]">
+        {(sessions.data ?? []).map((session: AuthSession) => (
+          <li key={session.id} className="flex items-center gap-3 py-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] text-[var(--ui-fg)]">Signed in {formatTime(session.created_at)}</div>
+              <div className="truncate text-xs text-[var(--ui-fg-faint)]">Last active {timeAgo(session.last_activity_at)}</div>
+            </div>
+            {session.current ? (
+              <StatusBadge tone="info">This device</StatusBadge>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                disabled={revoke.isPending && revoke.variables === session.id}
+                onClick={() => revoke.mutate(session.id)}
+              >
+                Sign out
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </LayerCard>
   );
 }
 
