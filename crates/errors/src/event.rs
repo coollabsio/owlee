@@ -226,7 +226,7 @@ fn make_title(exceptions: &[ExceptionInfo], message: Option<&str>) -> String {
     } else {
         message.unwrap_or("Error").to_owned()
     };
-    truncate(&full, 300)
+    truncate(&crate::scrub::scrub_text(&full), 300)
 }
 
 fn culprit_of(event: &Value, exceptions: &[ExceptionInfo]) -> Option<String> {
