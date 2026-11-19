@@ -946,20 +946,22 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
         let ok = login(&app, &email, "correct-horse-battery", "203.0.113.20").await;
         assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
     }
+    // A random wrong guess, so the test has no fixed credential in it.
+    let guess = format!("guess-{}", owlee_platform::Id::new());
     // Wrong guesses from another address use it up.
     for _ in 0..2 {
-        let bad = login(&app, &email, "wrong-password-1", "203.0.113.21").await;
+        let bad = login(&app, &email, &guess, "203.0.113.21").await;
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
-    let blocked = login(&app, &email, "wrong-password-1", "203.0.113.22").await;
+    let blocked = login(&app, &email, &guess, "203.0.113.22").await;
     assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
 
     // An unknown email is limited the same way, so the answer does not differ.
     for _ in 0..2 {
-        let bad = login(&app, "ghost@coollabs.io", "wrong-password-1", "203.0.113.23").await;
+        let bad = login(&app, "ghost@coollabs.io", &guess, "203.0.113.23").await;
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
-    let ghost = login(&app, "ghost@coollabs.io", "wrong-password-1", "203.0.113.24").await;
+    let ghost = login(&app, "ghost@coollabs.io", &guess, "203.0.113.24").await;
     assert_eq!(ghost.status, StatusCode::TOO_MANY_REQUESTS, "{}", ghost.body);
 }
 
