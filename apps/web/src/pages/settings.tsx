@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge, Switch } from "@/components/ui";
+import { Button, ConfirmDialog, ErrorText, Field, Input, LayerCard, PageHeader, Spinner, StatusBadge, Switch } from "@/components/ui";
 import {
   ApiError,
   api,
@@ -105,7 +105,7 @@ function PasswordCard() {
         </Field>
         <div className="sm:col-span-2">
           <Button variant="primary" type="submit" disabled={save.isPending}>
-            {save.isPending ? "Saving…" : "Change password"}
+            {save.isPending ? <><Spinner />Saving…</> : "Change password"}
           </Button>
           {save.isSuccess ? <p className="mt-2 text-xs text-[var(--ui-fg-faint)]">Password changed. Other devices are signed out.</p> : null}
           {Object.keys(fields).length === 0 ? <ErrorText error={save.error} /> : null}
@@ -118,35 +118,47 @@ function PasswordCard() {
 function SessionsCard() {
   const client = useQueryClient();
   const sessions = useQuery({ queryKey: ["auth-sessions"], queryFn: listSessions });
+  const [revoking, setRevoking] = useState<AuthSession | null>(null);
   const revoke = useMutation({
     mutationFn: revokeSession,
-    onSuccess: () => client.invalidateQueries({ queryKey: ["auth-sessions"] }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["auth-sessions"] });
+      setRevoking(null);
+    },
   });
   return (
     <LayerCard title="Sessions" description="Browsers signed in to your account.">
-      <ErrorText error={sessions.error || revoke.error} />
+      <ErrorText error={sessions.error} />
       <ul className="divide-y divide-[var(--ui-well-border)]">
         {(sessions.data ?? []).map((session: AuthSession) => (
           <li key={session.id} className="flex items-center gap-3 py-2.5">
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] text-[var(--ui-fg)]">Signed in {formatTime(session.created_at)}</div>
+              <div className="truncate text-[0.8125rem] text-[var(--ui-fg)]">Signed in {formatTime(session.created_at)}</div>
               <div className="truncate text-xs text-[var(--ui-fg-faint)]">Last active {timeAgo(session.last_activity_at)}</div>
             </div>
             {session.current ? (
               <StatusBadge tone="info">This device</StatusBadge>
             ) : (
-              <Button
-                type="button"
-                size="sm"
-                disabled={revoke.isPending && revoke.variables === session.id}
-                onClick={() => revoke.mutate(session.id)}
-              >
+              <Button type="button" size="sm" onClick={() => setRevoking(session)}>
                 Sign out
               </Button>
             )}
           </li>
         ))}
       </ul>
+      <ConfirmDialog
+        open={revoking !== null}
+        title="Sign out session?"
+        description={`The browser signed in ${revoking ? formatTime(revoking.created_at) : ""} is signed out and has to sign in again.`}
+        confirmLabel="Sign out"
+        pending={revoke.isPending}
+        error={revoke.error}
+        onConfirm={() => revoking && revoke.mutate(revoking.id)}
+        onClose={() => {
+          setRevoking(null);
+          revoke.reset();
+        }}
+      />
     </LayerCard>
   );
 }
@@ -242,7 +254,7 @@ function RegistrationRow({ settings, error }: { settings?: InstanceSettings; err
   return (
     <div className="mt-4 flex items-center gap-4 border-t border-[var(--ui-well-border)] pt-4">
       <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-medium text-[var(--ui-fg)]">Open registration</div>
+        <div className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">Open registration</div>
         <p className="mt-0.5 text-xs text-[var(--ui-fg-faint)]">
           {error
             ? "Instance settings could not be loaded."
@@ -275,6 +287,7 @@ function EmailForm({ settings }: { settings?: InstanceSettings }) {
   const [password, setPassword] = useState("");
   const [from, setFrom] = useState(settings?.smtp?.from ?? "");
   const [fields, setFields] = useState<Record<string, string>>({});
+  const [clearing, setClearing] = useState(false);
   const save = useMutation({
     mutationFn: () =>
       api<InstanceSettings>("/api/admin/settings/smtp", {
@@ -300,6 +313,7 @@ function EmailForm({ settings }: { settings?: InstanceSettings }) {
     onSuccess: (data) => {
       client.setQueryData(["instance-settings"], data);
       setPassword("");
+      setClearing(false);
       void client.invalidateQueries({ queryKey: ["meta"] });
     },
   });
@@ -340,18 +354,30 @@ function EmailForm({ settings }: { settings?: InstanceSettings }) {
         <Field label="From" error={fields.from}>
           <Input type="email" value={from} onChange={(event) => setFrom(event.target.value)} placeholder="status@example.com" required />
         </Field>
-        <ErrorText error={save.error || clear.error} />
+        <ErrorText error={save.error} />
         <div className="flex justify-end gap-2 pt-1">
           {source === "saved" || settings?.registration_open ? (
-            <Button type="button" disabled={clear.isPending} onClick={() => clear.mutate()}>
-              {clear.isPending ? "Clearing…" : "Clear"}
+            <Button type="button" disabled={clear.isPending} onClick={() => setClearing(true)}>
+              Clear
             </Button>
           ) : null}
           <Button type="submit" variant="primary" disabled={save.isPending}>
-            {save.isPending ? "Saving…" : "Save mail server"}
+            {save.isPending ? <><Spinner />Saving…</> : "Save mail server"}
           </Button>
         </div>
       </form>
+      <ConfirmDialog
+        open={clearing}
+        title="Delete mail server settings?"
+        description={`The saved server${settings?.smtp?.host ? ` ${settings.smtp.host}` : ""} and its password are deleted. Owlee cannot send email until a mail server is configured again.`}
+        pending={clear.isPending}
+        error={clear.error}
+        onConfirm={() => clear.mutate()}
+        onClose={() => {
+          setClearing(false);
+          clear.reset();
+        }}
+      />
     </LayerCard>
   );
 }
@@ -366,6 +392,7 @@ function UsersCard({
   canChange: boolean;
 }) {
   const client = useQueryClient();
+  const [demoting, setDemoting] = useState<AdminUser | null>(null);
   const mutation = useMutation({
     mutationFn: ({ id, admin }: { id: string; admin: boolean }) =>
       api<AdminUser>(`/api/admin/users/${id}/admin`, {
@@ -373,6 +400,7 @@ function UsersCard({
         body: JSON.stringify({ admin }),
       }),
     onSuccess: () => {
+      setDemoting(null);
       void client.invalidateQueries({ queryKey: ["admin-users"] });
     },
   });
@@ -381,12 +409,12 @@ function UsersCard({
       title="Users"
       description="The root user is created at setup and cannot be changed. Only the root user can make or remove an installation admin."
     >
-      <ErrorText error={error || mutation.error} />
+      <ErrorText error={error || (demoting ? null : mutation.error)} />
       <ul className="divide-y divide-[var(--ui-well-border)]">
         {(users ?? []).map((user) => (
           <li key={user.id} className="flex items-center gap-3 py-2.5">
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] text-[var(--ui-fg)]">{user.display_name}</div>
+              <div className="truncate text-[0.8125rem] text-[var(--ui-fg)]">{user.display_name}</div>
               <div className="truncate text-xs text-[var(--ui-fg-faint)]">{user.email}</div>
             </div>
             <span className="flex shrink-0 items-center gap-1.5">
@@ -398,7 +426,7 @@ function UsersCard({
                 type="button"
                 size="sm"
                 disabled={mutation.isPending}
-                onClick={() => mutation.mutate({ id: user.id, admin: !user.installation_admin })}
+                onClick={() => (user.installation_admin ? setDemoting(user) : mutation.mutate({ id: user.id, admin: true }))}
               >
                 {user.installation_admin ? "Remove admin" : "Make admin"}
               </Button>
@@ -406,6 +434,19 @@ function UsersCard({
           </li>
         ))}
       </ul>
+      <ConfirmDialog
+        open={demoting !== null}
+        title="Remove admin?"
+        description={`${demoting?.display_name ?? "This user"} loses installation admin access. The root user can make them an admin again.`}
+        confirmLabel="Remove admin"
+        pending={mutation.isPending}
+        error={mutation.error}
+        onConfirm={() => demoting && mutation.mutate({ id: demoting.id, admin: false })}
+        onClose={() => {
+          setDemoting(null);
+          mutation.reset();
+        }}
+      />
     </LayerCard>
   );
 }
@@ -443,7 +484,7 @@ function PrivacyCard({ workspaceName }: { workspaceName: string }) {
         </Field>
         <div className="flex gap-2">
           <Button type="submit" disabled={!user.trim() || exported.isPending}>
-            {exported.isPending ? "Exporting…" : "Export JSON"}
+            {exported.isPending ? <><Spinner />Exporting…</> : "Export JSON"}
           </Button>
           <Button type="button" variant="danger" disabled={!user.trim()} onClick={() => setConfirming(true)}>
             Delete events
@@ -457,24 +498,15 @@ function PrivacyCard({ workspaceName }: { workspaceName: string }) {
         ) : null}
         <ErrorText error={exported.error} />
       </form>
-      <Dialog
+      <ConfirmDialog
         open={confirming}
         title="Delete error events?"
         description={`Every stored error event for ${user.trim()} is deleted. This cannot be undone.`}
+        pending={removed.isPending}
+        error={removed.error}
+        onConfirm={() => removed.mutate()}
         onClose={() => setConfirming(false)}
-        footer={
-          <>
-            <Button type="button" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-            <Button type="button" variant="danger" disabled={removed.isPending} onClick={() => removed.mutate()}>
-              {removed.isPending ? "Deleting…" : "Delete"}
-            </Button>
-          </>
-        }
-      >
-        <ErrorText error={removed.error} />
-      </Dialog>
+      />
     </LayerCard>
   );
 }
@@ -482,8 +514,8 @@ function PrivacyCard({ workspaceName }: { workspaceName: string }) {
 function Item({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] font-medium text-[var(--ui-fg-faint)]">{label}</dt>
-      <dd className="mt-1 truncate text-[13px] text-[var(--ui-fg)]">{children}</dd>
+      <dt className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">{label}</dt>
+      <dd className="mt-1 truncate text-[0.8125rem] text-[var(--ui-fg)]">{children}</dd>
     </div>
   );
 }

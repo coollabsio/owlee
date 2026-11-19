@@ -14,7 +14,10 @@ export type Appearance = {
   navStyle: "default" | "floating";
   navItems: "3d" | "flat";
   chartTimes: "local" | "utc";
+  uiScale: UiScale;
 };
+
+export type UiScale = "100" | "90" | "80";
 
 const KEY = "owlee-appearance";
 const EVENT = "owlee-appearance";
@@ -91,6 +94,7 @@ function read(): Appearance {
     navStyle: saved.navStyle === "floating" ? "floating" : "default",
     navItems: saved.navItems === "flat" ? "flat" : "3d",
     chartTimes: saved.chartTimes === "utc" ? "utc" : "local",
+    uiScale: saved.uiScale === "90" || saved.uiScale === "80" ? saved.uiScale : "100",
   };
 }
 
@@ -124,6 +128,7 @@ function apply(appearance: Appearance) {
   root.dataset.navStyle = appearance.navStyle;
   root.dataset.navItems = appearance.navItems;
   root.dataset.pageWidth = appearance.pageWidth;
+  root.dataset.uiScale = appearance.uiScale;
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute("content", custom ? custom["--theme-bg"] : dark ? "#0a0a0a" : "#ffffff");

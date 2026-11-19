@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
-import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Incident, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -27,8 +27,8 @@ function rowCover(to: string) {
 function CardText({ title, body }: { title: string; body?: string }) {
   return (
     <div className="flex min-h-32 flex-col items-center justify-center px-4 py-8 text-center">
-      <p className="text-[14px] font-medium text-[var(--ui-fg)]">{title}</p>
-      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">{body}</p> : null}
+      <p className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{title}</p>
+      {body ? <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">{body}</p> : null}
     </div>
   );
 }
@@ -39,8 +39,26 @@ export function IncidentsPage() {
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [impactFilter, setImpactFilter] = useState<Incident["impact"] | null>(null);
+  const [statusFilter, setStatusFilter] = useState<Incident["status"] | null>(null);
   const needle = search.trim().toLowerCase();
-  const rows = (query.data ?? []).filter((incident) => !needle || incident.title.toLowerCase().includes(needle));
+  const filtered = (query.data ?? []).filter(
+    (incident) =>
+      (!needle || incident.title.toLowerCase().includes(needle)) &&
+      (!impactFilter || incident.impact === impactFilter) &&
+      (!statusFilter || incident.status === statusFilter),
+  );
+  const { rows, sort, toggle } = useSort(filtered, {
+    title: (incident) => incident.title,
+    impact: (incident) => impacts.findIndex((item) => item.value === incident.impact),
+    status: (incident) => statuses.findIndex((item) => item.value === incident.status),
+    source: (incident) => (incident.auto ? "Automatic" : "Manual"),
+    started: (incident) => Date.parse(incident.started_at),
+  });
+  const filters = [
+    ...(impactFilter ? [{ key: "impact", label: `Impact: ${stateLabel[impactFilter]}`, onRemove: () => setImpactFilter(null) }] : []),
+    ...(statusFilter ? [{ key: "status", label: `Status: ${stateLabel[statusFilter]}`, onRemove: () => setStatusFilter(null) }] : []),
+  ];
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -57,25 +75,30 @@ export function IncidentsPage() {
               <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--ui-fg-faint)]" aria-hidden="true" />
               <Input style={{ paddingLeft: 36 }} placeholder="Search by title" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search incidents" />
             </div>
+            <FilterChips
+              filters={filters}
+              onClear={() => {
+                setImpactFilter(null);
+                setStatusFilter(null);
+              }}
+            />
           </div>
-          {query.isLoading ? (
-            <CardText title="Loading incidents…" />
-          ) : rows.length === 0 ? (
-            <CardText title="No matching incidents" body="Try a different title." />
+          {!query.isLoading && rows.length === 0 ? (
+            <CardText title="No matching incidents" body="Try a different title, or remove a filter." />
           ) : (
             <div className="overflow-x-auto">
               <table className="cool-table">
                 <thead>
                   <tr>
-                    <th>Incident</th>
-                    <th>Impact</th>
-                    <th>Status</th>
-                    <th className="hidden md:table-cell">Source</th>
-                    <th>Started</th>
+                    <SortHeader column="title" sort={sort} onSort={toggle}>Incident</SortHeader>
+                    <SortHeader column="impact" sort={sort} onSort={toggle}>Impact</SortHeader>
+                    <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
+                    <SortHeader column="source" sort={sort} onSort={toggle} className="hidden md:table-cell">Source</SortHeader>
+                    <SortHeader column="started" sort={sort} onSort={toggle}>Started</SortHeader>
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((incident) => {
+                  {query.isLoading ? <SkeletonRows columns={[undefined, undefined, undefined, "hidden md:table-cell", undefined]} /> : rows.map((incident) => {
                     const to = `/incidents/${incident.id}`;
                     return (
                       <tr key={incident.id} className="clickable-row">
@@ -83,15 +106,19 @@ export function IncidentsPage() {
                           <Link className="row-link" to={to}>{incident.title}</Link>
                           <ProjectTag id={incident.project_id} />
                           {rowCover(to)}
-                          <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{incident.updates.at(-1)?.message || "-"}</div>
+                          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{incident.updates.at(-1)?.message || "-"}</div>
                         </td>
                         <td className="cell-link">
                           {rowCover(to)}
-                          <StatusBadge tone={impactTone(incident.impact)}>{stateLabel[incident.impact]}</StatusBadge>
+                          <FilterValue active={impactFilter === incident.impact} label={stateLabel[incident.impact]} onToggle={() => setImpactFilter(impactFilter === incident.impact ? null : incident.impact)}>
+                            <StatusBadge tone={impactTone(incident.impact)}>{stateLabel[incident.impact]}</StatusBadge>
+                          </FilterValue>
                         </td>
                         <td className="cell-link">
                           {rowCover(to)}
-                          <StatusBadge tone={statusTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
+                          <FilterValue active={statusFilter === incident.status} label={stateLabel[incident.status]} onToggle={() => setStatusFilter(statusFilter === incident.status ? null : incident.status)}>
+                            <StatusBadge tone={statusTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
+                          </FilterValue>
                         </td>
                         <td className="cell-link hidden md:table-cell">
                           {rowCover(to)}
@@ -124,6 +151,7 @@ export function IncidentDetailPage() {
   const [status, setStatus] = useState("monitoring");
   const [message, setMessage] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
+  const [deleting, setDeleting] = useState(false);
   const update = useMutation({
     mutationFn: () =>
       api<Incident>(`/api/incidents/${id}/updates`, {
@@ -143,7 +171,17 @@ export function IncidentDetailPage() {
     onSuccess: () => navigate("/incidents"),
   });
   const incident = query.data;
-  if (query.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading incident…</p>;
+  if (query.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-56" />
+          <Skeleton className="h-3 w-40" />
+        </div>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
   if (!incident) return <p className="field-error">{(query.error as Error | null)?.message ?? "Not found."}</p>;
   return (
     <div className="flex flex-col gap-6">
@@ -151,9 +189,17 @@ export function IncidentDetailPage() {
         title={incident.title}
         keepTitle
         description={`Opened ${formatTime(incident.started_at)}${incident.auto ? " by the scheduler" : ""}`}
-        actions={canEdit ? <Button variant="danger" onClick={() => remove.mutate()}>Delete</Button> : null}
+        actions={canEdit ? <Button variant="danger" onClick={() => setDeleting(true)}>Delete</Button> : null}
       />
-      <ErrorText error={remove.error} />
+      <ConfirmDialog
+        open={deleting}
+        title="Delete incident?"
+        description={`${incident.title} and its timeline will be deleted, including from the status page.`}
+        pending={remove.isPending}
+        error={remove.error}
+        onConfirm={() => remove.mutate()}
+        onClose={() => setDeleting(false)}
+      />
       <div className={canEdit ? "grid items-start gap-6 lg:grid-cols-[1fr_360px]" : "grid items-start gap-6"}>
         <LayerCard
           title="Timeline"
@@ -168,8 +214,8 @@ export function IncidentDetailPage() {
             {incident.updates.map((item) => (
               <li key={item.id} className="relative">
                 <span className="absolute -left-[1.4rem] top-1.5 size-2.5 rounded-full bg-[var(--ui-accent)]" />
-                <div className="text-[11px] text-[var(--ui-fg-faint)]">{formatTime(item.created_at)} · {stateLabel[item.status]}</div>
-                <p className="mt-1 text-[13px] text-[var(--ui-fg-dim)]">{item.message}</p>
+                <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(item.created_at)} · {stateLabel[item.status]}</div>
+                <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-dim)]">{item.message}</p>
               </li>
             ))}
           </ol>
@@ -185,7 +231,7 @@ export function IncidentDetailPage() {
             <ErrorText error={update.error} />
             <div className="flex justify-end">
               <Button variant="primary" onClick={() => update.mutate()} disabled={update.isPending || message.trim().length === 0}>
-                {update.isPending ? "Posting…" : "Post update"}
+                {update.isPending ? <><Spinner />Posting…</> : "Post update"}
               </Button>
             </div>
           </div>
@@ -267,7 +313,7 @@ function IncidentDialog({ open, onClose }: { open: boolean; onClose: () => void 
         </Field>
         <Field label="Message" error={fields.message}><Textarea value={message} onChange={(event) => setMessage(event.target.value)} required /></Field>
         <ErrorText error={save.error} />
-        <div className="flex justify-end gap-2 pt-2"><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? "Saving…" : "Create incident"}</Button></div>
+        <div className="flex justify-end gap-2 pt-2"><Button type="button" onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Create incident"}</Button></div>
       </form>
     </Dialog>
   );

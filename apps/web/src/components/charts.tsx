@@ -34,7 +34,7 @@ export function LatencyChart({ checks }: { checks: Check[] }) {
   const points = [...checks].reverse();
   if (points.length < 2) {
     return (
-      <div className="flex h-40 items-center justify-center text-[13px] text-[var(--ui-fg-faint)]">
+      <div className="flex h-40 items-center justify-center text-[0.8125rem] text-[var(--ui-fg-faint)]">
         Latency shows up after a couple of checks.
       </div>
     );
@@ -75,7 +75,7 @@ export function LatencyChart({ checks }: { checks: Check[] }) {
           <title>{point.title}</title>
         </circle>
       ))}
-      <text x={pad} y={pad + 10} fill="var(--ui-fg-faint)" className="text-[11px]">
+      <text x={pad} y={pad + 10} fill="var(--ui-fg-faint)" className="text-[0.6875rem]">
         {Math.round(max)} ms
       </text>
     </svg>
@@ -89,13 +89,13 @@ function day(seconds: number) {
 /* Daily counts as accent bars over a dashed grid, with the first and last day below. */
 export function DailyBars({ series, field }: { series: { day: number; views?: number; clicks?: number }[]; field: "views" | "clicks" }) {
   if (series.length === 0) {
-    return <p className="py-10 text-center text-[13px] text-[var(--ui-fg-faint)]">No data in this range.</p>;
+    return <p className="py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No data in this range.</p>;
   }
   const values = series.map((point) => (field === "views" ? point.views : point.clicks) ?? 0);
   const max = Math.max(...values, 1);
   return (
     <div>
-      <div className="mb-2 flex justify-between font-mono text-[10px] text-[var(--ui-fg-faint)]">
+      <div className="mb-2 flex justify-between font-mono text-[0.625rem] text-[var(--ui-fg-faint)]">
         <span>{max}</span>
         <span>{values.reduce((sum, value) => sum + value, 0)} total</span>
       </div>
@@ -103,7 +103,7 @@ export function DailyBars({ series, field }: { series: { day: number; views?: nu
         <div className="pointer-events-none absolute inset-0 flex flex-col justify-between" aria-hidden>
           {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-[var(--ui-divider)]" />)}
         </div>
-        <div className="relative flex h-full items-end gap-[3px] border-b border-[var(--ui-divider)]" aria-label="Daily counts">
+        <div className="relative flex h-full items-end gap-[0.1875rem] border-b border-[var(--ui-divider)]" aria-label="Daily counts">
           {series.map((point, index) => (
             <div
               key={point.day}
@@ -114,7 +114,7 @@ export function DailyBars({ series, field }: { series: { day: number; views?: nu
           ))}
         </div>
       </div>
-      <div className="mt-2 flex justify-between font-mono text-[10px] text-[var(--ui-fg-faint)]">
+      <div className="mt-2 flex justify-between font-mono text-[0.625rem] text-[var(--ui-fg-faint)]">
         <span>{day(series[0].day)}</span>
         <span>{day(series[series.length - 1].day)}</span>
       </div>
@@ -126,7 +126,7 @@ export function DailyBars({ series, field }: { series: { day: number; views?: nu
 /* `total` lets a cut list (top N) keep percentages of the full list. */
 export function BarList({ rows, total: fullTotal, empty = "Nothing in this range." }: { rows: InsightRow[]; total?: number; empty?: string }) {
   if (rows.length === 0) {
-    return <p className="px-4 py-10 text-center text-[13px] text-[var(--ui-fg-faint)]">{empty}</p>;
+    return <p className="px-4 py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">{empty}</p>;
   }
   const max = Math.max(...rows.map((row) => row.count), 1);
   const total = fullTotal || rows.reduce((sum, row) => sum + row.count, 0) || 1;
@@ -135,7 +135,7 @@ export function BarList({ rows, total: fullTotal, empty = "Nothing in this range
       {rows.map((row) => (
         <li
           key={row.label}
-          className="relative flex h-[30px] items-center gap-3 overflow-hidden rounded-[6px] px-2.5"
+          className="relative flex h-[1.875rem] items-center gap-3 overflow-hidden rounded-[6px] px-2.5"
           title={row.visitors != null ? `${row.label}: ${row.count}, ${row.visitors} visitors` : `${row.label}: ${row.count}`}
         >
           <span
@@ -143,9 +143,9 @@ export function BarList({ rows, total: fullTotal, empty = "Nothing in this range
             style={{ width: `${(row.count / max) * 100}%` }}
             aria-hidden
           />
-          <span className="relative min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--ui-fg-dim)]">{row.label || "-"}</span>
-          <span className="relative font-mono text-[11px] text-[var(--ui-fg-dim)]">{row.count}</span>
-          <span className="relative w-9 text-right font-mono text-[10px] text-[var(--ui-fg-faint)]">{Math.round((row.count / total) * 100)}%</span>
+          <span className="relative min-w-0 flex-1 truncate text-[0.75rem] font-medium text-[var(--ui-fg-dim)]">{row.label || "-"}</span>
+          <span className="relative font-mono text-[0.6875rem] text-[var(--ui-fg-dim)]">{row.count}</span>
+          <span className="relative w-9 text-right font-mono text-[0.625rem] text-[var(--ui-fg-faint)]">{Math.round((row.count / total) * 100)}%</span>
         </li>
       ))}
     </ul>
@@ -156,8 +156,8 @@ export function BarList({ rows, total: fullTotal, empty = "Nothing in this range
 export function Stat({ label, value }: { label: string; value: string | number | undefined }) {
   return (
     <div className="min-w-0">
-      <p className="text-[11px] font-medium text-[var(--ui-fg-faint)]">{label}</p>
-      <p className="mt-1 text-[24px] leading-8 font-semibold tracking-tight text-[var(--ui-fg)]">{value ?? "-"}</p>
+      <p className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">{label}</p>
+      <p className="mt-1 text-[1.5rem] leading-8 font-semibold tracking-tight text-[var(--ui-fg)]">{value ?? "-"}</p>
     </div>
   );
 }

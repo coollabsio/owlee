@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { Logo } from "@/app/Shell";
-import { Button, ErrorText, Field, Input } from "@/components/ui";
+import { Button, ErrorText, Field, Input, Skeleton, Spinner } from "@/components/ui";
 import {
   ApiError,
   api,
@@ -39,7 +39,11 @@ export function RegisterPage() {
   if (meta.isLoading) {
     return (
       <AuthShell title="Create an account" subtitle="Checking registration." footer={null}>
-        <p className="text-sm text-[var(--ui-fg-faint)]">Opening…</p>
+        <div className="space-y-3" aria-busy="true">
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-full" />
+          <Skeleton className="h-8 w-32" />
+        </div>
       </AuthShell>
     );
   }
@@ -245,8 +249,8 @@ export function AuthShell({
         <div className="w-full max-w-[27rem]">
           <div className="mb-5 text-center">
             <Logo className="mx-auto mb-3 size-10" />
-            <div className="text-[15px] font-semibold tracking-tight text-[var(--ui-fg)]">Owlee</div>
-            <div className="text-[11px] text-[var(--ui-fg-faint)]">coolLabs</div>
+            <div className="text-[0.9375rem] font-semibold tracking-tight text-[var(--ui-fg)]">Owlee</div>
+            <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">coolLabs</div>
           </div>
           <div className="auth-card">
             <div className="auth-card-heading">
@@ -302,7 +306,7 @@ function SetupForm({ token }: { token: string }) {
 
   return (
     <form className="space-y-4" onSubmit={submit}>
-      <p className="text-[13px] text-[var(--ui-fg-faint)]">
+      <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
         This account becomes the owner. Keep the password. The setup link works once.
       </p>
       <Field label="Name" error={fields.display_name}>
@@ -316,7 +320,7 @@ function SetupForm({ token }: { token: string }) {
       </Field>
       <ErrorText error={mutation.error} />
       <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? "Working…" : "Create owner account"}
+        {mutation.isPending ? <><Spinner />Working…</> : "Create owner account"}
       </Button>
     </form>
   );
@@ -358,9 +362,9 @@ function LoginForm() {
       </Field>
       <ErrorText error={mutation.error} />
       <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? "Working…" : "Sign in"}
+        {mutation.isPending ? <><Spinner />Working…</> : "Sign in"}
       </Button>
-      <p className="text-center text-[13px]">
+      <p className="text-center text-[0.8125rem]">
         <Link className="auth-text-link" to="/forgot-password">Forgot password?</Link>
       </p>
     </form>
@@ -405,7 +409,7 @@ function EmailLinkForm({
       </Field>
       <ErrorText error={mutation.error} />
       <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? "Sending…" : submitLabel}
+        {mutation.isPending ? <><Spinner />Sending…</> : submitLabel}
       </Button>
     </form>
   );
@@ -462,7 +466,7 @@ function TokenPasswordForm({
       </Field>
       <ErrorText error={mutation.error} />
       <Button className="w-full" variant="primary" type="submit" disabled={mutation.isPending}>
-        {mutation.isPending ? "Working…" : submitLabel}
+        {mutation.isPending ? <><Spinner />Working…</> : submitLabel}
       </Button>
     </form>
   );

@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router";
 import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, useCopy } from "@/components/ui";
+import { Button, ConfirmDialog, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
@@ -21,6 +21,16 @@ export function ErrorAppsPage() {
   const [platform, setPlatform] = useState<PlatformId>("php");
   const [projectId, setProjectId] = useProjectChoice();
   const [error, setError] = useState("");
+  const [platformFilter, setPlatformFilter] = useState<string | null>(null);
+  const { rows, sort, toggle } = useSort(
+    (apps.data ?? []).filter((app) => !platformFilter || app.platform === platformFilter),
+    {
+      name: (app) => app.name,
+      platform: (app) => guideFor(app.platform).label,
+      status: (app) => (app.lastEventAt ? Date.parse(app.lastEventAt) : null),
+      issues: (app) => app.issueCount,
+    },
+  );
   const create = useMutation({
     mutationFn: () =>
       api<ErrorApp>("/api/error-apps", { method: "POST", body: JSON.stringify({ name, platform, project_id: projectId }) }),
@@ -64,8 +74,8 @@ export function ErrorAppsPage() {
                       : "border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] hover:bg-[var(--ui-hover)]",
                   )}
                 >
-                  <span className="block text-[13px] font-medium text-[var(--ui-fg)]">{platformGuides[id].label}</span>
-                  <span className="block truncate font-mono text-[11px] text-[var(--ui-fg-faint)]">{platformGuides[id].sdk}</span>
+                  <span className="block text-[0.8125rem] font-medium text-[var(--ui-fg)]">{platformGuides[id].label}</span>
+                  <span className="block truncate font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">{platformGuides[id].sdk}</span>
                 </button>
               ))}
             </div>
@@ -85,7 +95,7 @@ export function ErrorAppsPage() {
                 <ProjectField value={projectId} onChange={setProjectId} />
               </div>
               <Button variant="highlighted" type="submit" disabled={create.isPending}>
-                {create.isPending ? "Creating…" : "Create app"}
+                {create.isPending ? <><Spinner />Creating…</> : "Create app"}
               </Button>
             </div>
           </form>
@@ -93,11 +103,15 @@ export function ErrorAppsPage() {
         </LayerCard>
       ) : null}
       <LayerCard title="All apps" flush>
-        {apps.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading apps...</p> : null}
+        {platformFilter ? (
+          <div className="border-b border-[var(--ui-divider)] p-2">
+            <FilterChips filters={[{ key: "platform", label: `Platform: ${guideFor(platformFilter).label}`, onRemove: () => setPlatformFilter(null) }]} onClear={() => setPlatformFilter(null)} />
+          </div>
+        ) : null}
         {apps.data && apps.data.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No apps yet</h2>
-            <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
+            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">No apps yet</h2>
+            <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">
               {canEdit
                 ? "An app gives you a DSN and a setup guide. Most SDKs send their first error within a few minutes."
                 : "An editor has to create an app before errors can be collected."}
@@ -109,40 +123,53 @@ export function ErrorAppsPage() {
             ) : null}
           </div>
         ) : null}
-        {apps.data && apps.data.length > 0 ? (
+        {apps.isLoading || (apps.data && apps.data.length > 0) ? (
           <div className="overflow-x-auto">
             <table className="cool-table">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Platform</th>
-                  <th>Status</th>
-                  <th className="text-right">Issues</th>
+                  <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
+                  <SortHeader column="platform" sort={sort} onSort={toggle}>Platform</SortHeader>
+                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
+                  <SortHeader column="issues" sort={sort} onSort={toggle} className="text-right">Issues</SortHeader>
                 </tr>
               </thead>
               <tbody>
-                {apps.data.map((app) => (
-                  <tr key={app.id} className="clickable-row" onClick={() => navigate(`/errors/apps/${app.id}`)}>
-                    <td>
-                      <Link className="row-link" to={`/errors/apps/${app.id}`} onClick={(event) => event.stopPropagation()}>
+                {apps.isLoading ? <SkeletonRows columns={[undefined, undefined, undefined, "text-right"]} /> : null}
+                {rows.map((app) => (
+                  <tr key={app.id} className="clickable-row">
+                    <td className="cell-link">
+                      <Link className="row-link" to={`/errors/apps/${app.id}`}>
                         {app.name}
                       </Link>
                       <ProjectTag id={app.projectId} />
+                      {rowCover(`/errors/apps/${app.id}`)}
                       {app.quotaExceeded ? (
                         <StatusBadge tone="error">Daily quota reached ({app.usedToday}/{app.dailyQuota})</StatusBadge>
                       ) : null}
                     </td>
-                    <td>
-                      <Badge>{guideFor(app.platform).label}</Badge>
+                    <td className="cell-link">
+                      {rowCover(`/errors/apps/${app.id}`)}
+                      <FilterValue
+                        active={platformFilter === app.platform}
+                        label={guideFor(app.platform).label}
+                        onToggle={() => setPlatformFilter(platformFilter === app.platform ? null : app.platform)}
+                      >
+                        <Badge>{guideFor(app.platform).label}</Badge>
+                      </FilterValue>
                     </td>
-                    <td className="whitespace-nowrap" title={app.lastEventAt ? fullTime(app.lastEventAt) : undefined}>
+                    <td className="cell-link whitespace-nowrap" title={app.lastEventAt ? fullTime(app.lastEventAt) : undefined}>
+                      {rowCover(`/errors/apps/${app.id}`)}
                       {app.lastEventAt ? (
                         <StatusBadge tone="success">Last event {timeAgo(app.lastEventAt)}</StatusBadge>
                       ) : (
                         <StatusBadge>Waiting for events</StatusBadge>
                       )}
                     </td>
-                    <td className="text-right tabular-nums">{app.issueCount.toLocaleString()}</td>
+                    <td className="cell-link text-right tabular-nums">
+                      {rowCover(`/errors/apps/${app.id}`)}
+                      {app.issueCount.toLocaleString()}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -152,6 +179,10 @@ export function ErrorAppsPage() {
       </LayerCard>
     </div>
   );
+}
+
+function rowCover(to: string) {
+  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
 }
 
 export function ErrorAppDetailPage() {
@@ -176,9 +207,21 @@ export function ErrorAppDetailPage() {
     },
   });
 
-  if (app.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading app...</p>;
+  if (app.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-32" />
+          <Skeleton className="h-6 w-48" />
+          <Skeleton className="h-3 w-72" />
+        </div>
+        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
   if (app.isError || !app.data) {
-    return <p className="text-[13px] text-[var(--ui-error)]">{(app.error as Error)?.message || "App not found"}</p>;
+    return <p className="text-[0.8125rem] text-[var(--ui-error)]">{(app.error as Error)?.message || "App not found"}</p>;
   }
   const data = app.data;
   const receiving = data.lastEventAt != null;
@@ -187,7 +230,7 @@ export function ErrorAppDetailPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <nav className="mb-2 flex items-center gap-2 text-[13px] text-[var(--ui-fg-faint)]">
+        <nav className="mb-2 flex items-center gap-2 text-[0.8125rem] text-[var(--ui-fg-faint)]">
           <Link to="/errors/apps">Apps</Link>
           <span>/</span>
           <span className="text-[var(--ui-fg-dim)]">{data.name}</span>
@@ -230,7 +273,7 @@ export function ErrorAppDetailPage() {
           description="Follow the steps below. This page checks for new events every few seconds."
           actions={<StatusBadge tone="info">Listening</StatusBadge>}
         >
-          <p className="text-[13px] text-[var(--ui-fg-faint)]">
+          <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
             Nothing received yet. If the test error does not show up within a minute, check that the DSN below matches the one in
             your app and that your app can reach this server.
           </p>
@@ -245,24 +288,16 @@ export function ErrorAppDetailPage() {
       )}
       <DsnCard dsn={data.dsn} />
       <AppQuota key={String(data.quotaOverride ?? "inherit")} app={data} />
-      <Dialog
+      <ConfirmDialog
         open={confirming}
-        title={`Delete ${data.name}?`}
-        description={`The app, its ${data.issueCount.toLocaleString()} issues, and every stored event are deleted. SDKs using this DSN are rejected. This cannot be undone.`}
+        title="Delete app?"
+        description={`${data.name}, its ${data.issueCount.toLocaleString()} issues, and every stored event are deleted. SDKs using this DSN are rejected. This cannot be undone.`}
+        confirmLabel="Delete app"
+        pending={remove.isPending}
+        error={remove.error}
+        onConfirm={() => remove.mutate()}
         onClose={() => setConfirming(false)}
-        footer={
-          <>
-            <Button type="button" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-            <Button type="button" variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>
-              {remove.isPending ? "Deleting…" : "Delete app"}
-            </Button>
-          </>
-        }
-      >
-        <ErrorText error={remove.error} />
-      </Dialog>
+      />
     </div>
   );
 }
@@ -312,11 +347,11 @@ function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
 function GuideStep({ number, title, children }: { number: number; title: string; children: ReactNode }) {
   return (
     <li className="flex gap-3">
-      <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] text-[12px] font-medium tabular-nums text-[var(--ui-fg)]">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] text-[0.75rem] font-medium tabular-nums text-[var(--ui-fg)]">
         {number}
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-3">
-        <h3 className="pt-0.5 text-[13px] font-medium text-[var(--ui-fg)]">{title}</h3>
+        <h3 className="pt-0.5 text-[0.8125rem] font-medium text-[var(--ui-fg)]">{title}</h3>
         {children}
       </div>
     </li>
@@ -331,13 +366,13 @@ function CodeBlock({ file, code }: GuideCode) {
         <span className="truncate">{file ?? ""}</span>
         <button
           type="button"
-          className="ml-auto text-[11px] font-normal hover:text-[var(--ui-fg)]"
+          className="ml-auto text-[0.6875rem] font-normal hover:text-[var(--ui-fg)]"
           onClick={() => copy(code)}
         >
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] leading-5 text-[var(--ui-fg)]">
+      <pre className="overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] leading-5 text-[var(--ui-fg)]">
         {code}
       </pre>
     </div>
@@ -359,7 +394,7 @@ function DsnCard({ dsn }: { dsn: string }) {
         </Button>
       }
     >
-      <Input readOnly value={dsn} className="font-mono text-[13px]" onFocus={(event) => event.currentTarget.select()} />
+      <Input readOnly value={dsn} className="font-mono text-[0.8125rem]" onFocus={(event) => event.currentTarget.select()} />
     </LayerCard>
   );
 }
@@ -405,7 +440,7 @@ function AppQuota({ app }: { app: ErrorApp }) {
       description={inherited ? "Empty inherits the number from Settings → Ingest quotas." : "This app uses its own cap instead of the instance default."}
       actions={app.quotaExceeded ? <StatusBadge tone="error">Cap reached</StatusBadge> : null}
     >
-      <p className="mb-3 text-[13px] text-[var(--ui-fg-faint)]">
+      <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-faint)]">
         {app.usedToday.toLocaleString()} of {app.dailyQuota.toLocaleString()} errors accepted today.
         {app.quotaExceeded ? " Further events are rejected until the counter resets." : ""} Resets {resetWhen(app.resetsAt)}.
       </p>
@@ -423,7 +458,7 @@ function AppQuota({ app }: { app: ErrorApp }) {
             <Input inputMode="numeric" placeholder="Inherit" value={value} onChange={(event) => setValue(event.target.value)} />
           </Field>
         </div>
-        <Button variant="highlighted" type="submit" disabled={save.isPending}>Save cap</Button>
+        <Button variant="highlighted" type="submit" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save cap"}</Button>
         {app.quotaOverride != null ? (
           <Button type="button" disabled={save.isPending} onClick={() => save.mutate(null)}>Inherit</Button>
         ) : null}

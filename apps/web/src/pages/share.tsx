@@ -26,22 +26,22 @@ export function SharePage() {
     <div className="min-h-svh bg-[var(--ui-canvas)] text-[var(--ui-fg)]">
       <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12 sm:py-16">
         <header>
-          <div className="text-[11px] font-medium text-[var(--ui-fg-faint)]">Owlee</div>
-          <h1 className="text-[24px] font-semibold leading-8 tracking-tight">{data?.name ?? "Shared analytics"}</h1>
-          {data?.subtitle ? <p className="mt-1 text-[13px] text-[var(--ui-fg-faint)]">{data.subtitle}</p> : null}
+          <div className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Owlee</div>
+          <h1 className="text-[1.5rem] font-semibold leading-8 tracking-tight">{data?.name ?? "Shared analytics"}</h1>
+          {data?.subtitle ? <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-faint)]">{data.subtitle}</p> : null}
         </header>
         {overview.error ? <p className="field-error">{(overview.error as Error).message}</p> : null}
         <div className="grid gap-6 sm:grid-cols-2">
           <LayerCard title={safeKind === "links" ? "Clicks" : "Pageviews"} description="Last 30 days">
-            <div className="text-[24px] font-semibold tabular-nums">{metric ?? "-"}</div>
+            <div className="text-[1.5rem] font-semibold tabular-nums">{metric ?? "-"}</div>
           </LayerCard>
           <LayerCard title="Visitors" description="Last 30 days">
-            <div className="text-[24px] font-semibold tabular-nums">{data?.visitors ?? "-"}</div>
+            <div className="text-[1.5rem] font-semibold tabular-nums">{data?.visitors ?? "-"}</div>
           </LayerCard>
         </div>
         <LayerCard title={safeKind === "links" ? "Referrers" : "Pages"} flush>
           {list.length === 0 ? (
-            <p className="px-4 py-10 text-center text-[13px] text-[var(--ui-fg-faint)]">No data for this period.</p>
+            <p className="px-4 py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No data for this period.</p>
           ) : (
             <table className="cool-table">
               <thead>
@@ -61,7 +61,7 @@ export function SharePage() {
             </table>
           )}
         </LayerCard>
-        <footer className="pt-4 text-center text-[11px] text-[var(--ui-fg-faint)]">
+        <footer className="pt-4 text-center text-[0.6875rem] text-[var(--ui-fg-faint)]">
           <a href="https://owlee.io" className="hover:text-[var(--ui-fg-dim)]">Powered by Owlee</a>
         </footer>
       </div>

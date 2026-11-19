@@ -6,7 +6,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Histogram } from "@/components/error-charts";
 import { StackFrames } from "@/components/event-view";
 import { Badge } from "@/components/issue-badge";
-import { Button, ErrorText, Input, LayerCard, PageHeader, Select, useCopy } from "@/components/ui";
+import { Button, ErrorText, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
 import { api, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
@@ -48,12 +48,12 @@ function viewSearch(view: View) {
 }
 
 type StatusAction = { status: Issue["status"]; label: string; pending: string; highlighted?: boolean };
-const resolve: StatusAction = { status: "resolved", label: "Resolve", pending: "Resolving...", highlighted: true };
-const archive: StatusAction = { status: "ignored", label: "Archive", pending: "Archiving..." };
+const resolve: StatusAction = { status: "resolved", label: "Resolve", pending: "Resolving…", highlighted: true };
+const archive: StatusAction = { status: "ignored", label: "Archive", pending: "Archiving…" };
 const statusActions: Record<Issue["status"], StatusAction[]> = {
   unresolved: [resolve, archive],
-  resolved: [{ status: "unresolved", label: "Reopen", pending: "Reopening..." }, archive],
-  ignored: [resolve, { status: "unresolved", label: "Unarchive", pending: "Unarchiving..." }],
+  resolved: [{ status: "unresolved", label: "Reopen", pending: "Reopening…" }, archive],
+  ignored: [resolve, { status: "unresolved", label: "Unarchive", pending: "Unarchiving…" }],
 };
 
 const sections = [
@@ -109,9 +109,21 @@ export function IssueDetailPage() {
       Promise.all([client.invalidateQueries({ queryKey: ["issue", id] }), client.invalidateQueries({ queryKey: ["issues"] })]),
   });
 
-  if (issue.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading issue...</p>;
+  if (issue.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-32" />
+          <Skeleton className="h-6 w-80" />
+          <Skeleton className="h-3 w-56" />
+        </div>
+        <LayerCard><Skeleton className="h-24 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-64 w-full" /></LayerCard>
+      </div>
+    );
+  }
   if (issue.isError || !issue.data) {
-    return <p className="text-[13px] text-[var(--ui-error)]">{(issue.error as Error)?.message || "Issue not found"}</p>;
+    return <p className="text-[0.8125rem] text-[var(--ui-error)]">{(issue.error as Error)?.message || "Issue not found"}</p>;
   }
   const data = issue.data;
   const event = pickedOther ? picked.data : latest;
@@ -146,7 +158,7 @@ export function IssueDetailPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <nav className="mb-2 flex flex-wrap items-center gap-2 text-[13px] text-[var(--ui-fg-faint)]">
+        <nav className="mb-2 flex flex-wrap items-center gap-2 text-[0.8125rem] text-[var(--ui-fg-faint)]">
           <Link to={listSearch ? `/errors?${listSearch}` : "/errors"} className="hover:text-[var(--ui-fg)]">
             Issues
           </Link>
@@ -168,13 +180,13 @@ export function IssueDetailPage() {
                     disabled={update.isPending}
                     onClick={() => update.mutate(action.status)}
                   >
-                    {update.isPending && update.variables === action.status ? action.pending : action.label}
+                    {update.isPending && update.variables === action.status ? <><Spinner />{action.pending}</> : action.label}
                   </Button>
                 ))
               : null
           }
         />
-        <div className="-mt-3 flex flex-wrap items-center gap-2 text-[12px] text-[var(--ui-fg-faint)]">
+        <div className="-mt-3 flex flex-wrap items-center gap-2 text-[0.75rem] text-[var(--ui-fg-faint)]">
           <Badge tone={data.level}>{data.level}</Badge>
           <Badge tone={data.status}>{data.status === "ignored" ? "Archived" : data.status}</Badge>
           {data.unhandled ? <Badge tone="fatal">Unhandled</Badge> : null}
@@ -191,7 +203,7 @@ export function IssueDetailPage() {
               type="button"
               aria-current={item.id === view.tab ? "page" : undefined}
               className={cn(
-                "h-10 shrink-0 border-b-2 px-2.5 text-[13px] font-medium transition-colors",
+                "h-10 shrink-0 border-b-2 px-2.5 text-[0.8125rem] font-medium transition-colors",
                 item.id === view.tab
                   ? "border-[var(--ui-accent)] text-[var(--ui-fg)]"
                   : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
@@ -242,7 +254,7 @@ export function IssueDetailPage() {
               flush
             >
               {events.length === 0 ? (
-                <p className="p-6 text-center text-[13px] text-[var(--ui-fg-faint)]">No events match these filters.</p>
+                <p className="p-6 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No events match these filters.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="cool-table">
@@ -263,7 +275,7 @@ export function IssueDetailPage() {
                           aria-selected={row.id === event?.eventId}
                           onClick={() => openEvent(row.id)}
                         >
-                          <td className="font-mono text-[12px]">{row.id.slice(0, 8)}</td>
+                          <td className="font-mono text-[0.75rem]">{row.id.slice(0, 8)}</td>
                           <td className="whitespace-nowrap" title={fullTime(row.timestamp)}>
                             {timeAgo(row.timestamp)}
                           </td>
@@ -302,7 +314,7 @@ export function IssueDetailPage() {
                 {event ? (
                   <div className="flex flex-col gap-3">
                     <EventChips event={event} />
-                    <nav className="flex flex-wrap gap-4 text-[12px] font-medium text-[var(--ui-fg-faint)]" aria-label="Event sections">
+                    <nav className="flex flex-wrap gap-4 text-[0.75rem] font-medium text-[var(--ui-fg-faint)]" aria-label="Event sections">
                       {sections.map((section) => (
                         <button key={section.key} type="button" className="hover:text-[var(--ui-fg)]" onClick={() => reveal(section.key)}>
                           {section.label}
@@ -312,10 +324,13 @@ export function IssueDetailPage() {
                   </div>
                 ) : pickedOther && picked.isError ? (
                   <ErrorText error={picked.error} />
+                ) : pickedOther ? (
+                  <div className="space-y-2 py-4" aria-busy="true">
+                    <Skeleton className="h-4 w-64" />
+                    <Skeleton className="h-3 w-40" />
+                  </div>
                 ) : (
-                  <p className="py-4 text-center text-[13px] text-[var(--ui-fg-faint)]">
-                    {pickedOther ? "Loading event..." : "No events match these filters."}
-                  </p>
+                  <p className="py-4 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No events match these filters.</p>
                 )}
               </LayerCard>
               {event ? (
@@ -338,7 +353,7 @@ export function IssueDetailPage() {
             <Histogram values={data.histogram} />
           </LayerCard>
           <LayerCard title="Details">
-            <dl className="grid grid-cols-2 gap-3 text-[13px]">
+            <dl className="grid grid-cols-2 gap-3 text-[0.8125rem]">
               <Detail label="Last seen">
                 <span title={fullTime(data.lastSeen)}>{timeAgo(data.lastSeen)}</span>
               </Detail>
@@ -358,18 +373,18 @@ export function IssueDetailPage() {
           </LayerCard>
           <LayerCard title="Tags" description={`Share of events in the ${rangeLabel}`}>
             {data.tags.length === 0 ? (
-              <p className="text-center text-[13px] text-[var(--ui-fg-faint)]">No tags in this range.</p>
+              <p className="text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No tags in this range.</p>
             ) : (
               <div className="flex flex-col gap-4">
                 {data.tags.map((group) => (
                   <div key={group.key}>
-                    <div className="mb-1.5 text-[12px] font-medium text-[var(--ui-fg)]">{group.key}</div>
+                    <div className="mb-1.5 text-[0.75rem] font-medium text-[var(--ui-fg)]">{group.key}</div>
                     <ul className="flex flex-col gap-2">
                       {group.values.map((tag) => {
                         const share = (tag.count / Math.max(data.periodEventCount, 1)) * 100;
                         return (
                           <li key={tag.value} title={`${tag.count} of ${data.periodEventCount} events`}>
-                            <div className="flex justify-between gap-2 text-[12px] text-[var(--ui-fg-dim)]">
+                            <div className="flex justify-between gap-2 text-[0.75rem] text-[var(--ui-fg-dim)]">
                               <span className="truncate">{tag.value}</span>
                               <span className="tabular-nums">{Math.round(share)}%</span>
                             </div>
@@ -415,7 +430,7 @@ function EventSections({
         actions={
           event.exceptions.length > 0 ? (
             <>
-              <label className="flex items-center gap-1.5 text-[12px] text-[var(--ui-fg-faint)]">
+              <label className="flex items-center gap-1.5 text-[0.75rem] text-[var(--ui-fg-faint)]">
                 <input type="checkbox" checked={inAppOnly} onChange={(input) => onInAppOnly(input.target.checked)} />
                 In-app only
               </label>
@@ -425,11 +440,11 @@ function EventSections({
         }
       >
         {event.exceptions.length === 0 ? (
-          <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">{event.message || "No exception payload."}</p>
+          <p className="p-4 text-[0.8125rem] text-[var(--ui-fg-faint)]">{event.message || "No exception payload."}</p>
         ) : (
           event.exceptions.map((exception, exceptionIndex) => (
             <div key={`${exception.type}-${exceptionIndex}`} className={exceptionIndex > 0 ? "border-t border-[var(--ui-divider)]" : undefined}>
-              <div className="flex flex-wrap items-center gap-2 px-4 py-3 text-[13px]">
+              <div className="flex flex-wrap items-center gap-2 px-4 py-3 text-[0.8125rem]">
                 <span className="font-medium text-[var(--ui-fg)]">{exception.type || "Error"}</span>
                 {exception.value ? <span className="text-[var(--ui-fg-dim)]">{exception.value}</span> : null}
                 {exception.handled === false ? <Badge tone="fatal">Unhandled</Badge> : null}
@@ -445,12 +460,12 @@ function EventSections({
       </Section>
       <Section id="breadcrumbs" title="Breadcrumbs" open={open.breadcrumbs} onToggle={toggle("breadcrumbs")}>
         {event.breadcrumbs.length === 0 ? (
-          <p className="text-center text-[13px] text-[var(--ui-fg-faint)]">No breadcrumbs on this event.</p>
+          <p className="text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No breadcrumbs on this event.</p>
         ) : (
           <ol className="flex flex-col gap-3">
             {event.breadcrumbs.map((crumb, crumbIndex) => (
-              <li key={crumbIndex} className="border-l-2 border-[var(--ui-divider)] pl-3 text-[13px] text-[var(--ui-fg)]">
-                <div className="text-[12px] text-[var(--ui-fg-faint)]">
+              <li key={crumbIndex} className="border-l-2 border-[var(--ui-divider)] pl-3 text-[0.8125rem] text-[var(--ui-fg)]">
+                <div className="text-[0.75rem] text-[var(--ui-fg-faint)]">
                   {crumb.category || crumb.type || "default"}
                   {crumb.timestamp ? ` · ${fullTime(crumb.timestamp)}` : ""}
                 </div>
@@ -462,9 +477,9 @@ function EventSections({
       </Section>
       <Section id="tags" title="Tags" open={open.tags} onToggle={toggle("tags")}>
         {event.tags.length === 0 ? (
-          <p className="text-center text-[13px] text-[var(--ui-fg-faint)]">No tags.</p>
+          <p className="text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No tags.</p>
         ) : (
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-[13px]">
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-[0.8125rem]">
             {event.tags.map((tag) => (
               <div key={tag.key} className="contents">
                 <dt className="text-[var(--ui-fg-faint)]">{tag.key}</dt>
@@ -484,7 +499,7 @@ function EventSections({
         onToggle={toggle("raw")}
         actions={<CopyButton text={JSON.stringify(event.raw, null, 2)} label="Copy" />}
       >
-        <pre className="max-h-96 overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[12px] leading-5 text-[var(--ui-fg-dim)]">
+        <pre className="max-h-96 overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] leading-5 text-[var(--ui-fg-dim)]">
           {JSON.stringify(event.raw, null, 2)}
         </pre>
       </Section>
@@ -496,7 +511,7 @@ function CopyButton({ text, label, quiet }: { text: string; label: string; quiet
   const { copied, copy } = useCopy();
   if (quiet) {
     return (
-      <button type="button" className="text-[12px] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" onClick={() => copy(text)}>
+      <button type="button" className="text-[0.75rem] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" onClick={() => copy(text)}>
         {copied ? "Copied" : label}
       </button>
     );
@@ -520,7 +535,7 @@ function useDebounced<T>(value: T, ms: number) {
 function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[12px] text-[var(--ui-fg-faint)]">{label}</dt>
+      <dt className="text-[0.75rem] text-[var(--ui-fg-faint)]">{label}</dt>
       <dd className="mt-0.5 break-all text-[var(--ui-fg)]">{children}</dd>
     </div>
   );
@@ -539,13 +554,13 @@ function EventChips({ event }: { event: NormalizedEvent }) {
   ].filter(Boolean);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <span className="text-[12px] text-[var(--ui-fg-dim)]" title={fullTime(event.timestamp)}>
+      <span className="text-[0.75rem] text-[var(--ui-fg-dim)]" title={fullTime(event.timestamp)}>
         {timeAgo(event.timestamp)}
       </span>
       {chips.map((chip) => (
         <span
           key={chip}
-          className="inline-flex h-6 items-center rounded-full border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] px-2 text-[12px] text-[var(--ui-fg-dim)]"
+          className="inline-flex h-6 items-center rounded-full border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] px-2 text-[0.75rem] text-[var(--ui-fg-dim)]"
         >
           {chip}
         </span>
@@ -567,8 +582,8 @@ function Highlights({ event }: { event: NormalizedEvent }) {
     <dl className="grid gap-3 sm:grid-cols-2">
       {rows.map(([key, value]) => (
         <div key={key}>
-          <dt className="text-[12px] text-[var(--ui-fg-faint)]">{key}</dt>
-          <dd className="mt-0.5 break-all text-[13px] text-[var(--ui-fg)]">{value}</dd>
+          <dt className="text-[0.75rem] text-[var(--ui-fg-faint)]">{key}</dt>
+          <dd className="mt-0.5 break-all text-[0.8125rem] text-[var(--ui-fg)]">{value}</dd>
         </div>
       ))}
     </dl>
@@ -577,13 +592,13 @@ function Highlights({ event }: { event: NormalizedEvent }) {
 
 function ContextBlock({ event }: { event: NormalizedEvent }) {
   const names = Object.keys(event.contexts).filter((name) => name !== "trace");
-  if (names.length === 0) return <p className="text-center text-[13px] text-[var(--ui-fg-faint)]">No context.</p>;
+  if (names.length === 0) return <p className="text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No context.</p>;
   return (
     <div className="flex flex-col gap-4">
       {names.map((name) => (
         <div key={name}>
-          <div className="mb-1.5 text-[12px] font-medium text-[var(--ui-fg-dim)] first-letter:uppercase">{name}</div>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-[13px]">
+          <div className="mb-1.5 text-[0.75rem] font-medium text-[var(--ui-fg-dim)] first-letter:uppercase">{name}</div>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-[0.8125rem]">
             {Object.entries(record(event.contexts[name])).map(([key, value]) => (
               <div key={key} className="contents">
                 <dt className="text-[var(--ui-fg-faint)]">{key}</dt>

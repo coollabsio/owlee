@@ -1,7 +1,7 @@
 import type { HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
-/* Neutral status pill with a colored dot (same anatomy as StatusBadge). */
+/* Bare status badge: a colored dot and text (same anatomy as StatusBadge). */
 const tones: Record<string, string> = {
   fatal: "error",
   error: "error",

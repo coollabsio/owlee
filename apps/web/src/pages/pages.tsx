@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router";
-import { Button, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
+import { Button, ConfirmDialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -11,9 +11,22 @@ export function PagesPage() {
   const scope = useListScope();
   const query = useQuery({ queryKey: scope.key("pages"), queryFn: () => api<StatusPage[]>(scope.path("/api/pages")) });
   const canEdit = useCanEdit();
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
+  const [publishedFilter, setPublishedFilter] = useState<boolean | null>(null);
   const needle = search.trim().toLowerCase();
-  const pages = (query.data ?? []).filter((page) => page.title.toLowerCase().includes(needle) || page.slug.toLowerCase().includes(needle));
+  const filtered = (query.data ?? []).filter(
+    (page) =>
+      (page.title.toLowerCase().includes(needle) || page.slug.toLowerCase().includes(needle)) &&
+      (publishedFilter === null || page.published === publishedFilter),
+  );
+  const { rows: pages, sort, toggle } = useSort(filtered, {
+    title: (page) => page.title,
+    slug: (page) => page.slug,
+    components: (page) => page.components.length,
+    status: (page) => (page.published ? "Published" : "Draft"),
+  });
+  const filters = publishedFilter === null ? [] : [{ key: "status", label: `Status: ${publishedFilter ? "Published" : "Draft"}`, onRemove: () => setPublishedFilter(null) }];
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -21,44 +34,51 @@ export function PagesPage() {
         description="Public pages at /status/your-slug."
         actions={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : null}
       />
-      {query.isLoading ? (
-        <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading pages…</p>
-      ) : (query.data?.length ?? 0) === 0 ? (
+      {!query.isLoading && (query.data?.length ?? 0) === 0 ? (
         <Empty title="No status pages" body="Group monitors onto a page your customers can open without signing in." action={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : undefined} />
       ) : (
         <LayerCard title="All pages" description="Customers open these pages without signing in." flush>
           <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
             <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search pages" />
+            <FilterChips filters={filters} onClear={() => setPublishedFilter(null)} />
           </div>
           <div className="overflow-x-auto">
             <table className="cool-table">
               <thead>
                 <tr>
-                  <th>Title</th>
-                  <th className="hidden sm:table-cell">Slug</th>
-                  <th className="hidden md:table-cell">Components</th>
-                  <th>Status</th>
-                  <th className="w-0" />
+                  <SortHeader column="title" sort={sort} onSort={toggle}>Title</SortHeader>
+                  <SortHeader column="slug" sort={sort} onSort={toggle} className="hidden sm:table-cell">Slug</SortHeader>
+                  <SortHeader column="components" sort={sort} onSort={toggle} className="hidden md:table-cell">Components</SortHeader>
+                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
+                  <th className="text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
+                {query.isLoading ? <SkeletonRows columns={[undefined, "hidden sm:table-cell", "hidden md:table-cell", undefined, "text-right"]} /> : null}
                 {pages.map((page) => (
                   <tr key={page.id}>
                     <td><Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link><ProjectTag id={page.project_id} /></td>
-                    <td className="hidden font-mono text-[12px] sm:table-cell">/{page.slug}</td>
+                    <td className="hidden font-mono text-[0.75rem] sm:table-cell">/{page.slug}</td>
                     <td className="hidden md:table-cell">{page.components.length}</td>
-                    <td><StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge></td>
                     <td>
-                      <div className="flex justify-end gap-2">
-                        {canEdit ? <Link to={`/pages/${page.id}`}><Button>Edit</Button></Link> : null}
-                        {page.published ? <Link to={`/status/${page.slug}`}><Button>View</Button></Link> : null}
-                      </div>
+                      <FilterValue active={publishedFilter === page.published} label={page.published ? "Published" : "Draft"} onToggle={() => setPublishedFilter(publishedFilter === page.published ? null : page.published)}>
+                        <StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge>
+                      </FilterValue>
+                    </td>
+                    <td className="text-right">
+                      <RowActions
+                        label={page.title}
+                        actions={[
+                          ...(canEdit ? [{ label: "Edit", onSelect: () => navigate(`/pages/${page.id}`) }] : []),
+                          ...(page.published ? [{ label: "View", onSelect: () => navigate(`/status/${page.slug}`) }] : []),
+                        ]}
+                      />
                     </td>
                   </tr>
                 ))}
-                {pages.length === 0 ? (
+                {!query.isLoading && pages.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No pages match your search.</td>
+                    <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No pages match your search or filters.</td>
                   </tr>
                 ) : null}
               </tbody>
@@ -92,6 +112,7 @@ export function PageEditor() {
   const [published, setPublished] = useState(page?.published ?? true);
   const [selected, setSelected] = useState<string[]>(page?.components.map((component) => component.monitor_id) ?? []);
   const [fields, setFields] = useState<Record<string, string>>({});
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!page) return;
@@ -135,7 +156,18 @@ export function PageEditor() {
   }
 
   if (creating && !canEdit) return <Navigate to="/pages" replace />;
-  if (!creating && existing.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading page…</p>;
+  if (!creating && existing.isLoading) {
+    return (
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-48" />
+          <Skeleton className="h-3 w-72" />
+        </div>
+        <LayerCard><Skeleton className="h-48 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-24 w-full" /></LayerCard>
+      </div>
+    );
+  }
 
   return (
     <form className="mx-auto flex w-full max-w-3xl flex-col gap-6" onSubmit={submit}>
@@ -169,7 +201,7 @@ export function PageEditor() {
       </LayerCard>
       <LayerCard title="Monitors" description="Each selected monitor shows as a component on the page.">
         {(monitors.data ?? []).length === 0 ? (
-          <p className="py-4 text-center text-[13px] text-[var(--ui-fg-faint)]">Create a monitor first.</p>
+          <p className="py-4 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">Create a monitor first.</p>
         ) : (
           <div className="grid gap-2 sm:grid-cols-2">
             {monitors.data?.map((monitor) => (
@@ -190,13 +222,22 @@ export function PageEditor() {
         {fields.monitor_ids ? <p className="field-error">{fields.monitor_ids}</p> : null}
       </LayerCard>
       </fieldset>
-      <ErrorText error={save.error || remove.error} />
+      <ErrorText error={save.error} />
       {canEdit ? (
         <div className="flex justify-between gap-2">
-          {!creating ? <Button type="button" variant="danger" onClick={() => remove.mutate()}>Delete</Button> : <span />}
-          <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? "Saving…" : "Save page"}</Button>
+          {!creating ? <Button type="button" variant="danger" onClick={() => setDeleting(true)}>Delete</Button> : <span />}
+          <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save page"}</Button>
         </div>
       ) : null}
+      <ConfirmDialog
+        open={deleting}
+        title="Delete status page?"
+        description={`${page?.title ?? "This page"} will be deleted and /status/${page?.slug ?? slug} will stop working. Its monitors are kept.`}
+        pending={remove.isPending}
+        error={remove.error}
+        onConfirm={() => remove.mutate()}
+        onClose={() => setDeleting(false)}
+      />
     </form>
   );
 }
