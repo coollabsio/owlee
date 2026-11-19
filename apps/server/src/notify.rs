@@ -84,11 +84,9 @@ async fn send(
             Ok(SendOutcome::Sent)
         }
         "webhook" => {
-            let url = http_url(config.get("url"))?;
+            let url = webhook_url(state, config.get("url"))?;
             let body = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
-            let mut request = state
-                .http
-                .direct
+            let mut request = webhook_client(state)
                 .post(url)
                 .timeout(Duration::from_secs(10))
                 .header("content-type", "application/json")
@@ -103,19 +101,19 @@ async fn send(
             let response = request
                 .send()
                 .await
-                .map_err(|error| trim(&error.to_string()))?;
+                .map_err(|error| request_error(&error))?;
             if !response.status().is_success() {
                 return Err(format!("webhook returned HTTP {}", response.status()));
             }
             Ok(SendOutcome::Sent)
         }
         "slack" => {
-            let url = http_url(config.get("url"))?;
+            let url = webhook_url(state, config.get("url"))?;
             post_json(state, url, serde_json::json!({ "text": text })).await?;
             Ok(SendOutcome::Sent)
         }
         "discord" => {
-            let url = http_url(config.get("url"))?;
+            let url = webhook_url(state, config.get("url"))?;
             let content = text.chars().take(1900).collect::<String>();
             post_json(state, url, serde_json::json!({ "content": content })).await?;
             Ok(SendOutcome::Sent)
@@ -125,15 +123,13 @@ async fn send(
 }
 
 async fn post_json(state: &AppState, url: &str, body: serde_json::Value) -> Result<(), String> {
-    let response = state
-        .http
-        .direct
+    let response = webhook_client(state)
         .post(url)
         .timeout(Duration::from_secs(10))
         .json(&body)
         .send()
         .await
-        .map_err(|error| trim(&error.to_string()))?;
+        .map_err(|error| request_error(&error))?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -229,12 +225,22 @@ async fn send_email(
     Ok(())
 }
 
-fn http_url(value: Option<&Value>) -> Result<&str, String> {
+fn webhook_url<'a>(state: &AppState, value: Option<&'a Value>) -> Result<&'a str, String> {
     let url = value.and_then(Value::as_str).unwrap_or("");
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Ok(url)
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("notification URL must start with http:// or https://".to_owned());
+    }
+    if !state.config.allow_private_webhooks {
+        crate::outbound::check_url(url).map_err(str::to_owned)?;
+    }
+    Ok(url)
+}
+
+fn webhook_client(state: &AppState) -> &reqwest::Client {
+    if state.config.allow_private_webhooks {
+        &state.http.direct
     } else {
-        Err("notification URL must start with http:// or https://".to_owned())
+        &state.http.webhook
     }
 }
 
@@ -279,6 +285,18 @@ pub fn plain(payload: &NotificationPayload) -> (String, String) {
         lines.push(message.clone());
     }
     (subject, lines.join("\n"))
+}
+
+/// reqwest's message omits the cause, such as a refused address or a TLS failure.
+fn request_error(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    trim(&message)
 }
 
 fn trim(value: &str) -> String {

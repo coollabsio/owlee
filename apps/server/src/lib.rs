@@ -18,6 +18,7 @@ mod invitations;
 mod limit;
 mod migrations;
 mod notify;
+mod outbound;
 mod ownership;
 mod peer;
 mod present;

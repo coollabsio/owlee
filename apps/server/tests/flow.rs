@@ -355,6 +355,72 @@ async fn sqlite_flow_covers_checks_incidents_and_the_public_page() {
 }
 
 #[tokio::test]
+async fn webhooks_refuse_private_addresses_unless_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = testing_config(dir.path().join("owlee.sqlite"));
+    config.allow_private_webhooks = false;
+    let state = boot(config).await.unwrap();
+    let token = initialize_setup_token(&state.db, TimestampMillis::now())
+        .await
+        .unwrap()
+        .unwrap()
+        .token;
+    let app = router(state);
+    let (_, ada) = owner(&app, &token).await;
+
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/notifications",
+        Some(json!({
+            "name": "Metadata", "provider": "webhook", "monitor_ids": [],
+            "config": { "url": "http://169.254.169.254/latest/meta-data" }
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(
+        problem["fields"]["config"]
+            .as_str()
+            .unwrap()
+            .contains("OWLEE_ALLOW_PRIVATE_WEBHOOKS"),
+        "{problem}"
+    );
+
+    let (status, channel, _) = call(
+        &app,
+        "POST",
+        "/api/notifications",
+        Some(json!({
+            "name": "Local", "provider": "slack", "monitor_ids": [],
+            "config": { "url": "http://localhost:9/hook" }
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{channel}");
+    let id = channel["id"].as_str().unwrap();
+    let (status, tested, _) = call(
+        &app,
+        "POST",
+        &format!("/api/notifications/{id}/test"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(tested["deliveries"][0]["status"], "failed", "{tested}");
+    assert!(
+        tested["deliveries"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("OWLEE_ALLOW_PRIVATE_WEBHOOKS"),
+        "the resolver refused localhost: {tested}"
+    );
+}
+
+#[tokio::test]
 async fn postgres_accepts_the_same_api() {
     let Some(url) = std::env::var("OWLEE_APP_POSTGRES_URL")
         .ok()

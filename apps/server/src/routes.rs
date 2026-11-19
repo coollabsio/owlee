@@ -1813,7 +1813,7 @@ async fn create_channel(
     Json(body): Json<ChannelBody>,
 ) -> Result<(StatusCode, Json<present::ChannelResponse>), AppError> {
     member.require_editor()?;
-    let (name, provider, config) = validate_channel(&body)?;
+    let (name, provider, config) = validate_channel(&body, state.config.allow_private_webhooks)?;
     ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let channel = Channel {
@@ -1851,7 +1851,7 @@ async fn update_channel(
     let existing = repo::workspace_channel(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let (name, provider, config) = validate_channel(&body)?;
+    let (name, provider, config) = validate_channel(&body, state.config.allow_private_webhooks)?;
     ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let channel = Channel {
         id,
@@ -2180,7 +2180,10 @@ fn validate_incident(title: &str, message: &str) -> Result<(String, String), App
     }
 }
 
-fn validate_channel(body: &ChannelBody) -> Result<(String, String, String), AppError> {
+fn validate_channel(
+    body: &ChannelBody,
+    allow_private: bool,
+) -> Result<(String, String, String), AppError> {
     let name = body.name.trim().to_owned();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(AppError::field("name", "Use 1 to 80 characters."));
@@ -2200,7 +2203,7 @@ fn validate_channel(body: &ChannelBody) -> Result<(String, String, String), AppE
             json!({ "to": to }).to_string()
         }
         "webhook" => {
-            let url = require_http_url(body.config.get("url"))?;
+            let url = require_http_url(body.config.get("url"), allow_private)?;
             let secret = body
                 .config
                 .get("secret")
@@ -2210,7 +2213,7 @@ fn validate_channel(body: &ChannelBody) -> Result<(String, String, String), AppE
             json!({ "url": url, "secret": secret }).to_string()
         }
         "slack" | "discord" => {
-            let url = require_http_url(body.config.get("url"))?;
+            let url = require_http_url(body.config.get("url"), allow_private)?;
             json!({ "url": url }).to_string()
         }
         _ => {
@@ -2223,17 +2226,19 @@ fn validate_channel(body: &ChannelBody) -> Result<(String, String, String), AppE
     Ok((name, provider, config))
 }
 
-fn require_http_url(value: Option<&Value>) -> Result<String, AppError> {
+fn require_http_url(value: Option<&Value>, allow_private: bool) -> Result<String, AppError> {
     let url = value
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
         .to_owned();
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Ok(url)
-    } else {
-        Err(AppError::field("config", "Enter an http(s) URL."))
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AppError::field("config", "Enter an http(s) URL."));
     }
+    if !allow_private {
+        crate::outbound::check_url(&url).map_err(|message| AppError::field("config", message))?;
+    }
+    Ok(url)
 }
 
 /// The `project_id` of a create body. Missing is a field error, and a project

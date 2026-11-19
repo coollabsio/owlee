@@ -41,6 +41,8 @@ pub struct AppState {
 pub struct HttpClients {
     pub follow: reqwest::Client,
     pub direct: reqwest::Client,
+    /// No redirects, and host names resolve to public addresses only.
+    pub webhook: reqwest::Client,
 }
 
 impl HttpClients {
@@ -48,6 +50,12 @@ impl HttpClients {
         Ok(Self {
             follow: client(reqwest::redirect::Policy::limited(5))?,
             direct: client(reqwest::redirect::Policy::none())?,
+            webhook: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .dns_resolver(Arc::new(crate::outbound::PublicOnly))
+                .user_agent(concat!("Owlee/", env!("CARGO_PKG_VERSION")))
+                .build()?,
         })
     }
 }
@@ -187,6 +195,7 @@ pub fn testing_config(path: PathBuf) -> Config {
         smtp: None,
         argon_memory_kib: 32,
         connectivity_targets: Vec::new(),
+        allow_private_webhooks: true,
         proxy_hops: 0,
         trusted_proxies: owlee_platform::default_trusted_proxies(),
         geoip_path: None,

@@ -69,6 +69,8 @@ export OWLEE_SMTP_FROM=status@example.com
 
 Webhook channels can set a secret. The body is posted as JSON with `X-Owlee-Signature: sha256=<hmac-sha256>`.
 
+In production, webhook, Slack, and Discord channels refuse loopback, private, link-local, and other non-public addresses. Owlee checks the address that it connects to, after DNS, and does not follow redirects. To send to a receiver on your own network, set `OWLEE_ALLOW_PRIVATE_WEBHOOKS=true`. Development allows private addresses. Monitors are not affected.
+
 ### First-run setup
 
 A new database has no open sign-up. The login page does not offer "Create one". On first start the server prints one line to stderr (standard error, not the JSON logs):

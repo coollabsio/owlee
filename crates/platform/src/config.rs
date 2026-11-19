@@ -20,6 +20,7 @@ const SMTP_PASSWORD: &str = "OWLEE_SMTP_PASSWORD";
 const SMTP_FROM: &str = "OWLEE_SMTP_FROM";
 const ARGON_MEMORY: &str = "OWLEE_ARGON_MEMORY_KIB";
 const CONNECTIVITY_TARGETS: &str = "OWLEE_CONNECTIVITY_TARGETS";
+const ALLOW_PRIVATE_WEBHOOKS: &str = "OWLEE_ALLOW_PRIVATE_WEBHOOKS";
 const PROXY_HOPS: &str = "OWLEE_PROXY_HOPS";
 const TRUSTED_PROXIES: &str = "OWLEE_TRUSTED_PROXIES";
 const GEOIP_PATH: &str = "OWLEE_GEOIP_PATH";
@@ -146,6 +147,8 @@ pub struct Config {
     /// `host:port` targets that prove the Owlee host itself has network.
     /// Empty disables the check.
     pub connectivity_targets: Vec<String>,
+    /// Lets notification webhooks reach loopback, private, and link-local addresses.
+    pub allow_private_webhooks: bool,
     /// Trusted reverse proxies in front of Owlee. `0` means the socket address is the client.
     pub proxy_hops: usize,
     /// Forwarding headers are used only when the TCP peer is in one of these
@@ -174,6 +177,7 @@ impl Config {
             connectivity_targets: ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"]
                 .map(str::to_owned)
                 .to_vec(),
+            allow_private_webhooks: true,
             proxy_hops: 0,
             trusted_proxies: default_trusted_proxies(),
             geoip_path: None,
@@ -200,6 +204,7 @@ impl Config {
             config.open_signup = false;
             config.bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
             config.ingest.allow_localhost = false;
+            config.allow_private_webhooks = false;
         }
         if let Some(bind) = optional(BIND) {
             config.bind = bind.parse().map_err(|_| ConfigError::Invalid {
@@ -263,6 +268,12 @@ impl Config {
             config.connectivity_targets = parse_targets(&targets).ok_or(ConfigError::Invalid {
                 name: CONNECTIVITY_TARGETS,
                 value: targets,
+            })?;
+        }
+        if let Some(value) = optional(ALLOW_PRIVATE_WEBHOOKS) {
+            config.allow_private_webhooks = parse_bool(&value).ok_or(ConfigError::Invalid {
+                name: ALLOW_PRIVATE_WEBHOOKS,
+                value,
             })?;
         }
         if let Some(hops) = optional(PROXY_HOPS) {
