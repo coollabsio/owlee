@@ -1,7 +1,5 @@
-use std::net::SocketAddr;
-
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::Response;
@@ -38,7 +36,7 @@ pub async fn ingest_envelope(
     request: Request,
 ) -> Response {
     let max_body = state.config.ingest.error_max_body_bytes;
-    let peer = peer_of(&request);
+    let peer = peer::peer_addr(request.extensions());
     let bytes = match read_limited(request, max_body, &headers).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
@@ -123,7 +121,7 @@ pub async fn ingest_store(
     request: Request,
 ) -> Response {
     let max_body = state.config.ingest.error_max_body_bytes;
-    let peer = peer_of(&request);
+    let peer = peer::peer_addr(request.extensions());
     let bytes = match read_limited(request, max_body, &headers).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
@@ -178,14 +176,6 @@ pub async fn ingest_security(headers: HeaderMap) -> Response {
 enum Accepted {
     Stored(String),
     Limited(Response),
-}
-
-fn peer_of(request: &Request) -> Option<std::net::IpAddr> {
-    request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip())
-        .or_else(|| peer::peer_addr(request.extensions()))
 }
 
 fn enforce_rate(

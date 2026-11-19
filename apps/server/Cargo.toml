@@ -42,6 +42,7 @@ tracing.workspace = true
 toml = "1.1.8"
 
 [dev-dependencies]
+futures-util = "0.3"
 owlee-platform = { path = "../../crates/platform" }
 sqlx = { workspace = true }
 http-body-util = "0.1"

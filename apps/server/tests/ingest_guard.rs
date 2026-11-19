@@ -258,6 +258,30 @@ async fn oversized_body(config: &Config) {
     )
     .await;
     assert_eq!(rejected.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", rejected.body);
+
+    // A chunked body has no Content-Length. The read must stop at the limit,
+    // so an endless stream is answered 413 instead of being buffered forever.
+    let endless = futures_util::stream::unfold((), |()| async {
+        tokio::task::yield_now().await;
+        let chunk = axum::body::Bytes::from_static(&[b' '; 1024]);
+        Some((Ok::<_, std::convert::Infallible>(chunk), ()))
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/receive")
+        .header("content-type", "application/json")
+        .header("origin", "https://docs.example")
+        .header("user-agent", BROWSER)
+        .body(Body::from_stream(endless))
+        .unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app.clone().oneshot(request),
+    )
+    .await
+    .expect("endless analytics body must be cut off at the limit")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 async fn burst_is_429(mut config: Config) {

@@ -155,7 +155,8 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
             return with_cors(payload_too_large());
         }
     }
-    let bytes = match request.into_body().collect().await {
+    let body = http_body_util::Limited::new(request.into_body(), max_body);
+    let bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return with_cors(payload_too_large()),
     };

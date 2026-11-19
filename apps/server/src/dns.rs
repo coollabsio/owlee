@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -75,24 +75,24 @@ impl TxtResolver for SystemResolver {
 }
 
 async fn lookup_txt(server: &str, name: &str) -> Result<Vec<String>, String> {
-    let id = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos())
-        .unwrap_or(1)
-        % 65535) as u16;
-    let query = encode_query(name, id).map_err(|error| error.to_owned())?;
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|error| error.to_string())?;
-    let address: SocketAddr = format!("{server}:53")
+    let ip: IpAddr = server
         .parse()
         .map_err(|_| format!("nameserver {server} is not an IP address"))?;
-    socket
-        .send_to(&query, address)
+    let address = SocketAddr::new(ip, 53);
+    // A random id and a source check keep an off-path sender from forging the answer.
+    let id: u16 = rand::random();
+    let query = encode_query(name, id).map_err(|error| error.to_owned())?;
+    let bind = if ip.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let socket = tokio::net::UdpSocket::bind(bind)
         .await
         .map_err(|error| error.to_string())?;
-    let mut buffer = [0_u8; 2048];
-    let (length, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+    socket
+        .connect(address)
+        .await
+        .map_err(|error| error.to_string())?;
+    socket.send(&query).await.map_err(|error| error.to_string())?;
+    let mut buffer = [0_u8; 4096];
+    let length = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buffer))
         .await
         .map_err(|_| "DNS lookup timed out".to_owned())?
         .map_err(|error| error.to_string())?;
@@ -127,6 +127,9 @@ pub fn parse_txt_response(buffer: &[u8], id: u16) -> Result<Vec<String>, String>
         return Err("DNS response id mismatch".into());
     }
     let flags = u16::from_be_bytes([buffer[2], buffer[3]]);
+    if flags & 0x0200 != 0 {
+        return Err("DNS response is truncated".into());
+    }
     let rcode = flags & 0x000f;
     if rcode == 3 {
         return Ok(Vec::new());
