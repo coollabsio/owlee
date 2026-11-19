@@ -372,6 +372,122 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     assert_eq!(allow.as_deref(), Some("*"));
 
     sorts_before_the_limit(&app, &cookie).await;
+    detail_reports_true_edges(&app, &cookie).await;
+}
+
+/// A range that hides the oldest event must still name it as the issue's first event.
+async fn detail_reports_true_edges(app: &Router, cookie: &str) {
+    let (_, project, _) = call(
+        app,
+        "POST",
+        "/api/error-projects",
+        json!({"name": "Edges", "platform": "php"})
+            .to_string()
+            .into_bytes(),
+        Some(cookie),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let key = project["publicKey"].as_str().unwrap();
+    let old_id = hex_id();
+    let new_id = hex_id();
+    let old_time = (chrono::Utc::now() - chrono::Duration::days(20)).timestamp();
+    let new_time = chrono::Utc::now().timestamp();
+    let sends = [
+        (
+            &old_id,
+            old_time,
+            json!({"email": "ada@example.com"}),
+            "Firefox",
+        ),
+        (&new_id, new_time, json!({"id": "7"}), "Chrome"),
+    ];
+    for (event_id, timestamp, user, browser) in sends {
+        let mut event = sample();
+        event["event_id"] = json!(event_id);
+        event["timestamp"] = json!(timestamp);
+        event["user"] = user;
+        event["tags"] = json!({"browser": browser, "runtime": "php"});
+        let (status, _, _) = call(
+            app,
+            "POST",
+            &format!("/api/{project_id}/store/"),
+            event.to_string().into_bytes(),
+            None,
+            &[
+                ("content-type", "application/json"),
+                (
+                    "x-sentry-auth",
+                    &format!("Sentry sentry_key={key}, sentry_version=7"),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (_, feed, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues?project_id={project_id}&since=30d"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    let issue_id = feed["issues"][0]["id"].as_str().unwrap();
+
+    let (status, detail, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues/{issue_id}?range=24h"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["firstEventId"], json!(old_id));
+    assert_eq!(detail["latestEventId"], json!(new_id));
+    assert_eq!(detail["eventCount"], json!(2));
+    assert_eq!(detail["environments"], json!(["production"]));
+    assert_eq!(detail["periodEventCount"], json!(1));
+    assert_eq!(detail["userCount"], json!(1));
+    let events: Vec<(Value, Value)> = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| (event["id"].clone(), event["user"].clone()))
+        .collect();
+    assert_eq!(events, vec![(json!(new_id), json!("7"))]);
+    assert_eq!(
+        detail["tags"],
+        json!([
+            {"key": "browser", "values": [{"value": "Chrome", "count": 1}]},
+            {"key": "runtime", "values": [{"value": "php", "count": 1}]},
+        ])
+    );
+
+    let (_, detail, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues/{issue_id}?range=30d"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(detail["firstEventId"], json!(old_id));
+    assert_eq!(detail["periodEventCount"], json!(2));
+    assert_eq!(detail["userCount"], json!(2));
+    assert_eq!(detail["events"][1]["user"], json!("ada@example.com"));
+    assert_eq!(
+        detail["tags"],
+        json!([
+            {"key": "browser", "values": [{"value": "Chrome", "count": 1}, {"value": "Firefox", "count": 1}]},
+            {"key": "runtime", "values": [{"value": "php", "count": 2}]},
+        ])
+    );
 }
 
 /// One busy issue older than 200 quiet ones must still lead `sort=events`.

@@ -180,10 +180,12 @@ pub struct IssueDetail {
     pub issue: IssueRow,
     pub events: Vec<EventSummary>,
     pub latest: Option<Value>,
+    pub first_event_id: Option<String>,
+    pub latest_event_id: Option<String>,
+    /// Every environment in the issue's project, so the filter keeps its options while filtered.
+    pub environments: Vec<String>,
     pub histogram: Vec<i64>,
-    pub period_events: i64,
-    pub users: i64,
-    pub tags: Vec<store::TagCount>,
+    pub tags: Vec<store::TagGroup>,
 }
 
 pub async fn list_issues(
@@ -229,8 +231,8 @@ pub async fn get_issue(
     Query(filter): Query<DetailFilter>,
 ) -> Result<Json<IssueDetail>, AppError> {
     require_user(&state, &jar).await?;
-    let issue = store::get_issue(&state.db, &id).await?;
-    let (events, latest_payload, analytics) = store::issue_analytics(
+    let mut issue = store::get_issue(&state.db, &id).await?;
+    let analytics = store::issue_analytics(
         &state.db,
         &issue.id,
         if filter.range.is_empty() {
@@ -242,14 +244,20 @@ pub async fn get_issue(
         &filter.q,
     )
     .await?;
-    let latest = latest_payload.map(|payload| normalized_payload(&payload));
+    let (first_event_id, latest_event_id) = store::edge_event_ids(&state.db, &issue.id).await?;
+    let environments = store::list_environments(&state.db, &issue.project_id).await?;
+    issue.period_event_count = analytics.period_events;
+    issue.user_count = analytics.users;
     Ok(Json(IssueDetail {
         issue,
-        events,
-        latest,
+        events: analytics.events,
+        latest: analytics
+            .latest_payload
+            .map(|payload| normalized_payload(&payload)),
+        first_event_id,
+        latest_event_id,
+        environments,
         histogram: analytics.histogram,
-        period_events: analytics.period_events,
-        users: analytics.users,
         tags: analytics.tags,
     }))
 }
@@ -288,8 +296,8 @@ pub async fn get_event(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     require_user(&state, &jar).await?;
-    let event = store::get_event(&state.db, &id).await?;
-    Ok(Json(normalized_payload(&event.payload)))
+    let payload = store::get_event(&state.db, &id).await?;
+    Ok(Json(normalized_payload(&payload)))
 }
 
 fn normalized_payload(payload: &str) -> Value {

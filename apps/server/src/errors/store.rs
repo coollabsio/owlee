@@ -55,11 +55,7 @@ pub struct EventSummary {
     pub title: String,
     pub environment: Option<String>,
     pub release: Option<String>,
-}
-
-pub struct StoredEvent {
-    pub summary: EventSummary,
-    pub payload: String,
+    pub user: Option<String>,
 }
 
 fn statement(db: &Database, sql: &str) -> String {
@@ -223,18 +219,32 @@ pub struct IssueQuery {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TagCount {
-    pub key: String,
+pub struct TagValue {
     pub value: String,
     pub count: i64,
 }
 
+/// One tag key and its most common values across the matched events.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagGroup {
+    pub key: String,
+    pub values: Vec<TagValue>,
+}
+
 pub struct IssueAnalytics {
+    /// Newest first, at most `EVENT_LIST_LIMIT`.
+    pub events: Vec<EventSummary>,
+    pub latest_payload: Option<String>,
     pub histogram: Vec<i64>,
     pub users: i64,
     pub period_events: i64,
-    pub tags: Vec<TagCount>,
+    pub tags: Vec<TagGroup>,
 }
+
+const EVENT_LIST_LIMIT: usize = 100;
+const TAG_KEY_LIMIT: usize = 10;
+const TAG_VALUE_LIMIT: usize = 4;
 
 /// The feed shows at most this many issues, after sorting.
 const ISSUE_LIMIT: usize = 200;
@@ -428,48 +438,32 @@ pub async fn update_issue_status(
     get_issue(db, id).await
 }
 
-pub async fn list_events(db: &Database, issue_id: &str) -> Result<Vec<EventSummary>, AppError> {
-    let sql = statement(
-        db,
-        "SELECT id, timestamp, level, title, environment, release
-         FROM events WHERE issue_id = ? ORDER BY timestamp DESC LIMIT 50",
-    );
-    let rows = sqlx::query(&sql)
-        .bind(issue_id)
-        .fetch_all(db.pool())
-        .await?;
-    Ok(rows.iter().map(summary_from_row).collect())
-}
-
-pub async fn get_event(db: &Database, id: &str) -> Result<StoredEvent, AppError> {
-    let sql = statement(
-        db,
-        "SELECT id, timestamp, level, title, environment, release, payload FROM events WHERE id = ?",
-    );
+pub async fn get_event(db: &Database, id: &str) -> Result<String, AppError> {
+    let sql = statement(db, "SELECT payload FROM events WHERE id = ?");
     let row = sqlx::query(&sql).bind(id).fetch_optional(db.pool()).await?;
     let Some(row) = row else {
         return Err(AppError::NotFound);
     };
-    Ok(StoredEvent {
-        summary: summary_from_row(&row),
-        payload: row.try_get("payload")?,
-    })
+    Ok(row.try_get("payload")?)
 }
 
-pub async fn latest_event(db: &Database, issue_id: &str) -> Result<Option<StoredEvent>, AppError> {
+/// The oldest and newest stored events of an issue, ignoring any filter.
+pub async fn edge_event_ids(
+    db: &Database,
+    issue_id: &str,
+) -> Result<(Option<String>, Option<String>), AppError> {
     let sql = statement(
         db,
-        "SELECT id, timestamp, level, title, environment, release, payload
-         FROM events WHERE issue_id = ? ORDER BY timestamp DESC LIMIT 1",
+        "SELECT
+            (SELECT id FROM events WHERE issue_id = ? ORDER BY timestamp ASC, id ASC LIMIT 1) AS first_id,
+            (SELECT id FROM events WHERE issue_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1) AS latest_id",
     );
     let row = sqlx::query(&sql)
         .bind(issue_id)
-        .fetch_optional(db.pool())
+        .bind(issue_id)
+        .fetch_one(db.pool())
         .await?;
-    Ok(row.map(|row| StoredEvent {
-        summary: summary_from_row(&row),
-        payload: row.try_get("payload").unwrap_or_else(|_| "{}".to_owned()),
-    }))
+    Ok((row.try_get("first_id")?, row.try_get("latest_id")?))
 }
 
 pub struct Ingested {
@@ -684,17 +678,6 @@ fn issue_from_row(row: &sqlx::any::AnyRow) -> Result<IssueRow, AppError> {
     })
 }
 
-fn summary_from_row(row: &sqlx::any::AnyRow) -> EventSummary {
-    EventSummary {
-        id: row.get("id"),
-        timestamp: row.get("timestamp"),
-        level: row.get("level"),
-        title: row.get("title"),
-        environment: row.get("environment"),
-        release: row.get("release"),
-    }
-}
-
 fn slugify(name: &str) -> String {
     let mut slug = String::new();
     for ch in name.chars() {
@@ -806,7 +789,7 @@ pub async fn issue_analytics(
     range: &str,
     environment: &str,
     search: &str,
-) -> Result<(Vec<EventSummary>, Option<String>, IssueAnalytics), AppError> {
+) -> Result<IssueAnalytics, AppError> {
     let sql = statement(
         db,
         "SELECT id, timestamp, level, title, environment, release, user_key, payload
@@ -842,7 +825,7 @@ pub async fn issue_analytics(
     let histogram_start = start.unwrap_or_else(|| Utc::now() - Duration::days(14));
     let mut histogram = vec![0i64; bucket_count];
     let mut users = std::collections::BTreeSet::new();
-    let mut tags: std::collections::BTreeMap<(String, String), i64> =
+    let mut tags: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
         std::collections::BTreeMap::new();
     let mut summaries = Vec::new();
     let mut latest_payload = None;
@@ -858,41 +841,65 @@ pub async fn issue_analytics(
                 histogram[index] += 1;
             }
         }
+        let mut user = None;
         if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&payload) {
             let normalized = owlee_errors::normalize_event(raw);
+            user = user_label(&normalized.user);
             for tag in normalized.tags {
-                *tags.entry((tag.key, tag.value)).or_default() += 1;
+                *tags
+                    .entry(tag.key)
+                    .or_default()
+                    .entry(tag.value)
+                    .or_default() += 1;
             }
         }
         if latest_payload.is_none() {
             latest_payload = Some(payload);
         }
-        summaries.push(EventSummary {
-            id: row.try_get("id")?,
-            timestamp,
-            level: row.try_get("level")?,
-            title: row.try_get("title")?,
-            environment: row.try_get("environment")?,
-            release: row.try_get("release")?,
-        });
+        if summaries.len() < EVENT_LIST_LIMIT {
+            summaries.push(EventSummary {
+                id: row.try_get("id")?,
+                timestamp,
+                level: row.try_get("level")?,
+                title: row.try_get("title")?,
+                environment: row.try_get("environment")?,
+                release: row.try_get("release")?,
+                user,
+            });
+        }
     }
-    let mut tag_counts: Vec<TagCount> = tags
+    let mut groups: Vec<(i64, TagGroup)> = tags
         .into_iter()
-        .map(|((key, value), count)| TagCount { key, value, count })
+        .map(|(key, counts)| {
+            let total = counts.values().sum();
+            let mut values: Vec<TagValue> = counts
+                .into_iter()
+                .map(|(value, count)| TagValue { value, count })
+                .collect();
+            values.sort_by(|left, right| right.count.cmp(&left.count));
+            values.truncate(TAG_VALUE_LIMIT);
+            (total, TagGroup { key, values })
+        })
         .collect();
-    tag_counts.sort_by(|left, right| right.count.cmp(&left.count));
-    tag_counts.truncate(8);
-    let period_events = matched.len() as i64;
-    Ok((
-        summaries,
+    groups.sort_by(|left, right| right.0.cmp(&left.0));
+    groups.truncate(TAG_KEY_LIMIT);
+    Ok(IssueAnalytics {
+        events: summaries,
         latest_payload,
-        IssueAnalytics {
-            histogram,
-            users: users.len() as i64,
-            period_events,
-            tags: tag_counts,
-        },
-    ))
+        histogram,
+        users: users.len() as i64,
+        period_events: matched.len() as i64,
+        tags: groups.into_iter().map(|(_, group)| group).collect(),
+    })
+}
+
+fn user_label(user: &serde_json::Value) -> Option<String> {
+    ["email", "username", "id"].iter().find_map(|key| {
+        user.get(*key)
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+    })
 }
 
 #[derive(Serialize)]
