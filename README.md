@@ -2,6 +2,9 @@
 
 Owlee is a self-hosted uptime monitor, status page, incident desk, error tracker, and cookieless web analytics tool from [coolLabs](https://github.com/coollabsio), the team behind [Coolify](https://github.com/coollabsio/coolify). One Rust binary serves the API, runs the checks, and hosts the React app. SQLite is the default database. Postgres is the same schema and the same queries, selected with a URL.
 
+> [!WARNING]
+> Owlee is in early development. Do not use it for production systems or for systems where a failure can cause a large financial loss. The schema, the API, and the configuration can change without a migration path.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 ![Public status page](docs/screenshots/status-page.png)
