@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { dashboard, manage, type NavLinkItem, type Product, products } from "@/app/nav";
 import { CommandPalette, modKeyLabel } from "@/components/command-palette";
+import { IconTooltips } from "@/components/icon-tooltips";
 import { ProfileMenu } from "@/components/profile-menu";
 import { ScopeSwitcher } from "@/components/scope-switcher";
 import { api, type Meta, signOut } from "@/lib/api";
@@ -273,9 +274,9 @@ export function Shell() {
       </header>
 
       <div className="mobile-topbar sticky top-0 z-40 flex items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:hidden">
-        <NavLink to="/" className="flex min-w-0 items-center gap-2.5 text-[14px] font-semibold tracking-tight text-[var(--ui-fg)]">
+        <NavLink to="/" className="flex min-w-0 items-center gap-2.5 text-[0.875rem] font-semibold tracking-tight text-[var(--ui-fg)]">
           <span className="mobile-logo-tile">
-            <Logo className="size-[18px]" />
+            <Logo className="size-[1.125rem]" />
           </span>
           <span className="truncate">Owlee</span>
         </NavLink>
@@ -366,7 +367,7 @@ export function Shell() {
           collapsed ? "lg:ml-16" : "lg:ml-56",
         )}
       >
-        <div className="app-content mx-auto w-full max-w-[1400px]">
+        <div className="app-content mx-auto w-full max-w-[87.5rem]">
           <Outlet />
         </div>
       </main>
@@ -376,6 +377,7 @@ export function Shell() {
         </div>
       ) : null}
       <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+      <IconTooltips />
     </div>
   );
 }
@@ -394,10 +396,10 @@ export function Logo({ className }: { className?: string }) {
 function Wordmark({ version, onClick }: { version: string; onClick?: () => void }) {
   return (
     <span className="flex min-w-0 items-baseline gap-1.5">
-      <NavLink to="/" onClick={onClick} className="text-[15px] font-semibold tracking-tight text-[var(--ui-fg)]">
+      <NavLink to="/" onClick={onClick} className="text-[0.9375rem] font-semibold tracking-tight text-[var(--ui-fg)]">
         Owlee
       </NavLink>
-      <span className="truncate text-[10.5px] font-medium text-[var(--ui-fg-faint)]">v{version}</span>
+      <span className="truncate text-[0.6562rem] font-medium text-[var(--ui-fg-faint)]">v{version}</span>
     </span>
   );
 }

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
+import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -41,8 +41,18 @@ export function LinksPage() {
       await client.invalidateQueries({ queryKey: ["links"] });
     },
   });
-  const domainRows = domains.data ?? [];
-  const linkRows = links.data ?? [];
+  const linkSort = useSort(links.data ?? [], {
+    slug: (link) => link.slug,
+    destination: (link) => link.destination,
+    domain: (link) => link.hostname,
+    clicks: (link) => link.total_clicks,
+  });
+  const domainSort = useSort(domains.data ?? [], {
+    hostname: (domain) => domain.hostname,
+    status: (domain) => (domain.enabled ? "Enabled" : "Off"),
+  });
+  const domainRows = domainSort.rows;
+  const linkRows = linkSort.rows;
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -55,19 +65,20 @@ export function LinksPage() {
         actions={canEdit ? <Button variant="primary" onClick={() => setOpenLink(true)} disabled={domainRows.length === 0}>New link</Button> : null}
         flush
       >
-        {linkRows.length === 0 ? (
+        {!links.isLoading && linkRows.length === 0 ? (
           <CardEmpty title="No short links" body="Create a link. Visitors who open /go/your-slug are redirected, and the click is stored." />
         ) : (
           <table className="cool-table">
             <thead>
               <tr>
-                <th>Slug</th>
-                <th className="hidden md:table-cell">Destination</th>
-                <th className="hidden sm:table-cell">Domain</th>
-                <th className="text-right!">Clicks</th>
+                <SortHeader column="slug" sort={linkSort.sort} onSort={linkSort.toggle}>Slug</SortHeader>
+                <SortHeader column="destination" sort={linkSort.sort} onSort={linkSort.toggle} className="hidden md:table-cell">Destination</SortHeader>
+                <SortHeader column="domain" sort={linkSort.sort} onSort={linkSort.toggle} className="hidden sm:table-cell">Domain</SortHeader>
+                <SortHeader column="clicks" sort={linkSort.sort} onSort={linkSort.toggle} className="text-right!">Clicks</SortHeader>
               </tr>
             </thead>
             <tbody>
+              {links.isLoading ? <SkeletonRows columns={[undefined, "hidden md:table-cell", "hidden sm:table-cell", "text-right"]} /> : null}
               {linkRows.map((link) => {
                 const to = `/links/${link.id}`;
                 return (
@@ -76,11 +87,11 @@ export function LinksPage() {
                       <Link className="row-link" to={to}>/{link.slug}</Link>
                       <ProjectTag id={link.project_id} />
                       {rowCover(to)}
-                      <div className="font-mono text-[11px] text-[var(--ui-fg-faint)]">/go/{link.slug}</div>
+                      <div className="font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">/go/{link.slug}</div>
                     </td>
                     <td className="cell-link hidden md:table-cell">{rowCover(to)}<div className="max-w-[24rem] truncate">{link.destination}</div></td>
                     <td className="cell-link hidden sm:table-cell">{rowCover(to)}{link.hostname}</td>
-                    <td className="cell-link text-right font-mono text-[12px]">{rowCover(to)}{link.total_clicks}</td>
+                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{link.total_clicks}</td>
                   </tr>
                 );
               })}
@@ -94,15 +105,16 @@ export function LinksPage() {
         actions={canEdit ? <Button onClick={() => setOpenDomain(true)}>New domain</Button> : null}
         flush
       >
-        {domainRows.length === 0 ? <CardEmpty title="No domains" body="Add a domain before you create a link." /> : (
+        {!domains.isLoading && domainRows.length === 0 ? <CardEmpty title="No domains" body="Add a domain before you create a link." /> : (
           <table className="cool-table">
             <thead>
               <tr>
-                <th>Hostname</th>
-                <th className="text-right!">Status</th>
+                <SortHeader column="hostname" sort={domainSort.sort} onSort={domainSort.toggle}>Hostname</SortHeader>
+                <SortHeader column="status" sort={domainSort.sort} onSort={domainSort.toggle} className="text-right!">Status</SortHeader>
               </tr>
             </thead>
             <tbody>
+              {domains.isLoading ? <SkeletonRows columns={[undefined, "text-right"]} rows={2} /> : null}
               {domainRows.map((domain) => (
                 <tr key={domain.id}>
                   <td className="font-medium text-[var(--ui-fg)]">{domain.hostname}</td>
@@ -117,7 +129,7 @@ export function LinksPage() {
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); createDomain.mutate(); }}>
           <Field label="Hostname"><Input required value={hostname} onChange={(event) => setHostname(event.target.value)} placeholder="go.example.com" /></Field>
           <ErrorText error={createDomain.error} />
-          <Button variant="primary" type="submit">Save domain</Button>
+          <Button variant="primary" type="submit" disabled={createDomain.isPending}>{createDomain.isPending ? <><Spinner />Saving…</> : "Save domain"}</Button>
         </form>
       </Dialog>
       <Dialog open={canEdit && openLink} title="New link" onClose={() => setOpenLink(false)}>
@@ -135,7 +147,7 @@ export function LinksPage() {
           <Field label="Slug"><Input required value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="coolify" /></Field>
           <Field label="Destination"><Input required value={destination} onChange={(event) => setDestination(event.target.value)} /></Field>
           <ErrorText error={createLink.error} />
-          <Button variant="primary" type="submit">Create link</Button>
+          <Button variant="primary" type="submit" disabled={createLink.isPending}>{createLink.isPending ? <><Spinner />Creating…</> : "Create link"}</Button>
         </form>
       </Dialog>
     </div>
@@ -162,9 +174,21 @@ export function LinkDetailPage() {
     enabled: Boolean(linkId),
   });
   const item = link.data;
+  if (link.isLoading) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-3 w-80" />
+        </div>
+        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader keepTitle title={item ? `/${item.slug}` : "Link"} description={item ? `${item.destination} · ${window.location.origin}/go/${item.slug}` : "Loading..."} />
+      <PageHeader keepTitle title={item ? `/${item.slug}` : "Link"} description={item ? `${item.destination} · ${window.location.origin}/go/${item.slug}` : undefined} />
       <ErrorText error={link.error ?? overview.error} />
       <LayerCard title="Summary" description="Last 30 days.">
         <div className="grid gap-6 sm:grid-cols-2">
@@ -189,8 +213,8 @@ function rowCover(to: string) {
 function CardEmpty({ title, body }: { title: string; body: string }) {
   return (
     <div className="px-4 py-10 text-center">
-      <p className="text-[14px] font-medium text-[var(--ui-fg)]">{title}</p>
-      <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">{body}</p>
+      <p className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{title}</p>
+      <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">{body}</p>
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
-import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
+import { Button, Input, LayerCard, PageHeader, Select, SkeletonRows } from "@/components/ui";
 import { api, type ErrorApp, type Issue, type IssueFeed } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
@@ -135,7 +135,7 @@ export function IssuesPage() {
           <>
             {canEdit && selected.length > 0 ? (
               <>
-                <span className="text-[12px] text-[var(--ui-fg-faint)]">{selected.length} selected</span>
+                <span className="text-[0.75rem] text-[var(--ui-fg-faint)]">{selected.length} selected</span>
                 {bulkActions[filters.status].map((action) => (
                   <Button
                     key={action.status}
@@ -163,7 +163,7 @@ export function IssuesPage() {
                   type="button"
                   aria-current={item.id === filters.status ? "page" : undefined}
                   className={cn(
-                    "h-10 shrink-0 border-b-2 px-2.5 text-[13px] font-medium transition-colors",
+                    "h-10 shrink-0 border-b-2 px-2.5 text-[0.8125rem] font-medium transition-colors",
                     item.id === filters.status
                       ? "border-[var(--ui-accent)] text-[var(--ui-fg)]"
                       : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
@@ -179,7 +179,7 @@ export function IssuesPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2 border-b border-[var(--ui-divider)] p-3">
           <form
-            className="flex h-8 min-w-[240px] flex-1 items-center gap-1 overflow-hidden rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] px-1.5 focus-within:border-[var(--ui-accent)]"
+            className="flex h-8 min-w-[15rem] flex-1 items-center gap-1 overflow-hidden rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] px-1.5 focus-within:border-[var(--ui-accent)]"
             onSubmit={(event) => {
               event.preventDefault();
               setFilters({ q: draft.trim() });
@@ -188,7 +188,7 @@ export function IssuesPage() {
           >
             {filters.q ? <Token label={filters.q} onRemove={() => setFilters({ q: "" })} /> : null}
             <input
-              className="h-full min-w-[8rem] flex-1 bg-transparent px-1 text-[14px] text-[var(--ui-fg)] outline-none placeholder:text-[var(--ui-fg-faint)]"
+              className="h-full min-w-[8rem] flex-1 bg-transparent px-1 text-[0.875rem] text-[var(--ui-fg)] outline-none placeholder:text-[var(--ui-fg-faint)]"
               placeholder="Search title, culprit, or id"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -227,12 +227,11 @@ export function IssuesPage() {
             />
           </div>
         </div>
-        {feed.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading issues...</p> : null}
-        {feed.isError ? <p className="p-4 text-[13px] text-[var(--ui-error)]">{(feed.error as Error).message}</p> : null}
+        {feed.isError ? <p className="p-4 text-[0.8125rem] text-[var(--ui-error)]">{(feed.error as Error).message}</p> : null}
         {apps.data?.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No apps yet</h2>
-            <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
+            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">No apps yet</h2>
+            <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">
               {canEdit
                 ? "Create an app to get a DSN and a step-by-step SDK guide. Its errors show up here."
                 : "An editor has to create an app before errors can be collected."}
@@ -246,8 +245,8 @@ export function IssuesPage() {
         ) : null}
         {apps.data?.length !== 0 && feed.data && issues.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">{narrowed ? "No issues match this view" : "No issues in this view"}</h2>
-            <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
+            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{narrowed ? "No issues match this view" : "No issues in this view"}</h2>
+            <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">
               {narrowed
                 ? "Try another tab, a longer time range, or a broader search."
                 : "Point a Sentry SDK at an app DSN and throw an error. Events in the selected range show up here."}
@@ -259,9 +258,9 @@ export function IssuesPage() {
             ) : null}
           </div>
         ) : null}
-        {issues.length > 0 ? (
+        {issues.length > 0 || feed.isLoading ? (
           <div className="overflow-x-auto">
-            <table className="cool-table min-w-[960px]">
+            <table className="cool-table min-w-[60rem]">
               <thead>
                 <tr>
                   {canEdit ? (
@@ -290,7 +289,7 @@ export function IssuesPage() {
                             key={item}
                             type="button"
                             className={cn(
-                              "rounded-[5px] px-1.5 py-0.5 text-[11px] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
+                              "rounded-[5px] px-1.5 py-0.5 text-[0.6875rem] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
                               trend === item && "bg-[var(--ui-hover)] text-[var(--ui-fg)]",
                             )}
                             onClick={() => setTrend(item)}
@@ -307,6 +306,7 @@ export function IssuesPage() {
                 </tr>
               </thead>
               <tbody>
+                {feed.isLoading ? <SkeletonRows columns={[...(canEdit ? ["w-10 !pr-0"] : []), undefined, undefined, undefined, undefined, undefined, undefined, undefined]} /> : null}
                 {issues.map((issue) => (
                   <IssueRowView
                     key={issue.id}
@@ -327,7 +327,7 @@ export function IssuesPage() {
           </div>
         ) : null}
         {feed.data?.truncated ? (
-          <p className="border-t border-[var(--ui-divider)] px-4 py-2.5 text-[12px] text-[var(--ui-fg-faint)]">
+          <p className="border-t border-[var(--ui-divider)] px-4 py-2.5 text-[0.75rem] text-[var(--ui-fg-faint)]">
             Showing the first {issues.length} issues. Narrow the filters to see more.
           </p>
         ) : null}
@@ -382,7 +382,7 @@ function ViewsMenu({ current, onApply }: { current: string; onApply: (query: str
       </Button>
       {open ? (
         <div className="absolute right-0 z-20 mt-1 flex w-64 flex-col gap-px rounded-[10px] border border-[var(--ui-menu-border)] bg-[var(--ui-menu-bg)] p-1 shadow-[var(--ui-menu-shadow)]">
-          {views.length === 0 ? <p className="px-2 py-1.5 text-[12px] text-[var(--ui-fg-faint)]">No saved views yet.</p> : null}
+          {views.length === 0 ? <p className="px-2 py-1.5 text-[0.75rem] text-[var(--ui-fg-faint)]">No saved views yet.</p> : null}
           {views.map((view) => (
             <div key={view.name} className="flex items-center gap-1">
               <button
@@ -450,8 +450,8 @@ function IssueRowView({
       ) : null}
       <td>
         <div className="font-medium text-[var(--ui-fg)]">{parts.type}</div>
-        {parts.message ? <div className="text-[13px] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-[var(--ui-fg-faint)]">
+        {parts.message ? <div className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[0.75rem] text-[var(--ui-fg-faint)]">
           <span className="font-mono text-[var(--ui-fg-dim)]">{issue.shortId}</span>
           {showApp ? <Badge>{issue.appName}</Badge> : null}
           {isNew ? <Badge tone="info">New</Badge> : null}
@@ -477,7 +477,7 @@ function IssueRowView({
 
 function Token({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
-    <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-hover)] px-1.5 text-[12px] text-[var(--ui-fg)]">
+    <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-hover)] px-1.5 text-[0.75rem] text-[var(--ui-fg)]">
       {label}
       <button type="button" className="text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" onClick={onRemove} aria-label={`Remove ${label}`}>
         ×

@@ -156,6 +156,23 @@ export function AppearancePage() {
         />
       </LayerCard>
 
+      <LayerCard title="UI scale" description="Make text and controls smaller to fit more on the screen. Screens narrower than 768px stay at 100%.">
+        <ChoiceGrid
+          value={appearance.uiScale}
+          onChange={(uiScale) => setAppearance({ uiScale })}
+          options={[
+            { value: "100", label: "100%", description: "The default size." },
+            { value: "90", label: "90%", description: "A bit more on each screen." },
+            { value: "80", label: "80%", description: "The most on each screen." },
+          ]}
+          preview={(value) => (
+            <div className="flex h-full items-center justify-center font-medium text-[var(--ui-fg)]" style={{ fontSize: `${Number(value) * 0.24}px` }}>
+              Aa
+            </div>
+          )}
+        />
+      </LayerCard>
+
       <LayerCard title="Chart times" description="Choose which times chart tooltips show.">
         <ChoiceGrid
           value={appearance.chartTimes}
@@ -166,7 +183,7 @@ export function AppearancePage() {
           ]}
           preview={(value) => (
             <div className="flex h-full items-center justify-center px-4">
-              <div className="rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-[11px] leading-4 dark:border-white/15 dark:bg-[#181818]">
+              <div className="rounded-md border border-neutral-300 bg-white px-2.5 py-1.5 text-[0.6875rem] leading-4 dark:border-white/15 dark:bg-[#181818]">
                 <div className="text-[var(--ui-fg)]">
                   Latency: <span className="font-semibold">42 ms</span>
                 </div>
@@ -365,7 +382,7 @@ function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; on
               <div className="flex items-center gap-2 rounded-md px-2 py-1.5 opacity-75">
                 <Global className="size-3.5" /> Status pages
                 <span
-                  className="ml-auto rounded-full px-1.5 text-[10px] font-semibold"
+                  className="ml-auto rounded-full px-1.5 text-[0.625rem] font-semibold"
                   style={{ background: colors.accent, color: accentTextOn(colors.accent) }}
                 >
                   3
@@ -376,7 +393,7 @@ function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; on
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-semibold">Monitors</span>
                 <span
-                  className="rounded-md px-2 py-1 text-[11px] font-medium"
+                  className="rounded-md px-2 py-1 text-[0.6875rem] font-medium"
                   style={{ background: colors.accent, color: accentTextOn(colors.accent) }}
                 >
                   + New

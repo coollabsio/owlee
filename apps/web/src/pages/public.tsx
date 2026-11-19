@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router";
 import { UptimeBars } from "@/components/charts";
-import { Button, Empty, LayerCard, StatusBadge } from "@/components/ui";
+import { Button, Empty, LayerCard, Skeleton, StatusBadge } from "@/components/ui";
 import { api, type PublicPage } from "@/lib/api";
 import { formatTime, percent, stateLabel } from "@/lib/utils";
 
@@ -30,7 +30,18 @@ export function PublicStatusPage() {
     refetchInterval: 15_000,
   });
   if (query.isLoading) {
-    return <div className="grid min-h-svh place-items-center bg-[var(--ui-canvas)] text-[13px] text-[var(--ui-fg-faint)]">Loading status…</div>;
+    return (
+      <div className="min-h-svh bg-[var(--ui-canvas)]" aria-busy="true">
+        <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12 sm:py-16">
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-48" />
+            <Skeleton className="h-3 w-72" />
+          </div>
+          <LayerCard><Skeleton className="h-8 w-56" /></LayerCard>
+          <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+        </div>
+      </div>
+    );
   }
   if (query.error || !query.data) {
     return (
@@ -51,15 +62,15 @@ export function PublicStatusPage() {
       <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12 sm:py-16">
         <header className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="text-[24px] font-semibold leading-8 tracking-tight">{page.title}</h1>
-            {page.description ? <p className="mt-1 text-[13px] text-[var(--ui-fg-faint)]">{page.description}</p> : null}
+            <h1 className="text-[1.5rem] font-semibold leading-8 tracking-tight">{page.title}</h1>
+            {page.description ? <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-faint)]">{page.description}</p> : null}
           </div>
           {page.homepage_url ? (
             <a className="shrink-0" href={page.homepage_url}><Button type="button">Homepage</Button></a>
           ) : null}
         </header>
         <LayerCard title="Current status" actions={<StatusBadge tone={banner.tone}>{banner.label}</StatusBadge>}>
-          <p className="text-[18px] font-semibold text-[var(--ui-fg)]">{banner.title}</p>
+          <p className="text-[1.125rem] font-semibold text-[var(--ui-fg)]">{banner.title}</p>
         </LayerCard>
         {maintenances.length > 0 ? (
           <LayerCard title="Maintenance" flush>
@@ -67,11 +78,11 @@ export function PublicStatusPage() {
               {maintenances.map((item) => (
                 <li key={item.id} className="border-t border-[var(--ui-divider)] px-4 py-3 first:border-t-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[13px] font-medium text-[var(--ui-fg)]">{item.title}</span>
+                    <span className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">{item.title}</span>
                     <StatusBadge tone={item.active ? "info" : "neutral"}>{item.active ? "In progress" : "Scheduled"}</StatusBadge>
                   </div>
-                  {item.message ? <p className="mt-1 text-[13px] text-[var(--ui-fg-dim)]">{item.message}</p> : null}
-                  <p className="mt-1 text-[11px] text-[var(--ui-fg-faint)]">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</p>
+                  {item.message ? <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-dim)]">{item.message}</p> : null}
+                  <p className="mt-1 text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</p>
                 </li>
               ))}
             </ul>
@@ -79,23 +90,23 @@ export function PublicStatusPage() {
         ) : null}
         <LayerCard title="Components" description="Uptime over the last 90 days." flush>
           {page.components.length === 0 ? (
-            <p className="px-4 py-10 text-center text-[13px] text-[var(--ui-fg-faint)]">No components on this page yet.</p>
+            <p className="px-4 py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No components on this page yet.</p>
           ) : (
             <ul>
               {page.components.map((component) => (
                 <li key={component.id} className="border-t border-[var(--ui-divider)] p-4 first:border-t-0">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="text-[13px] font-medium text-[var(--ui-fg)]">{component.name}</div>
-                      {component.description ? <p className="text-[12px] text-[var(--ui-fg-faint)]">{component.description}</p> : null}
+                      <div className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">{component.name}</div>
+                      {component.description ? <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">{component.description}</p> : null}
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
                       <StatusBadge tone={tone(component.state)}>{stateLabel[component.state]}</StatusBadge>
-                      <div className="text-[11px] text-[var(--ui-fg-faint)]">{percent(component.uptime_90d)} uptime</div>
+                      <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{percent(component.uptime_90d)} uptime</div>
                     </div>
                   </div>
                   <UptimeBars bars={component.bars} className="mt-3" />
-                  <div className="mt-1 flex justify-between text-[11px] text-[var(--ui-fg-faint)]">
+                  <div className="mt-1 flex justify-between text-[0.6875rem] text-[var(--ui-fg-faint)]">
                     <span>90 days ago</span>
                     <span>Today</span>
                   </div>
@@ -107,23 +118,23 @@ export function PublicStatusPage() {
         <LayerCard title="Incidents" flush>
           {active.length === 0 && history.length === 0 ? (
             <div className="px-4 py-10 text-center">
-              <p className="text-[14px] font-medium text-[var(--ui-fg)]">No incidents reported</p>
-              <p className="mt-1 text-[13px] text-[var(--ui-fg-faint)]">Incidents and their updates show up here.</p>
+              <p className="text-[0.875rem] font-medium text-[var(--ui-fg)]">No incidents reported</p>
+              <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-faint)]">Incidents and their updates show up here.</p>
             </div>
           ) : (
             <ul>
               {[...active, ...history].map((incident) => (
                 <li key={incident.id} className="border-t border-[var(--ui-divider)] p-4 first:border-t-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-[13px] font-medium text-[var(--ui-fg)]">{incident.title}</h3>
+                    <h3 className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">{incident.title}</h3>
                     <StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
-                    <span className="text-[11px] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</span>
+                    <span className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</span>
                   </div>
                   <ol className="mt-3 flex flex-col gap-3 border-l border-[var(--ui-divider)] pl-4">
                     {[...incident.updates].reverse().map((update) => (
                       <li key={update.id}>
-                        <div className="text-[11px] text-[var(--ui-fg-faint)]">{stateLabel[update.status]} · {formatTime(update.created_at)}</div>
-                        <p className="text-[13px] text-[var(--ui-fg-dim)]">{update.message}</p>
+                        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{stateLabel[update.status]} · {formatTime(update.created_at)}</div>
+                        <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{update.message}</p>
                       </li>
                     ))}
                   </ol>
@@ -132,7 +143,7 @@ export function PublicStatusPage() {
             </ul>
           )}
         </LayerCard>
-        <footer className="pt-4 text-center text-[11px] text-[var(--ui-fg-faint)]">
+        <footer className="pt-4 text-center text-[0.6875rem] text-[var(--ui-fg-faint)]">
           <a href="https://owlee.io" className="underline decoration-[var(--ui-fg-faint)] underline-offset-2 hover:text-[var(--ui-fg)]">Powered by Owlee</a>
         </footer>
       </div>
