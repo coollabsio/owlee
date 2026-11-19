@@ -6,34 +6,34 @@ use axum::http::{Request, StatusCode};
 use flate2::Compression;
 use flate2::write::{DeflateEncoder, GzEncoder};
 use http_body_util::BodyExt;
-use owlee_platform::TimestampMillis;
-use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
+use owlee_server::{
+    AppState, TestSession, boot, editor_session, member_session, router, testing_config,
+};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn app() -> (Router, Option<String>) {
+async fn app() -> (Router, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owlee.sqlite");
     let _keep = Box::leak(Box::new(dir));
     let state = boot(fast_ingest(testing_config(path))).await.unwrap();
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    (router(state), token)
+    (router(state.clone()), state)
 }
 
+/// Sends `session`'s cookie and workspace header when given.
 async fn call(
     app: &Router,
     method: &str,
     uri: &str,
     body: Vec<u8>,
-    cookie: Option<&str>,
+    session: Option<&TestSession>,
     extra: &[(&str, &str)],
 ) -> (StatusCode, Value, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri);
-    if let Some(cookie) = cookie {
-        request = request.header("cookie", cookie);
+    if let Some(session) = session {
+        request = request
+            .header("cookie", &session.cookie)
+            .header("x-owlee-workspace", session.workspace_id.to_string());
     }
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -136,42 +136,52 @@ fn sample() -> Value {
     })
 }
 
-/// `setup_token` is `None` on a reused Postgres database, where `editor` signs in instead.
-async fn exercise(app: Router, setup_token: Option<String>, editor: Option<String>) {
-    let cookie = match (setup_token, editor) {
-        (Some(token), _) => {
-            let email = format!("errors-{}@coollabs.io", owlee_platform::Id::new());
-            let body = json!({"token": token, "email": email, "password": "correct-horse-battery", "display_name": "Ada"});
-            let (status, _, cookie) = call(
-                &app,
-                "POST",
-                "/api/setup/complete",
-                body.to_string().into_bytes(),
-                None,
-                &[("content-type", "application/json")],
-            )
-            .await;
-            assert!(status.is_success(), "{status}");
-            cookie.unwrap()
-        }
-        (None, editor) => editor.expect("editor session"),
-    };
-
-    let (status, _, _) = call(&app, "GET", "/api/error-projects", Vec::new(), None, &[]).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    let (status, project, _) = call(
-        &app,
+/// Creates an app in the session's first project.
+async fn create_app(app: &Router, session: &TestSession, name: &str) -> Value {
+    let (status, created, _) = call(
+        app,
         "POST",
-        "/api/error-projects",
-        json!({"name": "Checkout", "platform": "php"})
+        "/api/error-apps",
+        json!({"name": name, "platform": "php", "project_id": session.project_id})
             .to_string()
             .into_bytes(),
-        Some(&cookie),
+        Some(session),
         &[("content-type", "application/json")],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{project}");
+    assert_eq!(status, StatusCode::OK, "{created}");
+    created
+}
+
+async fn store(app: &Router, created: &Value, event: &Value) {
+    let id = created["id"].as_str().unwrap();
+    let key = created["publicKey"].as_str().unwrap();
+    let (status, body, _) = call(
+        app,
+        "POST",
+        &format!("/api/{id}/store/"),
+        event.to_string().into_bytes(),
+        None,
+        &[
+            ("content-type", "application/json"),
+            (
+                "x-sentry-auth",
+                &format!("Sentry sentry_key={key}, sentry_version=7"),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+async fn exercise(app: Router, state: AppState) {
+    let cookie = editor_session(&state).await.unwrap();
+
+    let (status, _, _) = call(&app, "GET", "/api/error-apps", Vec::new(), None, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let project = create_app(&app, &cookie, "Checkout").await;
+    assert_eq!(project["projectId"], json!(cookie.project_id.to_string()));
     let id = project["id"].as_str().unwrap();
     let key = project["publicKey"].as_str().unwrap();
     assert!(project["dsn"].as_str().unwrap().contains(key));
@@ -212,7 +222,7 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     let (status, after, _) = call(
         &app,
         "GET",
-        &format!("/api/error-projects/{id}"),
+        &format!("/api/error-apps/{id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -225,7 +235,7 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     let (_, listed, _) = call(
         &app,
         "GET",
-        "/api/error-projects",
+        "/api/error-apps",
         Vec::new(),
         Some(&cookie),
         &[],
@@ -306,7 +316,7 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     let (status, feed, _) = call(
         &app,
         "GET",
-        &format!("/api/error-issues?project_id={id}"),
+        &format!("/api/error-issues?app_id={id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -315,6 +325,9 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
     assert_eq!(status, StatusCode::OK, "{feed}");
     assert_eq!(feed["issues"].as_array().unwrap().len(), 1, "{feed}");
     assert_eq!(feed["issues"][0]["eventCount"], 4);
+    assert_eq!(feed["issues"][0]["appId"], json!(id));
+    assert_eq!(feed["issues"][0]["appName"], json!("Checkout"));
+    assert_eq!(feed["issues"][0]["appSlug"], project["slug"]);
     assert_eq!(
         feed["counts"],
         json!({"unresolved": 1, "resolved": 0, "ignored": 0})
@@ -373,21 +386,14 @@ async fn exercise(app: Router, setup_token: Option<String>, editor: Option<Strin
 
     sorts_before_the_limit(&app, &cookie).await;
     detail_reports_true_edges(&app, &cookie).await;
+    members_only_read(&app, &state, &cookie).await;
+    other_workspaces_get_404(&app, &state, &cookie).await;
+    project_filter_narrows_apps_and_issues(&app, &state).await;
 }
 
 /// A range that hides the oldest event must still name it as the issue's first event.
-async fn detail_reports_true_edges(app: &Router, cookie: &str) {
-    let (_, project, _) = call(
-        app,
-        "POST",
-        "/api/error-projects",
-        json!({"name": "Edges", "platform": "php"})
-            .to_string()
-            .into_bytes(),
-        Some(cookie),
-        &[("content-type", "application/json")],
-    )
-    .await;
+async fn detail_reports_true_edges(app: &Router, cookie: &TestSession) {
+    let project = create_app(app, cookie, "Edges").await;
     let project_id = project["id"].as_str().unwrap();
     let key = project["publicKey"].as_str().unwrap();
     let old_id = hex_id();
@@ -429,7 +435,7 @@ async fn detail_reports_true_edges(app: &Router, cookie: &str) {
     let (_, feed, _) = call(
         app,
         "GET",
-        &format!("/api/error-issues?project_id={project_id}&since=30d"),
+        &format!("/api/error-issues?app_id={project_id}&since=30d"),
         Vec::new(),
         Some(cookie),
         &[],
@@ -491,18 +497,8 @@ async fn detail_reports_true_edges(app: &Router, cookie: &str) {
 }
 
 /// One busy issue older than 200 quiet ones must still lead `sort=events`.
-async fn sorts_before_the_limit(app: &Router, cookie: &str) {
-    let (_, project, _) = call(
-        app,
-        "POST",
-        "/api/error-projects",
-        json!({"name": "Sorting", "platform": "php"})
-            .to_string()
-            .into_bytes(),
-        Some(cookie),
-        &[("content-type", "application/json")],
-    )
-    .await;
+async fn sorts_before_the_limit(app: &Router, cookie: &TestSession) {
+    let project = create_app(app, cookie, "Sorting").await;
     let id = project["id"].as_str().unwrap();
     let key = project["publicKey"].as_str().unwrap();
     let auth = format!("Sentry sentry_key={key}, sentry_version=7");
@@ -541,8 +537,7 @@ async fn sorts_before_the_limit(app: &Router, cookie: &str) {
         assert_eq!(status, StatusCode::OK);
     }
 
-    let feed_uri =
-        format!("/api/error-issues?project_id={id}&since=14d&sort=events&status=unresolved");
+    let feed_uri = format!("/api/error-issues?app_id={id}&since=14d&sort=events&status=unresolved");
     let (status, feed, _) = call(app, "GET", &feed_uri, Vec::new(), Some(cookie), &[]).await;
     assert_eq!(status, StatusCode::OK, "{feed}");
     let issues = feed["issues"].as_array().unwrap();
@@ -578,10 +573,299 @@ async fn sorts_before_the_limit(app: &Router, cookie: &str) {
     );
 }
 
+fn json_body(value: Value) -> Vec<u8> {
+    value.to_string().into_bytes()
+}
+
+const JSON: &[(&str, &str)] = &[("content-type", "application/json")];
+
+/// The first issue of an app, as its own workspace sees it.
+async fn first_issue(app: &Router, session: &TestSession, app_id: &str) -> Value {
+    let (status, feed, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues?app_id={app_id}"),
+        Vec::new(),
+        Some(session),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    feed["issues"][0].clone()
+}
+
+/// A read-only member sees the workspace's apps but cannot change them.
+async fn members_only_read(app: &Router, state: &AppState, editor: &TestSession) {
+    let member = member_session(state, editor.workspace_id).await.unwrap();
+    let created = create_app(app, editor, "Readable").await;
+    let id = created["id"].as_str().unwrap();
+    let mut event = sample();
+    event["event_id"] = json!(hex_id());
+    store(app, &created, &event).await;
+    let issue = first_issue(app, editor, id).await;
+    let issue_id = issue["id"].as_str().unwrap();
+
+    let (status, listed, _) = call(
+        app,
+        "GET",
+        "/api/error-apps",
+        Vec::new(),
+        Some(&member),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == json!(id))
+    );
+    let (status, _, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues/{issue_id}"),
+        Vec::new(),
+        Some(&member),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let body = json!({"name": "Nope", "platform": "php", "project_id": editor.project_id});
+    let writes = [
+        ("POST", "/api/error-apps".to_owned(), body),
+        (
+            "PUT",
+            format!("/api/error-apps/{id}/quota"),
+            json!({"daily_quota": 5}),
+        ),
+        ("DELETE", format!("/api/error-apps/{id}"), Value::Null),
+        (
+            "PATCH",
+            format!("/api/error-issues/{issue_id}"),
+            json!({"status": "resolved"}),
+        ),
+        (
+            "POST",
+            "/api/error-issues/bulk".to_owned(),
+            json!({"ids": [issue_id], "status": "resolved"}),
+        ),
+    ];
+    for (method, uri, body) in writes {
+        let (status, _, _) = call(app, method, &uri, json_body(body), Some(&member), JSON).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+    }
+}
+
+/// Ids from another workspace answer 404 and change nothing.
+async fn other_workspaces_get_404(app: &Router, state: &AppState, owner: &TestSession) {
+    let created = create_app(app, owner, "Private").await;
+    let id = created["id"].as_str().unwrap();
+    let event_id = hex_id();
+    let mut event = sample();
+    event["event_id"] = json!(event_id);
+    store(app, &created, &event).await;
+    let issue = first_issue(app, owner, id).await;
+    let issue_id = issue["id"].as_str().unwrap();
+    let short_id = issue["shortId"].as_str().unwrap();
+
+    let outsider = editor_session(state).await.unwrap();
+    let foreign = [
+        ("GET", format!("/api/error-apps/{id}"), Value::Null),
+        (
+            "PUT",
+            format!("/api/error-apps/{id}/quota"),
+            json!({"daily_quota": 5}),
+        ),
+        ("DELETE", format!("/api/error-apps/{id}"), Value::Null),
+        ("GET", format!("/api/error-issues/{issue_id}"), Value::Null),
+        ("GET", format!("/api/error-issues/{short_id}"), Value::Null),
+        (
+            "PATCH",
+            format!("/api/error-issues/{issue_id}"),
+            json!({"status": "resolved"}),
+        ),
+        ("GET", format!("/api/error-events/{event_id}"), Value::Null),
+        (
+            "GET",
+            format!("/api/error-apps?project={}", owner.project_id),
+            Value::Null,
+        ),
+        (
+            "POST",
+            "/api/error-apps".to_owned(),
+            json!({"name": "Planted", "platform": "php", "project_id": owner.project_id}),
+        ),
+    ];
+    for (method, uri, body) in foreign {
+        let (status, _, _) = call(app, method, &uri, json_body(body), Some(&outsider), JSON).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+    let (status, bulk, _) = call(
+        app,
+        "POST",
+        "/api/error-issues/bulk",
+        json_body(json!({"ids": [issue_id, short_id], "status": "resolved"})),
+        Some(&outsider),
+        JSON,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bulk}");
+    assert_eq!(bulk, json!({"updated": 0}));
+    let (_, listed, _) = call(
+        app,
+        "GET",
+        "/api/error-apps",
+        Vec::new(),
+        Some(&outsider),
+        &[],
+    )
+    .await;
+    assert_eq!(listed, json!([]));
+    let (_, feed, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues?app_id={id}"),
+        Vec::new(),
+        Some(&outsider),
+        &[],
+    )
+    .await;
+    assert_eq!(feed["issues"], json!([]));
+    assert_eq!(feed["environments"], json!([]));
+    assert_eq!(
+        feed["counts"],
+        json!({"unresolved": 0, "resolved": 0, "ignored": 0})
+    );
+
+    let borrowed_header = TestSession {
+        cookie: outsider.cookie.clone(),
+        user_id: outsider.user_id,
+        workspace_id: owner.workspace_id,
+        project_id: owner.project_id,
+    };
+    let (status, _, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(&borrowed_header),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let after = first_issue(app, owner, id).await;
+    assert_eq!(after["status"], json!("unresolved"));
+    let (status, kept, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(owner),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["quotaOverride"], Value::Null);
+    assert_eq!(kept["eventCount"], json!(1));
+    let (status, _, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-events/{event_id}"),
+        Vec::new(),
+        Some(owner),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// `?project=` keeps apps and issues of that project only.
+async fn project_filter_narrows_apps_and_issues(app: &Router, state: &AppState) {
+    let owner = editor_session(state).await.unwrap();
+    let (status, other, _) = call(
+        app,
+        "POST",
+        "/api/projects",
+        json_body(json!({"name": "Mobile"})),
+        Some(&owner),
+        JSON,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_project = other["id"].as_str().unwrap();
+    let web = create_app(app, &owner, "Web").await;
+    let (status, ios, _) = call(
+        app,
+        "POST",
+        "/api/error-apps",
+        json_body(json!({"name": "iOS", "platform": "other", "project_id": other_project})),
+        Some(&owner),
+        JSON,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ios}");
+    assert_eq!(ios["projectId"], json!(other_project));
+    for created in [&web, &ios] {
+        let mut event = sample();
+        event["event_id"] = json!(hex_id());
+        store(app, created, &event).await;
+    }
+
+    let names = |listed: &Value| -> Vec<String> {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, all, _) = call(app, "GET", "/api/error-apps", Vec::new(), Some(&owner), &[]).await;
+    assert_eq!(names(&all), ["Web", "iOS"]);
+    let (_, narrowed, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-apps?project={other_project}"),
+        Vec::new(),
+        Some(&owner),
+        &[],
+    )
+    .await;
+    assert_eq!(names(&narrowed), ["iOS"]);
+
+    let (_, feed, _) = call(
+        app,
+        "GET",
+        "/api/error-issues",
+        Vec::new(),
+        Some(&owner),
+        &[],
+    )
+    .await;
+    assert_eq!(feed["counts"]["unresolved"], json!(2), "{feed}");
+    let (status, feed, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues?project={other_project}"),
+        Vec::new(),
+        Some(&owner),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{feed}");
+    let issues = feed["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{feed}");
+    assert_eq!(issues[0]["appName"], json!("iOS"));
+    assert_eq!(feed["counts"]["unresolved"], json!(1));
+}
+
 #[tokio::test]
 async fn sqlite_ingest_groups_events() {
-    let (app, token) = app().await;
-    exercise(app, token, None).await;
+    let (app, state) = app().await;
+    exercise(app, state).await;
 }
 
 #[tokio::test]
@@ -597,13 +881,5 @@ async fn postgres_ingest_groups_events() {
     ));
     config.database_url = Some(url);
     let state = boot(fast_ingest(config)).await.expect("postgres boot");
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    let editor = match token {
-        Some(_) => None,
-        None => Some(editor_session(&state).await.unwrap()),
-    };
-    exercise(router(state), token, editor).await;
+    exercise(router(state.clone()), state).await;
 }

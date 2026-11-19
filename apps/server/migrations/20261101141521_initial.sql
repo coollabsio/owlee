@@ -9,7 +9,8 @@ CREATE TABLE users (
     normalized_email TEXT NOT NULL UNIQUE,
     display_name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    -- Sees /admin. Grants no workspace access. The root user is in installation_state.
+    installation_admin BIGINT NOT NULL DEFAULT 0,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
 );
@@ -33,20 +34,75 @@ CREATE TABLE scheduler_lock (
     expires_at BIGINT NOT NULL
 );
 
+-- Every resource belongs to a workspace, and most to a project inside it.
+-- Access comes only from a membership row.
+
+CREATE TABLE workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE TABLE memberships (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    created_at BIGINT NOT NULL,
+    UNIQUE (workspace_id, user_id)
+);
+
+CREATE INDEX memberships_user ON memberships (user_id);
+
+CREATE UNIQUE INDEX memberships_one_owner ON memberships (workspace_id) WHERE role = 'owner';
+
+-- The plaintext invitation token is never stored.
+CREATE TABLE workspace_invitations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    normalized_email TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    token_hash TEXT NOT NULL UNIQUE,
+    invited_by TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL,
+    accepted_at BIGINT,
+    revoked_at BIGINT,
+    created_at BIGINT NOT NULL
+);
+
+CREATE UNIQUE INDEX workspace_invitations_pending_email
+    ON workspace_invitations (workspace_id, normalized_email)
+    WHERE accepted_at IS NULL AND revoked_at IS NULL;
+
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    UNIQUE (workspace_id, name)
+);
+
 -- Agents run checks from their own config inside a private network and report
 -- results. agent_id ties a monitor to an agent. check_type is the protocol the
 -- agent declared, such as postgres. job_type stays the transport.
 
 CREATE TABLE agents (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     last_seen_at BIGINT,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    UNIQUE (project_id, name)
 );
 
 CREATE TABLE monitors (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     job_type TEXT NOT NULL CHECK (job_type IN ('http', 'tcp')),
@@ -73,6 +129,7 @@ CREATE TABLE monitors (
 );
 
 CREATE INDEX monitors_due ON monitors (active, next_check_at);
+CREATE INDEX monitors_project ON monitors (project_id);
 
 CREATE UNIQUE INDEX monitors_agent_name ON monitors (agent_id, name);
 
@@ -103,6 +160,7 @@ CREATE TABLE monitor_daily_stats (
 
 CREATE TABLE status_pages (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     slug TEXT NOT NULL UNIQUE,
@@ -127,6 +185,7 @@ CREATE INDEX page_components_order ON page_components (page_id, position);
 
 CREATE TABLE incidents (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     page_id TEXT REFERENCES status_pages (id) ON DELETE SET NULL,
     monitor_id TEXT REFERENCES monitors (id) ON DELETE SET NULL,
     title TEXT NOT NULL,
@@ -154,6 +213,7 @@ CREATE INDEX incident_updates_incident ON incident_updates (incident_id, created
 
 CREATE TABLE maintenances (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     page_id TEXT REFERENCES status_pages (id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     message TEXT NOT NULL,
@@ -173,6 +233,7 @@ CREATE TABLE maintenance_monitors (
 
 CREATE TABLE notifications (
     id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('email', 'webhook', 'slack', 'discord')),
     config_json TEXT NOT NULL,
@@ -202,6 +263,8 @@ CREATE INDEX notification_deliveries_time ON notification_deliveries (notificati
 
 CREATE TABLE audit_events (
     id TEXT PRIMARY KEY,
+    -- NULL for instance actions.
+    workspace_id TEXT REFERENCES workspaces (id) ON DELETE CASCADE,
     actor_id TEXT,
     action TEXT NOT NULL,
     resource_type TEXT NOT NULL,
@@ -222,6 +285,7 @@ CREATE TABLE insight_settings (
 
 CREATE TABLE insight_sites (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     public_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     domain TEXT NOT NULL UNIQUE,
@@ -235,6 +299,7 @@ CREATE TABLE insight_sites (
 
 CREATE TABLE insight_domains (
     id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     site_id TEXT REFERENCES insight_sites (id) ON DELETE SET NULL,
     hostname TEXT NOT NULL UNIQUE,
     note TEXT NOT NULL DEFAULT '',
@@ -244,6 +309,7 @@ CREATE TABLE insight_domains (
 
 CREATE TABLE insight_links (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     domain_id TEXT NOT NULL REFERENCES insight_domains (id) ON DELETE CASCADE,
     slug TEXT NOT NULL,
     destination TEXT NOT NULL,
@@ -254,10 +320,10 @@ CREATE TABLE insight_links (
     public_threshold BIGINT NOT NULL DEFAULT 5,
     public_sections TEXT NOT NULL,
     created_at BIGINT NOT NULL,
-    UNIQUE (domain_id, slug)
+    -- Global, not per domain: `/go/{slug}` on this server has no hostname, and
+    -- domains belong to different workspaces.
+    UNIQUE (slug)
 );
-
-CREATE INDEX insight_links_domain_slug ON insight_links (domain_id, slug);
 
 CREATE TABLE insight_events (
     id TEXT PRIMARY KEY,
@@ -379,10 +445,12 @@ CREATE TABLE insight_event_data (
 CREATE INDEX insight_event_data_name ON insight_event_data (site_id, event_name, timestamp);
 
 -- Error tracking. Timestamps stay RFC3339 text, matching the Sentry event clock.
--- Dashboard accounts stay in users. These tables are projects, issues, and events.
+-- Dashboard accounts stay in users. These tables are apps, issues, and events.
+-- An app's id is the number in its Sentry DSN.
 
-CREATE TABLE projects (
+CREATE TABLE error_apps (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
     public_key TEXT NOT NULL UNIQUE,
@@ -391,16 +459,16 @@ CREATE TABLE projects (
     next_issue BIGINT NOT NULL DEFAULT 1
 );
 
-CREATE TABLE project_counters (
+CREATE TABLE error_app_counters (
     id BIGINT PRIMARY KEY,
     next_id BIGINT NOT NULL
 );
 
-INSERT INTO project_counters (id, next_id) VALUES (1, 1);
+INSERT INTO error_app_counters (id, next_id) VALUES (1, 1);
 
 CREATE TABLE issues (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES error_apps (id) ON DELETE CASCADE,
     fingerprint TEXT NOT NULL,
     title TEXT NOT NULL,
     culprit TEXT,
@@ -414,18 +482,18 @@ CREATE TABLE issues (
     event_count BIGINT NOT NULL DEFAULT 0,
     short_id TEXT,
     unhandled BIGINT NOT NULL DEFAULT 0,
-    UNIQUE (project_id, fingerprint)
+    UNIQUE (app_id, fingerprint)
 );
 
 CREATE UNIQUE INDEX issues_short_id ON issues (short_id);
 
 CREATE INDEX issues_last_seen ON issues (last_seen);
 
-CREATE INDEX issues_project ON issues (project_id);
+CREATE INDEX issues_app ON issues (app_id);
 
 CREATE TABLE events (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES error_apps (id) ON DELETE CASCADE,
     issue_id TEXT NOT NULL REFERENCES issues (id) ON DELETE CASCADE,
     timestamp TEXT NOT NULL,
     level TEXT NOT NULL,
@@ -438,7 +506,7 @@ CREATE TABLE events (
 
 CREATE INDEX events_issue_timestamp ON events (issue_id, timestamp);
 
-CREATE INDEX events_project ON events (project_id);
+CREATE INDEX events_app ON events (app_id);
 
 -- One-time installation setup. The plaintext token is never stored.
 -- One row, id = 1. initialized stays 0 until the owner account is created.

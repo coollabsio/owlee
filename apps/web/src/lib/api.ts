@@ -1,3 +1,6 @@
+import { queryClient } from "@/lib/query-client";
+import { currentWorkspaceId } from "@/lib/workspace";
+
 export class ApiError extends Error {
   status: number;
   fields?: Record<string, string>;
@@ -14,6 +17,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
+  const workspaceId = currentWorkspaceId();
+  if (workspaceId && !headers.has("x-owlee-workspace")) headers.set("x-owlee-workspace", workspaceId);
   const response = await fetch(path, { ...init, headers });
   if (response.status === 204) return undefined as T;
   const text = await response.text();
@@ -51,6 +56,7 @@ export type Assertion = { type: string; compare?: string; target?: string | numb
 
 export type Monitor = {
   id: string;
+  project_id: string;
   name: string;
   description: string;
   job_type: "http" | "tcp";
@@ -83,6 +89,7 @@ export type Monitor = {
 
 export type Agent = {
   id: string;
+  project_id: string;
   name: string;
   last_seen_at: string | null;
   online: boolean;
@@ -92,10 +99,8 @@ export type Agent = {
 
 export type CreatedAgent = Agent & { token: string };
 
-export const listAgents = () => api<Agent[]>("/api/agents");
-
-export const createAgent = (name: string) =>
-  api<CreatedAgent>("/api/agents", { method: "POST", body: JSON.stringify({ name }) });
+export const createAgent = (input: { name: string; project_id: string }) =>
+  api<CreatedAgent>("/api/agents", { method: "POST", body: JSON.stringify(input) });
 
 export const deleteAgent = (id: string) => api<void>(`/api/agents/${id}`, { method: "DELETE" });
 
@@ -109,6 +114,7 @@ export type Component = {
 
 export type StatusPage = {
   id: string;
+  project_id: string;
   title: string;
   description: string;
   slug: string;
@@ -127,6 +133,7 @@ export type IncidentUpdate = {
 
 export type Incident = {
   id: string;
+  project_id: string;
   page_id: string | null;
   monitor_id: string | null;
   title: string;
@@ -140,6 +147,7 @@ export type Incident = {
 
 export type Maintenance = {
   id: string;
+  project_id: string;
   page_id: string | null;
   title: string;
   message: string;
@@ -167,16 +175,52 @@ export type Channel = {
   deliveries: Delivery[];
 };
 
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+export type UserWorkspace = { id: string; name: string; role: WorkspaceRole };
+
 export type User = {
   id: string;
   email: string;
   display_name: string;
-  role: string;
   root: boolean;
   installation_admin: boolean;
+  workspaces: UserWorkspace[];
 };
 
+/** The container for project-owned records inside a workspace. */
+export type Project = { id: string; name: string; color: string; created_at: string };
+
+export type Member = {
+  id: string;
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: WorkspaceRole;
+  created_at: string;
+};
+
+export type InviteRole = "admin" | "member";
+
+export type Invitation = {
+  id: string;
+  email: string;
+  role: InviteRole;
+  expires_at: string;
+  created_at: string;
+};
+
+export type CreatedInvitation = Invitation & { url: string };
+
+export type InvitationLookup = { workspace_name: string; email: string; role: InviteRole };
+
 const post = <T>(path: string, body: unknown) => api<T>(path, { method: "POST", body: JSON.stringify(body) });
+
+/** Drops every cached record too, so the next account starts clean. */
+export async function signOut() {
+  await api("/api/auth/logout", { method: "POST" });
+  queryClient.clear();
+}
 
 export const requestRegistration = (email: string) => post<Record<string, never>>("/api/auth/register", { email });
 
@@ -204,7 +248,7 @@ export const revokeSession = (id: string) => api<void>(`/api/auth/sessions/${id}
 
 export type PrivacyExport = {
   user: string;
-  events: { id: string; projectId: string; projectName: string; timestamp: string; title: string; payload: unknown }[];
+  events: { id: string; appId: string; appName: string; timestamp: string; title: string; payload: unknown }[];
 };
 
 const privacyPath = (user: string) => `/api/privacy/errors?user=${encodeURIComponent(user)}`;
@@ -240,7 +284,6 @@ export type AdminUser = {
   id: string;
   email: string;
   display_name: string;
-  role: string;
   root: boolean;
   installation_admin: boolean;
 };
@@ -285,7 +328,7 @@ export type DashboardIssue = {
   id: string;
   short_id: string | null;
   title: string;
-  project_name: string;
+  app_name: string;
   level: string;
   event_count: number;
   last_seen: string;
@@ -322,7 +365,7 @@ export type Dashboard = {
   incidents: { open: number; items: DashboardIncident[] };
   pages: DashboardPageRow[];
   errors: {
-    projects: number;
+    apps: number;
     unresolved: number;
     new_24h: number;
     events_24h: number[];
@@ -374,6 +417,7 @@ export type Meta = {
 
 export type InsightSite = {
   id: string;
+  project_id: string;
   public_id: string;
   name: string;
   domain: string;
@@ -431,6 +475,7 @@ export type InsightDomain = {
 
 export type InsightLink = {
   id: string;
+  project_id: string;
   domain_id: string;
   hostname: string;
   slug: string;
@@ -465,8 +510,10 @@ export type PublicInsight = {
   series: InsightPoint[];
 };
 
-export type Project = {
+/** An error-tracking app: one DSN, inside a project. */
+export type ErrorApp = {
   id: string;
+  projectId: string;
   name: string;
   slug: string;
   platform: string;
@@ -485,9 +532,9 @@ export type Project = {
 
 export type Issue = {
   id: string;
-  projectId: string;
-  projectName: string;
-  projectSlug: string;
+  appId: string;
+  appName: string;
+  appSlug: string;
   shortId: string;
   title: string;
   culprit?: string | null;
@@ -594,8 +641,12 @@ export type IssueDetail = Issue & {
   /** The issue's oldest and newest stored events, ignoring filters. */
   firstEventId: string | null;
   latestEventId: string | null;
-  /** Every environment in the issue's project. */
+  /** Every environment in the issue's app. */
   environments: string[];
   histogram: number[];
   tags: TagGroup[];
 };
+
+export type Workspace = UserWorkspace & { created_at: string };
+
+export const createWorkspace = (name: string) => post<Workspace>("/api/workspaces", { name });

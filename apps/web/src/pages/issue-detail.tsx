@@ -349,9 +349,9 @@ export function IssueDetailPage() {
               <Detail label={`Users, ${rangeLabel}`}>{data.userCount.toLocaleString()}</Detail>
               <Detail label="Environment">{data.environment || "-"}</Detail>
               <Detail label="Release">{data.release || "-"}</Detail>
-              <Detail label="Project">
-                <Link className="text-[var(--ui-accent-light)]" to={`/error-projects/${data.projectId}`}>
-                  {data.projectName}
+              <Detail label="App">
+                <Link className="text-[var(--ui-accent-light)]" to={`/errors/apps/${data.appId}`}>
+                  {data.appName}
                 </Link>
               </Detail>
             </dl>

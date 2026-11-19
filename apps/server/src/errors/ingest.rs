@@ -30,7 +30,7 @@ pub async fn ingest_options(headers: HeaderMap) -> Response {
 
 pub async fn ingest_envelope(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    Path(app_id): Path<String>,
     Query(query): Query<SentryQuery>,
     headers: HeaderMap,
     request: Request,
@@ -67,11 +67,11 @@ pub async fn ingest_envelope(
         Ok(key) => key,
         Err(message) => return ingest_error(&headers, StatusCode::UNAUTHORIZED, message),
     };
-    let project = match store::project_for_ingest(&state.db, &project_id, &key).await {
-        Ok(project) => project,
+    let app = match store::app_for_ingest(&state.db, &app_id, &key).await {
+        Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, &client, &project.id) {
+    if let Some(response) = enforce_rate(&state, &headers, &client, &app.id) {
         return response;
     }
     let mut last_id = None;
@@ -80,7 +80,7 @@ pub async fn ingest_envelope(
             "event" => match serde_json::from_slice::<Value>(&item.payload) {
                 Ok(payload) => {
                     let event = normalize_event(payload);
-                    match accept_event(&state, &headers, &project, &event).await {
+                    match accept_event(&state, &headers, &app, &event).await {
                         Ok(Accepted::Stored(id)) => last_id = Some(id),
                         Ok(Accepted::Limited(response)) => return response,
                         Err(error) => {
@@ -115,7 +115,7 @@ pub async fn ingest_envelope(
 
 pub async fn ingest_store(
     State(state): State<AppState>,
-    Path(project_id): Path<String>,
+    Path(app_id): Path<String>,
     Query(query): Query<SentryQuery>,
     headers: HeaderMap,
     request: Request,
@@ -147,15 +147,15 @@ pub async fn ingest_store(
         Ok(key) => key,
         Err(message) => return ingest_error(&headers, StatusCode::UNAUTHORIZED, message),
     };
-    let project = match store::project_for_ingest(&state.db, &project_id, &key).await {
-        Ok(project) => project,
+    let app = match store::app_for_ingest(&state.db, &app_id, &key).await {
+        Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, &client, &project.id) {
+    if let Some(response) = enforce_rate(&state, &headers, &client, &app.id) {
         return response;
     }
     let event = normalize_event(payload);
-    match accept_event(&state, &headers, &project, &event).await {
+    match accept_event(&state, &headers, &app, &event).await {
         Ok(Accepted::Stored(id)) => json_ok(&headers, json!({ "id": id })),
         Ok(Accepted::Limited(response)) => response,
         Err(error) => {
@@ -182,22 +182,19 @@ fn enforce_rate(
     state: &AppState,
     headers: &HeaderMap,
     client: &Client,
-    project_id: &str,
+    app_id: &str,
 ) -> Option<Response> {
-    let ip_limit = state.error_ip_limit.check(&format!("error-ip:{}", client.ip));
+    let ip_limit = state
+        .error_ip_limit
+        .check(&format!("error-ip:{}", client.ip));
     if !ip_limit.allowed {
         return Some(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
     }
-    let project_limit = state
+    let app_limit = state
         .error_project_limit
-        .check(&format!("error-project:{project_id}"));
-    if !project_limit.allowed {
-        return Some(rate_limited(
-            headers,
-            project_limit.retry_after_secs,
-            "key",
-            "",
-        ));
+        .check(&format!("error-app:{app_id}"));
+    if !app_limit.allowed {
+        return Some(rate_limited(headers, app_limit.retry_after_secs, "key", ""));
     }
     None
 }
@@ -205,17 +202,17 @@ fn enforce_rate(
 async fn accept_event(
     state: &AppState,
     headers: &HeaderMap,
-    project: &store::Project,
+    app: &store::App,
     event: &owlee_errors::NormalizedEvent,
 ) -> Result<Accepted, String> {
     let global = quota::error_quota(&state.db)
         .await
         .map_err(|error| error.to_string())?;
-    let quota = quota::effective(global, project.daily_quota);
+    let quota = quota::effective(global, app.daily_quota);
     let ingested = store::ingest_event(
         &state.db,
         &state.config.app_key,
-        project,
+        app,
         event,
         quota,
         state.config.ingest.error_keep_first,
@@ -274,7 +271,12 @@ fn too_large(request_headers: &HeaderMap) -> Response {
     )
 }
 
-fn rate_limited(request_headers: &HeaderMap, retry_after: u64, scope: &str, reason: &str) -> Response {
+fn rate_limited(
+    request_headers: &HeaderMap,
+    retry_after: u64,
+    scope: &str,
+    reason: &str,
+) -> Response {
     let retry_after = retry_after.max(1);
     let mut response = ingest_error(
         request_headers,
@@ -420,7 +422,7 @@ fn ingest_error(request_headers: &HeaderMap, status: StatusCode, message: String
 fn ingest_error_from(request_headers: &HeaderMap, error: AppError) -> Response {
     let (status, message) = match error {
         AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "invalid sentry public key".into()),
-        AppError::NotFound => (StatusCode::NOT_FOUND, "unknown project".into()),
+        AppError::NotFound => (StatusCode::NOT_FOUND, "unknown app".into()),
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     };
     ingest_error(request_headers, status, message)

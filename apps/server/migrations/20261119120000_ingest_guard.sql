@@ -8,7 +8,7 @@ ALTER TABLE insight_sites ADD COLUMN verified_at BIGINT;
 ALTER TABLE insight_sites ADD COLUMN daily_quota BIGINT;
 
 -- NULL inherits the instance error cap.
-ALTER TABLE projects ADD COLUMN daily_quota BIGINT;
+ALTER TABLE error_apps ADD COLUMN daily_quota BIGINT;
 
 ALTER TABLE issues ADD COLUMN stored_count BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE issues ADD COLUMN sample_window_start TEXT;

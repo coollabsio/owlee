@@ -202,6 +202,19 @@ export function SetupPage() {
   );
 }
 
+const pendingInviteKey = "owlee:pending-invite";
+
+/** The sign-up email opens in a new tab, so the invite page survives the round trip in storage. */
+export function rememberPendingInvite(path: string) {
+  localStorage.setItem(pendingInviteKey, path);
+}
+
+function takePendingInvite() {
+  const path = localStorage.getItem(pendingInviteKey);
+  localStorage.removeItem(pendingInviteKey);
+  return path?.startsWith("/invite/") ? path : null;
+}
+
 function useConsumedToken() {
   const [token] = useState(() => {
     const url = new URL(window.location.href);
@@ -214,7 +227,7 @@ function useConsumedToken() {
   return token;
 }
 
-function AuthShell({
+export function AuthShell({
   title,
   subtitle,
   footer,
@@ -272,8 +285,8 @@ function SetupForm({ token }: { token: string }) {
           display_name: displayName,
         }),
       }),
-    onSuccess: async (user) => {
-      client.setQueryData(["me"], user);
+    onSuccess: () => {
+      client.clear();
       navigate("/");
     },
     onError: (error) => {
@@ -320,9 +333,9 @@ function LoginForm() {
   const mutation = useMutation({
     mutationFn: () =>
       api<User>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
-    onSuccess: (user) => {
-      client.setQueryData(["me"], user);
-      navigate(typeof from === "string" && from.startsWith("/") ? from : "/", { replace: true });
+    onSuccess: () => {
+      client.clear();
+      navigate(typeof from === "string" && from.startsWith("/") ? from : (takePendingInvite() ?? "/"), { replace: true });
     },
     onError: (error) => {
       setFields(error instanceof ApiError ? (error.fields ?? {}) : {});
@@ -416,9 +429,9 @@ function TokenPasswordForm({
   const [fields, setFields] = useState<Record<string, string>>({});
   const mutation = useMutation({
     mutationFn: () => send(password, displayName),
-    onSuccess: (user) => {
-      client.setQueryData(["me"], user);
-      navigate("/", { replace: true });
+    onSuccess: () => {
+      client.clear();
+      navigate(takePendingInvite() ?? "/", { replace: true });
     },
     onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
   });

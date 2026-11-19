@@ -2,11 +2,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router";
 import { Button, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function PagesPage() {
-  const query = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages") });
+  const scope = useListScope();
+  const query = useQuery({ queryKey: scope.key("pages"), queryFn: () => api<StatusPage[]>(scope.path("/api/pages")) });
   const canEdit = useCanEdit();
   const [search, setSearch] = useState("");
   const needle = search.trim().toLowerCase();
@@ -41,7 +44,7 @@ export function PagesPage() {
               <tbody>
                 {pages.map((page) => (
                   <tr key={page.id}>
-                    <td><Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link></td>
+                    <td><Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link><ProjectTag id={page.project_id} /></td>
                     <td className="hidden font-mono text-[12px] sm:table-cell">/{page.slug}</td>
                     <td className="hidden md:table-cell">{page.components.length}</td>
                     <td><StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge></td>
@@ -78,7 +81,9 @@ export function PageEditor() {
     queryFn: () => api<StatusPage>(`/api/pages/${id}`),
     enabled: !creating,
   });
-  const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors") });
+  const workspaceWide = useListScope({ allProjects: true });
+  const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
+  const [projectId, setProjectId] = useProjectChoice();
   const page = existing.data;
   const [title, setTitle] = useState(page?.title ?? "");
   const [description, setDescription] = useState(page?.description ?? "");
@@ -109,6 +114,7 @@ export function PageEditor() {
           homepage_url: homepage,
           published,
           monitor_ids: selected,
+          ...(creating ? { project_id: projectId } : {}),
         }),
       }),
     onSuccess: async (saved) => {
@@ -142,6 +148,7 @@ export function PageEditor() {
       <LayerCard title="Details" description={!creating && page?.published ? `Public URL: /status/${page.slug}` : "What customers see at the top of the page."}>
         <div className="flex flex-col gap-4">
           <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
+          {creating ? <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} /> : null}
           <Field label="Description" error={fields.description}><Textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Slug" hint="public URL" error={fields.slug}><Input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="coollabs" required /></Field>

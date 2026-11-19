@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use owlee_errors::NormalizedEvent;
-use owlee_platform::{AppKey, Backend, Database};
+use owlee_platform::{AppKey, Backend, Database, Id};
 use rand::RngCore;
 use serde::Serialize;
 use sqlx::Row;
@@ -9,14 +9,15 @@ use uuid::Uuid;
 use crate::error::AppError;
 
 #[derive(Debug, Clone)]
-pub struct Project {
+pub struct App {
     pub id: String,
+    pub project_id: Id,
     pub name: String,
     pub slug: String,
     pub public_key: String,
     pub platform: String,
     pub created_at: String,
-    /// `None` means this project uses the instance default.
+    /// `None` means this app uses the instance default.
     pub daily_quota: Option<i64>,
 }
 
@@ -24,9 +25,9 @@ pub struct Project {
 #[serde(rename_all = "camelCase")]
 pub struct IssueRow {
     pub id: String,
-    pub project_id: String,
-    pub project_name: String,
-    pub project_slug: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub app_slug: String,
     pub title: String,
     pub culprit: Option<String>,
     pub status: String,
@@ -84,73 +85,100 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-pub async fn list_projects(db: &Database) -> Result<Vec<Project>, AppError> {
+const APP_COLUMNS: &str =
+    "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, a.daily_quota";
+
+/// The apps of a workspace, optionally of one project in it.
+pub async fn list_apps(
+    db: &Database,
+    workspace_id: Id,
+    project_id: Option<Id>,
+) -> Result<Vec<App>, AppError> {
+    let project = project_id.map(|id| id.to_string()).unwrap_or_default();
     let sql = statement(
         db,
-        "SELECT id, name, slug, public_key, platform, created_at, daily_quota FROM projects ORDER BY created_at ASC",
+        &format!(
+            "SELECT {APP_COLUMNS} FROM error_apps a JOIN projects pr ON pr.id = a.project_id
+             WHERE pr.workspace_id = ? AND (? = '' OR a.project_id = ?)
+             ORDER BY a.created_at ASC"
+        ),
     );
-    let rows = sqlx::query(&sql).fetch_all(db.pool()).await?;
-    rows.iter().map(project_from_row).collect()
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id.to_string())
+        .bind(&project)
+        .bind(&project)
+        .fetch_all(db.pool())
+        .await?;
+    rows.iter().map(app_from_row).collect()
 }
 
-pub async fn get_project(db: &Database, id: &str) -> Result<Project, AppError> {
+/// 404 unless the app belongs to the workspace.
+pub async fn get_app(db: &Database, workspace_id: Id, id: &str) -> Result<App, AppError> {
     let sql = statement(
         db,
-        "SELECT id, name, slug, public_key, platform, created_at, daily_quota FROM projects WHERE id = ?",
+        &format!(
+            "SELECT {APP_COLUMNS} FROM error_apps a JOIN projects pr ON pr.id = a.project_id
+             WHERE a.id = ? AND pr.workspace_id = ?"
+        ),
     );
-    let row = sqlx::query(&sql).bind(id).fetch_optional(db.pool()).await?;
-    match row {
-        Some(row) => project_from_row(&row),
-        None => Err(AppError::NotFound),
-    }
+    let row = sqlx::query(&sql)
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
+    row.as_ref().map_or(Err(AppError::NotFound), app_from_row)
 }
 
 /// Counts come from `issues`, not `events`, so they stay all-time after
 /// retention prunes old event rows.
 #[derive(Debug, Clone)]
-pub struct ProjectActivity {
+pub struct AppActivity {
     pub issue_count: i64,
     pub event_count: i64,
     pub last_event_at: Option<String>,
 }
 
-pub async fn project_activity(db: &Database, id: &str) -> Result<ProjectActivity, AppError> {
+pub async fn app_activity(db: &Database, id: &str) -> Result<AppActivity, AppError> {
     let sql = statement(
         db,
         "SELECT CAST(COUNT(*) AS BIGINT) AS issue_count,
                 CAST(COALESCE(SUM(event_count), 0) AS BIGINT) AS event_count,
                 MAX(last_seen) AS last_event_at
-         FROM issues WHERE project_id = ?",
+         FROM issues WHERE app_id = ?",
     );
     let row = sqlx::query(&sql).bind(id).fetch_one(db.pool()).await?;
-    Ok(ProjectActivity {
+    Ok(AppActivity {
         issue_count: row.try_get("issue_count")?,
         event_count: row.try_get("event_count")?,
         last_event_at: row.try_get("last_event_at")?,
     })
 }
 
-pub async fn project_for_ingest(
-    db: &Database,
-    id: &str,
-    public_key: &str,
-) -> Result<Project, AppError> {
-    let project = get_project(db, id).await?;
-    if project.public_key != public_key {
+/// Ingest knows only the DSN, so it looks the app up without a workspace.
+pub async fn app_for_ingest(db: &Database, id: &str, public_key: &str) -> Result<App, AppError> {
+    let sql = statement(
+        db,
+        &format!("SELECT {APP_COLUMNS} FROM error_apps a WHERE a.id = ?"),
+    );
+    let row = sqlx::query(&sql).bind(id).fetch_optional(db.pool()).await?;
+    let app = row.as_ref().map_or(Err(AppError::NotFound), app_from_row)?;
+    if app.public_key != public_key {
         return Err(AppError::Unauthorized);
     }
-    Ok(project)
+    Ok(app)
 }
 
-pub async fn create_project(
+/// The caller checks that `project_id` is in the member's workspace.
+pub async fn create_app(
     db: &Database,
+    project_id: Id,
     name: &str,
     platform: &str,
-) -> Result<Project, AppError> {
+) -> Result<App, AppError> {
     let name = name.trim();
     if name.is_empty() || name.len() > 120 {
         return Err(AppError::BadRequest(
-            "Project name must be between 1 and 120 characters".into(),
+            "App name must be between 1 and 120 characters".into(),
         ));
     }
     let platform = normalize_platform(platform);
@@ -162,17 +190,18 @@ pub async fn create_project(
     let mut tx = db.pool().begin().await?;
     let sql = statement(
         db,
-        "UPDATE project_counters SET next_id = next_id + 1 WHERE id = 1 RETURNING next_id",
+        "UPDATE error_app_counters SET next_id = next_id + 1 WHERE id = 1 RETURNING next_id",
     );
     let row = sqlx::query(&sql).fetch_one(&mut *tx).await?;
     let next_id: i64 = row.try_get("next_id")?;
     let id = (next_id - 1).to_string();
     let sql = statement(
         db,
-        "INSERT INTO projects (id, name, slug, public_key, platform, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO error_apps (id, project_id, name, slug, public_key, platform, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     sqlx::query(&sql)
         .bind(&id)
+        .bind(project_id.to_string())
         .bind(name)
         .bind(&slug)
         .bind(&public_key)
@@ -181,8 +210,9 @@ pub async fn create_project(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Project {
+    Ok(App {
         id,
+        project_id,
         name: name.to_owned(),
         slug,
         public_key,
@@ -192,25 +222,26 @@ pub async fn create_project(
     })
 }
 
-pub async fn delete_project(db: &Database, id: &str) -> Result<(), AppError> {
+pub async fn delete_app(db: &Database, workspace_id: Id, id: &str) -> Result<(), AppError> {
+    let app = get_app(db, workspace_id, id).await?;
     let mut tx = db.pool().begin().await?;
-    let sql = statement(db, "DELETE FROM events WHERE project_id = ?");
-    sqlx::query(&sql).bind(id).execute(&mut *tx).await?;
-    let sql = statement(db, "DELETE FROM issues WHERE project_id = ?");
-    sqlx::query(&sql).bind(id).execute(&mut *tx).await?;
-    let sql = statement(db, "DELETE FROM projects WHERE id = ?");
-    let result = sqlx::query(&sql).bind(id).execute(&mut *tx).await?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
+    let sql = statement(db, "DELETE FROM events WHERE app_id = ?");
+    sqlx::query(&sql).bind(&app.id).execute(&mut *tx).await?;
+    let sql = statement(db, "DELETE FROM issues WHERE app_id = ?");
+    sqlx::query(&sql).bind(&app.id).execute(&mut *tx).await?;
+    let sql = statement(db, "DELETE FROM error_apps WHERE id = ?");
+    sqlx::query(&sql).bind(&app.id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
-#[derive(Default)]
 pub struct IssueQuery {
-    pub status: String,
+    pub workspace_id: Id,
+    /// Empty means every project of the workspace.
     pub project_id: String,
+    /// Empty means every app.
+    pub app_id: String,
+    pub status: String,
     pub search: String,
     pub environment: String,
     pub since: String,
@@ -249,13 +280,20 @@ const TAG_VALUE_LIMIT: usize = 4;
 /// The feed shows at most this many issues, after sorting.
 const ISSUE_LIMIT: usize = 200;
 
+/// Issues with their app and its project, for workspace filters.
+const ISSUE_SOURCE: &str = "issues i
+         JOIN error_apps a ON a.id = i.app_id
+         JOIN projects pr ON pr.id = a.project_id";
+
 /// Every feed filter except status. `issue_filter_binds` returns its binds in order.
-const ISSUE_FILTERS: &str = "(? = '' OR i.project_id = ?)
+const ISSUE_FILTERS: &str = "pr.workspace_id = ?
+           AND (? = '' OR a.project_id = ?)
+           AND (? = '' OR i.app_id = ?)
            AND (? = '' OR lower(i.title) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.culprit, '')) LIKE ? ESCAPE '\\' OR lower(COALESCE(i.short_id, '')) LIKE ? ESCAPE '\\')
            AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.environment = ?))
            AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?))";
 
-fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 10] {
+fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 13] {
     let like = like_pattern(&query.search);
     let search_flag = if query.search.trim().is_empty() {
         ""
@@ -264,8 +302,11 @@ fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 10] {
     };
     let since_flag = if since.is_empty() { "" } else { "1" };
     [
+        query.workspace_id.to_string(),
         query.project_id.clone(),
         query.project_id.clone(),
+        query.app_id.clone(),
+        query.app_id.clone(),
         search_flag.to_owned(),
         like.clone(),
         like.clone(),
@@ -305,16 +346,13 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
     let sql = statement(
         db,
         &format!(
-            "SELECT i.id, i.project_id, p.name AS project_name, p.slug AS project_slug,
-                i.title, i.culprit, i.status, i.level, i.platform, i.environment, i.release,
-                i.first_seen, i.last_seen, i.event_count, i.short_id, i.unhandled,
+            "SELECT {ISSUE_COLUMNS},
                 CAST(CASE WHEN ? = '' THEN i.event_count
                      ELSE (SELECT COUNT(*) FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?)
                 END AS BIGINT) AS period_event_count,
                 CAST((SELECT COUNT(DISTINCT ev.user_key) FROM events ev
                       WHERE ev.issue_id = i.id AND ev.user_key != '' AND (? = '' OR ev.timestamp >= ?)) AS BIGINT) AS user_count
-         FROM issues i
-         JOIN projects p ON p.id = i.project_id
+         FROM {ISSUE_SOURCE}
          WHERE (? = '' OR i.status = ?)
            AND {ISSUE_FILTERS}
          ORDER BY {order}, i.last_seen DESC, i.id
@@ -350,7 +388,7 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
         db,
         &format!(
             "SELECT i.status, CAST(COUNT(*) AS BIGINT) AS total
-         FROM issues i
+         FROM {ISSUE_SOURCE}
          WHERE {ISSUE_FILTERS}
          GROUP BY i.status"
         ),
@@ -376,17 +414,30 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
     })
 }
 
-pub async fn list_environments(db: &Database, project_id: &str) -> Result<Vec<String>, AppError> {
+/// The environments of the workspace's events, narrowed like the issue feed.
+pub async fn list_environments(
+    db: &Database,
+    workspace_id: Id,
+    project_id: &str,
+    app_id: &str,
+) -> Result<Vec<String>, AppError> {
     let sql = statement(
         db,
-        "SELECT DISTINCT environment FROM events
-         WHERE environment IS NOT NULL AND environment != ''
-           AND (? = '' OR project_id = ?)
-         ORDER BY environment",
+        "SELECT DISTINCT e.environment FROM events e
+         JOIN error_apps a ON a.id = e.app_id
+         JOIN projects pr ON pr.id = a.project_id
+         WHERE e.environment IS NOT NULL AND e.environment != ''
+           AND pr.workspace_id = ?
+           AND (? = '' OR a.project_id = ?)
+           AND (? = '' OR e.app_id = ?)
+         ORDER BY e.environment",
     );
     let rows = sqlx::query(&sql)
+        .bind(workspace_id.to_string())
         .bind(project_id)
         .bind(project_id)
+        .bind(app_id)
+        .bind(app_id)
         .fetch_all(db.pool())
         .await?;
     Ok(rows
@@ -395,19 +446,23 @@ pub async fn list_environments(db: &Database, project_id: &str) -> Result<Vec<St
         .collect())
 }
 
-pub async fn get_issue(db: &Database, id: &str) -> Result<IssueRow, AppError> {
+const ISSUE_COLUMNS: &str = "i.id, i.app_id, a.name AS app_name, a.slug AS app_slug,
+                i.title, i.culprit, i.status, i.level, i.platform, i.environment, i.release,
+                i.first_seen, i.last_seen, i.event_count, i.short_id, i.unhandled";
+
+/// Matches the id or the short id. 404 unless the issue's app is in the workspace.
+pub async fn get_issue(db: &Database, workspace_id: Id, id: &str) -> Result<IssueRow, AppError> {
     let sql = statement(
         db,
-        "SELECT i.id, i.project_id, p.name AS project_name, p.slug AS project_slug,
-                i.title, i.culprit, i.status, i.level, i.platform, i.environment, i.release,
-                i.first_seen, i.last_seen, i.event_count, i.short_id, i.unhandled
-         FROM issues i
-         JOIN projects p ON p.id = i.project_id
-         WHERE i.id = ? OR i.short_id = ?",
+        &format!(
+            "SELECT {ISSUE_COLUMNS} FROM {ISSUE_SOURCE}
+             WHERE (i.id = ? OR i.short_id = ?) AND pr.workspace_id = ?"
+        ),
     );
     let row = sqlx::query(&sql)
         .bind(id)
         .bind(id)
+        .bind(workspace_id.to_string())
         .fetch_optional(db.pool())
         .await?;
     match row {
@@ -416,31 +471,47 @@ pub async fn get_issue(db: &Database, id: &str) -> Result<IssueRow, AppError> {
     }
 }
 
+/// Keeps a statement to the apps of one workspace. Binds the workspace id.
+const IN_WORKSPACE: &str = "app_id IN (SELECT a.id FROM error_apps a
+         JOIN projects pr ON pr.id = a.project_id WHERE pr.workspace_id = ?)";
+
 pub async fn update_issue_status(
     db: &Database,
+    workspace_id: Id,
     id: &str,
     status: &str,
 ) -> Result<IssueRow, AppError> {
-    if !matches!(status, "unresolved" | "resolved" | "ignored") {
-        return Err(AppError::BadRequest(
-            "Status must be unresolved, resolved, or ignored".into(),
-        ));
-    }
+    let status = issue_status(status)?;
+    let issue = get_issue(db, workspace_id, id).await?;
     let sql = statement(db, "UPDATE issues SET status = ? WHERE id = ?");
-    let result = sqlx::query(&sql)
+    sqlx::query(&sql)
         .bind(status)
-        .bind(id)
+        .bind(&issue.id)
         .execute(db.pool())
         .await?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
-    get_issue(db, id).await
+    get_issue(db, workspace_id, &issue.id).await
 }
 
-pub async fn get_event(db: &Database, id: &str) -> Result<String, AppError> {
-    let sql = statement(db, "SELECT payload FROM events WHERE id = ?");
-    let row = sqlx::query(&sql).bind(id).fetch_optional(db.pool()).await?;
+fn issue_status(status: &str) -> Result<&str, AppError> {
+    if matches!(status, "unresolved" | "resolved" | "ignored") {
+        Ok(status)
+    } else {
+        Err(AppError::BadRequest(
+            "Status must be unresolved, resolved, or ignored".into(),
+        ))
+    }
+}
+
+pub async fn get_event(db: &Database, workspace_id: Id, id: &str) -> Result<String, AppError> {
+    let sql = statement(
+        db,
+        &format!("SELECT payload FROM events WHERE id = ? AND {IN_WORKSPACE}"),
+    );
+    let row = sqlx::query(&sql)
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
     let Some(row) = row else {
         return Err(AppError::NotFound);
     };
@@ -476,7 +547,7 @@ pub struct Ingested {
 pub async fn ingest_event(
     db: &Database,
     app_key: &AppKey,
-    project: &Project,
+    app: &App,
     event: &NormalizedEvent,
     quota: i64,
     keep_first: i64,
@@ -496,7 +567,7 @@ pub async fn ingest_event(
             retry_after_secs: 0,
         });
     }
-    if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &project.id, quota).await? {
+    if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &app.id, quota).await? {
         tx.commit().await?;
         return Ok(Ingested {
             id: String::new(),
@@ -507,10 +578,10 @@ pub async fn ingest_event(
     let issue_id = Uuid::new_v4().to_string();
     let seq_sql = statement(
         db,
-        "UPDATE projects SET next_issue = next_issue + 1 WHERE id = ? RETURNING next_issue, slug",
+        "UPDATE error_apps SET next_issue = next_issue + 1 WHERE id = ? RETURNING next_issue, slug",
     );
     let seq = sqlx::query(&seq_sql)
-        .bind(&project.id)
+        .bind(&app.id)
         .fetch_one(&mut *tx)
         .await?;
     let next_issue: i64 = seq.try_get("next_issue")?;
@@ -520,10 +591,10 @@ pub async fn ingest_event(
     let sql = statement(
         db,
         "INSERT INTO issues (
-            id, project_id, fingerprint, title, culprit, status, level, platform,
+            id, app_id, fingerprint, title, culprit, status, level, platform,
             environment, release, first_seen, last_seen, event_count, short_id, unhandled
          ) VALUES (?, ?, ?, ?, ?, 'unresolved', ?, ?, ?, ?, ?, ?, 1, ?, ?)
-         ON CONFLICT (project_id, fingerprint) DO UPDATE SET
+         ON CONFLICT (app_id, fingerprint) DO UPDATE SET
             title = excluded.title,
             culprit = excluded.culprit,
             level = excluded.level,
@@ -538,12 +609,12 @@ pub async fn ingest_event(
     );
     let row = sqlx::query(&sql)
         .bind(&issue_id)
-        .bind(&project.id)
+        .bind(&app.id)
         .bind(&event.fingerprint)
         .bind(&event.title)
         .bind(&event.culprit)
         .bind(&event.level)
-        .bind(event.platform.as_deref().unwrap_or(&project.platform))
+        .bind(event.platform.as_deref().unwrap_or(&app.platform))
         .bind(&event.environment)
         .bind(&event.release)
         .bind(&event.timestamp)
@@ -573,12 +644,12 @@ pub async fn ingest_event(
         let insert_event = statement(
             db,
             "INSERT INTO events (
-                id, project_id, issue_id, timestamp, level, title, environment, release, user_key, payload
+                id, app_id, issue_id, timestamp, level, title, environment, release, user_key, payload
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         sqlx::query(&insert_event)
             .bind(&event.event_id)
-            .bind(&project.id)
+            .bind(&app.id)
             .bind(&issue_id)
             .bind(&event.timestamp)
             .bind(&event.level)
@@ -621,9 +692,10 @@ pub async fn ingest_event(
     })
 }
 
-fn project_from_row(row: &sqlx::any::AnyRow) -> Result<Project, AppError> {
-    Ok(Project {
+fn app_from_row(row: &sqlx::any::AnyRow) -> Result<App, AppError> {
+    Ok(App {
         id: row.try_get("id")?,
+        project_id: crate::repo::parse_id(row, "project_id")?,
         name: row.try_get("name")?,
         slug: row.try_get("slug")?,
         public_key: row.try_get("public_key")?,
@@ -635,27 +707,26 @@ fn project_from_row(row: &sqlx::any::AnyRow) -> Result<Project, AppError> {
 
 pub async fn set_daily_quota(
     db: &Database,
+    workspace_id: Id,
     id: &str,
     quota: Option<i64>,
-) -> Result<Project, AppError> {
-    let sql = statement(db, "UPDATE projects SET daily_quota = ? WHERE id = ?");
-    let result = sqlx::query(&sql)
+) -> Result<App, AppError> {
+    let app = get_app(db, workspace_id, id).await?;
+    let sql = statement(db, "UPDATE error_apps SET daily_quota = ? WHERE id = ?");
+    sqlx::query(&sql)
         .bind(quota)
-        .bind(id)
+        .bind(&app.id)
         .execute(db.pool())
         .await?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
-    get_project(db, id).await
+    get_app(db, workspace_id, &app.id).await
 }
 
 fn issue_from_row(row: &sqlx::any::AnyRow) -> Result<IssueRow, AppError> {
     Ok(IssueRow {
         id: row.try_get("id")?,
-        project_id: row.try_get("project_id")?,
-        project_name: row.try_get("project_name")?,
-        project_slug: row.try_get("project_slug")?,
+        app_id: row.try_get("app_id")?,
+        app_name: row.try_get("app_name")?,
+        app_slug: row.try_get("app_slug")?,
         title: row.try_get("title")?,
         culprit: row.try_get("culprit")?,
         status: row.try_get("status")?,
@@ -690,7 +761,7 @@ fn slugify(name: &str) -> String {
     }
     let slug = slug.trim_matches('-').to_owned();
     if slug.is_empty() {
-        "project".to_owned()
+        "app".to_owned()
     } else {
         slug
     }
@@ -700,7 +771,7 @@ async fn unique_slug(db: &Database, base: &str) -> Result<String, AppError> {
     let mut candidate = base.to_owned();
     let mut suffix = 2;
     loop {
-        let sql = statement(db, "SELECT id FROM projects WHERE slug = ?");
+        let sql = statement(db, "SELECT id FROM error_apps WHERE slug = ?");
         let existing = sqlx::query(&sql)
             .bind(&candidate)
             .fetch_optional(db.pool())
@@ -750,32 +821,31 @@ fn like_pattern(search: &str) -> String {
     format!("%{escaped}%")
 }
 
-pub fn build_dsn(origin: &str, public_key: &str, project_id: &str) -> String {
+pub fn build_dsn(origin: &str, public_key: &str, app_id: &str) -> String {
     let origin = origin.trim().trim_end_matches('/');
     let (scheme, rest) = origin.split_once("://").unwrap_or(("http", origin));
-    format!("{scheme}://{public_key}@{rest}/{project_id}")
+    format!("{scheme}://{public_key}@{rest}/{app_id}")
 }
 
+/// Ids outside the workspace match nothing and are not counted.
 pub async fn update_many_status(
     db: &Database,
+    workspace_id: Id,
     ids: &[String],
     status: &str,
 ) -> Result<usize, AppError> {
-    if !matches!(status, "unresolved" | "resolved" | "ignored") {
-        return Err(AppError::BadRequest(
-            "Status must be unresolved, resolved, or ignored".into(),
-        ));
-    }
+    let status = issue_status(status)?;
+    let sql = statement(
+        db,
+        &format!("UPDATE issues SET status = ? WHERE (id = ? OR short_id = ?) AND {IN_WORKSPACE}"),
+    );
     let mut updated = 0;
     for id in ids {
-        let sql = statement(
-            db,
-            "UPDATE issues SET status = ? WHERE id = ? OR short_id = ?",
-        );
         let result = sqlx::query(&sql)
             .bind(status)
             .bind(id)
             .bind(id)
+            .bind(workspace_id.to_string())
             .execute(db.pool())
             .await?;
         updated += result.rows_affected() as usize;
@@ -906,23 +976,32 @@ fn user_label(user: &serde_json::Value) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 pub struct UserEvent {
     pub id: String,
-    pub project_id: String,
-    pub project_name: String,
+    pub app_id: String,
+    pub app_name: String,
     pub timestamp: String,
     pub title: String,
     pub payload: serde_json::Value,
 }
 
-pub async fn events_for_user(db: &Database, user_key: &str) -> Result<Vec<UserEvent>, AppError> {
+/// Only events of the workspace's apps. The same person in another workspace stays untouched.
+pub async fn events_for_user(
+    db: &Database,
+    workspace_id: Id,
+    user_key: &str,
+) -> Result<Vec<UserEvent>, AppError> {
     let sql = statement(
         db,
-        "SELECT e.id, e.project_id, p.name AS project_name, e.timestamp, e.title, e.payload
-         FROM events e JOIN projects p ON p.id = e.project_id
+        "SELECT e.id, e.app_id, a.name AS app_name, e.timestamp, e.title, e.payload
+         FROM events e
+         JOIN error_apps a ON a.id = e.app_id
+         JOIN projects pr ON pr.id = a.project_id
          WHERE e.id IN (SELECT event_id FROM event_users WHERE user_hash = ?)
+           AND pr.workspace_id = ?
          ORDER BY e.timestamp",
     );
     let rows = sqlx::query(&sql)
         .bind(user_key)
+        .bind(workspace_id.to_string())
         .fetch_all(db.pool())
         .await?;
     rows.iter()
@@ -930,8 +1009,8 @@ pub async fn events_for_user(db: &Database, user_key: &str) -> Result<Vec<UserEv
             let payload: String = row.try_get("payload")?;
             Ok(UserEvent {
                 id: row.try_get("id")?,
-                project_id: row.try_get("project_id")?,
-                project_name: row.try_get("project_name")?,
+                app_id: row.try_get("app_id")?,
+                app_name: row.try_get("app_name")?,
                 timestamp: row.try_get("timestamp")?,
                 title: row.try_get("title")?,
                 payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
@@ -940,13 +1019,21 @@ pub async fn events_for_user(db: &Database, user_key: &str) -> Result<Vec<UserEv
         .collect()
 }
 
-pub async fn delete_events_for_user(db: &Database, user_key: &str) -> Result<u64, AppError> {
+pub async fn delete_events_for_user(
+    db: &Database,
+    workspace_id: Id,
+    user_key: &str,
+) -> Result<u64, AppError> {
     let sql = statement(
         db,
-        "DELETE FROM events WHERE id IN (SELECT event_id FROM event_users WHERE user_hash = ?)",
+        &format!(
+            "DELETE FROM events WHERE id IN (SELECT event_id FROM event_users WHERE user_hash = ?)
+             AND {IN_WORKSPACE}"
+        ),
     );
     Ok(sqlx::query(&sql)
         .bind(user_key)
+        .bind(workspace_id.to_string())
         .execute(db.pool())
         .await?
         .rows_affected())

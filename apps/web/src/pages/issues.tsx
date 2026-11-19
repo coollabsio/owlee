@@ -5,9 +5,10 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
 import { Button, Input, LayerCard, PageHeader, Select } from "@/components/ui";
-import { api, type Issue, type IssueFeed, type Project } from "@/lib/api";
+import { api, type ErrorApp, type Issue, type IssueFeed } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
+import { useListScope } from "@/lib/workspace";
 import type { IssueLocationState } from "@/pages/issue-detail";
 
 const statuses = [
@@ -29,19 +30,19 @@ type Status = (typeof statuses)[number]["id"];
 /** The whole view lives in the URL, so reloads, back/forward, and shared links reproduce it. */
 type Filters = {
   status: Status;
-  project: string;
+  app: string;
   environment: string;
   since: (typeof ranges)[number];
   q: string;
   sort: (typeof sorts)[number]["id"];
 };
 
-const defaults: Filters = { status: "unresolved", project: "", environment: "", since: "14d", q: "", sort: "last_seen" };
+const defaults: Filters = { status: "unresolved", app: "", environment: "", since: "14d", q: "", sort: "last_seen" };
 
 function parseFilters(params: URLSearchParams): Filters {
   return {
     status: oneOf(params.get("status"), statuses.map((item) => item.id), defaults.status),
-    project: params.get("project") ?? defaults.project,
+    app: params.get("app") ?? defaults.app,
     environment: params.get("environment") ?? defaults.environment,
     since: oneOf(params.get("since"), ranges, defaults.since),
     q: params.get("q") ?? defaults.q,
@@ -60,7 +61,7 @@ function filterSearch(filters: Filters) {
 function feedSearch(filters: Filters) {
   const search = new URLSearchParams({ since: filters.since, sort: filters.sort });
   if (filters.status !== "all") search.set("status", filters.status);
-  if (filters.project) search.set("project_id", filters.project);
+  if (filters.app) search.set("app_id", filters.app);
   if (filters.environment) search.set("environment", filters.environment);
   if (filters.q) search.set("q", filters.q);
   return search.toString();
@@ -95,10 +96,11 @@ export function IssuesPage() {
   // Tagged with the feed query, so changing any filter drops the selection.
   const [selection, setSelection] = useState<{ query: string; ids: string[] }>({ query: "", ids: [] });
 
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/api/error-projects") });
+  const scope = useListScope();
+  const apps = useQuery({ queryKey: scope.key("apps"), queryFn: () => api<ErrorApp[]>(scope.path("/api/error-apps")) });
   const feed = useQuery({
-    queryKey: ["issues", feedQuery],
-    queryFn: () => api<IssueFeed>(`/api/error-issues?${feedQuery}`),
+    queryKey: scope.key("issues", feedQuery),
+    queryFn: () => api<IssueFeed>(scope.path(`/api/error-issues?${feedQuery}`)),
     refetchInterval: 4000,
   });
   const bulk = useMutation({
@@ -116,7 +118,7 @@ export function IssuesPage() {
   const visible = new Set(issues.map((issue) => issue.id));
   const selected = selection.query === feedQuery ? selection.ids.filter((id) => visible.has(id)) : [];
   const allChecked = issues.length > 0 && selected.length === issues.length;
-  const waitingProject = projects.data?.find((project) => project.id === filters.project && !project.lastEventAt);
+  const waitingApp = apps.data?.find((app) => app.id === filters.app && !app.lastEventAt);
   const narrowed = total > 0 || filters.q !== "" || filters.environment !== "";
 
   function select(ids: string[]) {
@@ -194,10 +196,10 @@ export function IssuesPage() {
           </form>
           <div className="w-40">
             <Select
-              aria-label="Project"
-              value={filters.project}
-              onChange={(project) => setFilters({ project })}
-              options={[{ value: "", label: "All projects" }, ...(projects.data ?? []).map((project) => ({ value: project.id, label: project.name }))]}
+              aria-label="App"
+              value={filters.app}
+              onChange={(app) => setFilters({ app })}
+              options={[{ value: "", label: "All apps" }, ...(apps.data ?? []).map((app) => ({ value: app.id, label: app.name }))]}
             />
           </div>
           <div className="w-44">
@@ -227,32 +229,32 @@ export function IssuesPage() {
         </div>
         {feed.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading issues...</p> : null}
         {feed.isError ? <p className="p-4 text-[13px] text-[var(--ui-error)]">{(feed.error as Error).message}</p> : null}
-        {projects.data?.length === 0 ? (
+        {apps.data?.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No projects yet</h2>
+            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No apps yet</h2>
             <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
               {canEdit
-                ? "Create a project to get a DSN and a step-by-step SDK guide. Its errors show up here."
-                : "An editor has to create a project before errors can be collected."}
+                ? "Create an app to get a DSN and a step-by-step SDK guide. Its errors show up here."
+                : "An editor has to create an app before errors can be collected."}
             </p>
             {canEdit ? (
-              <Link className="button button-highlighted mt-4" to="/error-projects">
-                Create a project
+              <Link className="button button-highlighted mt-4" to="/errors/apps">
+                Create an app
               </Link>
             ) : null}
           </div>
         ) : null}
-        {projects.data?.length !== 0 && feed.data && issues.length === 0 ? (
+        {apps.data?.length !== 0 && feed.data && issues.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
             <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">{narrowed ? "No issues match this view" : "No issues in this view"}</h2>
             <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
               {narrowed
                 ? "Try another tab, a longer time range, or a broader search."
-                : "Point a Sentry SDK at a project DSN and throw an error. Events in the selected range show up here."}
+                : "Point a Sentry SDK at an app DSN and throw an error. Events in the selected range show up here."}
             </p>
-            {waitingProject ? (
-              <Link className="button mt-4" to={`/error-projects/${waitingProject.id}`}>
-                Open the {waitingProject.name} setup guide
+            {waitingApp ? (
+              <Link className="button mt-4" to={`/errors/apps/${waitingApp.id}`}>
+                Open the {waitingApp.name} setup guide
               </Link>
             ) : null}
           </div>
@@ -310,7 +312,7 @@ export function IssuesPage() {
                     key={issue.id}
                     issue={issue}
                     trend={trend}
-                    showProject={!filters.project}
+                    showApp={!filters.app}
                     checked={selected.includes(issue.id)}
                     onCheck={
                       canEdit ? (checked) => select(checked ? [...selected, issue.id] : selected.filter((id) => id !== issue.id)) : undefined
@@ -425,14 +427,14 @@ function ViewsMenu({ current, onApply }: { current: string; onApply: (query: str
 function IssueRowView({
   issue,
   trend,
-  showProject,
+  showApp,
   checked,
   onCheck,
   onOpen,
 }: {
   issue: Issue;
   trend: "24h" | "14d";
-  showProject: boolean;
+  showApp: boolean;
   checked: boolean;
   onCheck?: (checked: boolean) => void;
   onOpen: () => void;
@@ -451,7 +453,7 @@ function IssueRowView({
         {parts.message ? <div className="text-[13px] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-[var(--ui-fg-faint)]">
           <span className="font-mono text-[var(--ui-fg-dim)]">{issue.shortId}</span>
-          {showProject ? <Badge>{issue.projectName}</Badge> : null}
+          {showApp ? <Badge>{issue.appName}</Badge> : null}
           {isNew ? <Badge tone="info">New</Badge> : null}
           {issue.unhandled ? <Badge tone="fatal">Unhandled</Badge> : null}
           <span>{issue.culprit || "No culprit"}</span>

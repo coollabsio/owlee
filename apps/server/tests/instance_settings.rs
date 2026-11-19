@@ -220,7 +220,7 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
 
     let (status, member, member_cookie) = register(&app, &outbox, "second@coollabs.io").await;
     assert_eq!(status, StatusCode::CREATED, "{member}");
-    assert_eq!(member["role"], "member");
+    assert_eq!(member["workspaces"], serde_json::json!([]));
     assert_eq!(member["root"], false);
     assert_eq!(member["installation_admin"], false);
     let member_cookie = member_cookie.expect("member session");
@@ -268,7 +268,6 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
     .await;
     assert_eq!(status, StatusCode::OK, "{promoted}");
     assert_eq!(promoted["installation_admin"], true);
-    assert_eq!(promoted["role"], "admin");
     assert_eq!(promoted["root"], false);
 
     let (status, me, _) = call(&app, "GET", "/api/auth/me", None, Some(&member_cookie)).await;
@@ -321,7 +320,6 @@ async fn root_opens_registration_only_after_smtp_and_members_cannot() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{demoted}");
-    assert_eq!(demoted["role"], "member");
     assert_eq!(demoted["installation_admin"], false);
 
     let (status, cleared, _) = call(

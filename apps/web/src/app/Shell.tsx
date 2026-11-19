@@ -5,8 +5,9 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { dashboard, manage, type NavLinkItem, type Product, products } from "@/app/nav";
 import { CommandPalette, modKeyLabel } from "@/components/command-palette";
 import { ProfileMenu } from "@/components/profile-menu";
-import { api, type Meta } from "@/lib/api";
-import { useMe } from "@/lib/me";
+import { ScopeSwitcher } from "@/components/scope-switcher";
+import { api, type Meta, signOut } from "@/lib/api";
+import { useCanEdit, useMe } from "@/lib/me";
 import { cn } from "@/lib/utils";
 
 function linkActive(pathname: string, link: NavLinkItem) {
@@ -16,6 +17,12 @@ function linkActive(pathname: string, link: NavLinkItem) {
 
 function productLinks(product: Product) {
   return product.groups.flatMap((group) => group.links);
+}
+
+/** Active unless a deeper sibling matches, so Issues (/errors) is not lit on Apps (/errors/apps). */
+function ownsPath(pathname: string, link: NavLinkItem, siblings: NavLinkItem[]) {
+  if (!linkActive(pathname, link)) return false;
+  return !siblings.some((other) => other !== link && other.to.startsWith(`${link.to}/`) && linkActive(pathname, other));
 }
 
 function NavItems({
@@ -71,7 +78,7 @@ function NavItems({
                       end={link.end}
                       title={link.label}
                       onClick={onNavigate}
-                      className={({ isActive }) => cn("menu-item", isActive && "menu-item-active")}
+                      className={cn("menu-item", ownsPath(pathname, link, productLinks(shown)) && "menu-item-active")}
                     >
                       <link.icon className="menu-item-icon" />
                       <span className="menu-item-label">{link.label}</span>
@@ -147,7 +154,7 @@ export function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const me = useMe();
-  const canEdit = me.data?.installation_admin === true;
+  const canEdit = useCanEdit();
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState<string | "root" | null>(null);
@@ -229,7 +236,7 @@ export function Shell() {
   }
 
   async function logout() {
-    await api("/api/auth/logout", { method: "POST" });
+    await signOut();
     navigate("/login");
   }
 
@@ -296,7 +303,9 @@ export function Shell() {
                 <X className="size-4" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto px-3 py-2">{searchButton(() => setOpen(false))}
+            <div className="flex-1 overflow-y-auto px-3 py-2">
+              <ScopeSwitcher onNavigate={() => setOpen(false)} />
+              {searchButton(() => setOpen(false))}
               {nav(() => setOpen(false))}
             </div>
             <div className="app-drawer-footer p-3">
@@ -312,8 +321,12 @@ export function Shell() {
           collapsed ? "sidebar-collapsed w-16" : "w-56",
         )}
       >
+        {/* Outside the scrolling nav, so its menu is not clipped by the overflow. */}
+        <div className="shrink-0 px-3 pt-2">
+          <ScopeSwitcher />
+        </div>
         <nav
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pt-2 pb-2"
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-2"
           onMouseOver={(event) => {
             if (!collapsed) return;
             const row = (event.target as HTMLElement).closest<HTMLElement>(".menu-item");

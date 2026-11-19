@@ -1,4 +1,5 @@
-//! Aggregate for the post-login dashboard.
+//! Aggregate for the post-login dashboard, scoped to the member's workspace
+//! and optionally one project in it.
 //!
 //! One request and a fixed set of statements. Uptime and latency come from
 //! `monitor_daily_stats` for the current unix day. Visitors, pageviews, and
@@ -11,21 +12,49 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::State;
-use axum_extra::extract::cookie::CookieJar;
+use axum::extract::{Query, State};
 use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use owlee_domain::{IncidentImpact, MonitorState, OpenIncident, page_banner};
 use owlee_insights::day;
-use owlee_platform::{Database, TimestampMillis};
+use owlee_platform::{Database, Id, TimestampMillis};
 use serde::Serialize;
 use sqlx::Row;
 
 use crate::error::AppError;
-use crate::routes::require_user;
 use crate::state::AppState;
+use crate::workspaces::{Member, ProjectFilter};
 
 const RANGE_DAYS: i64 = 7;
 const DAY_SECS: i64 = 86_400;
+
+/// Every statement binds the workspace as `$1` and the project, or `''` for all, as `$2`,
+/// and joins the owning project as `pr`.
+const SCOPE: &str = "pr.workspace_id = $1 AND ($2 = '' OR pr.id = $2)";
+
+struct Scope {
+    workspace_id: Id,
+    project_id: Option<Id>,
+    workspace: String,
+    project: String,
+}
+
+impl Scope {
+    fn new(workspace_id: Id, project_id: Option<Id>) -> Self {
+        Self {
+            workspace_id,
+            project_id,
+            workspace: workspace_id.to_string(),
+            project: project_id.map(|id| id.to_string()).unwrap_or_default(),
+        }
+    }
+
+    fn query<'q>(
+        &'q self,
+        sql: &'q str,
+    ) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
+        sqlx::query(sql).bind(&self.workspace).bind(&self.project)
+    }
+}
 
 #[derive(Serialize)]
 pub struct Dashboard {
@@ -86,7 +115,7 @@ pub struct PageRow {
 
 #[derive(Serialize)]
 pub struct Errors {
-    pub projects: i64,
+    pub apps: i64,
     pub unresolved: i64,
     pub new_24h: i64,
     pub events_24h: Vec<i64>,
@@ -98,7 +127,7 @@ pub struct IssueItem {
     pub id: String,
     pub short_id: Option<String>,
     pub title: String,
-    pub project_name: String,
+    pub app_name: String,
     pub level: String,
     pub event_count: i64,
     pub last_seen: String,
@@ -139,23 +168,26 @@ pub struct SiteTraffic {
 
 pub async fn show(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Dashboard>, AppError> {
-    require_user(&state, &jar).await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let scope = Scope::new(member.workspace_id, project);
     let now = TimestampMillis::now();
+    let db = &state.db;
     Ok(Json(Dashboard {
-        monitors: monitors(&state.db, now).await?,
-        incidents: incidents(&state.db).await?,
-        pages: pages(&state.db).await?,
-        errors: errors(&state.db).await?,
-        analytics: analytics(&state.db).await?,
-        quota_hits: quota_notices(&state.db).await?,
+        monitors: monitors(db, &scope, now).await?,
+        incidents: incidents(db, &scope).await?,
+        pages: pages(db, &scope).await?,
+        errors: errors(db, &scope).await?,
+        analytics: analytics(db, &scope).await?,
+        quota_hits: quota_notices(db, &scope).await?,
     }))
 }
 
-async fn quota_notices(db: &Database) -> Result<Vec<QuotaNotice>, AppError> {
+async fn quota_notices(db: &Database, scope: &Scope) -> Result<Vec<QuotaNotice>, AppError> {
     let resets_at = crate::quota::resets_at();
-    Ok(crate::quota::hits(db)
+    Ok(crate::quota::hits(db, scope.workspace_id, scope.project_id)
         .await?
         .into_iter()
         .map(|hit| QuotaNotice {
@@ -169,13 +201,17 @@ async fn quota_notices(db: &Database) -> Result<Vec<QuotaNotice>, AppError> {
         .collect())
 }
 
-async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppError> {
-    let counts = sqlx::query(
-        "SELECT state, CAST(active AS BIGINT) AS active, CAST(COUNT(*) AS BIGINT) AS n \
-         FROM monitors GROUP BY state, active",
-    )
-    .fetch_all(db.pool())
-    .await?;
+async fn monitors(
+    db: &Database,
+    scope: &Scope,
+    now: TimestampMillis,
+) -> Result<Monitors, AppError> {
+    let sql = format!(
+        "SELECT m.state, CAST(m.active AS BIGINT) AS active, CAST(COUNT(*) AS BIGINT) AS n \
+         FROM monitors m JOIN projects pr ON pr.id = m.project_id \
+         WHERE {SCOPE} GROUP BY m.state, m.active"
+    );
+    let counts = scope.query(&sql).fetch_all(db.pool()).await?;
     let mut summary = Monitors {
         up: 0,
         down: 0,
@@ -204,17 +240,18 @@ async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppEr
     }
 
     let today = now.unix_day();
-    let rollup = sqlx::query(
-        "SELECT CAST(COALESCE(SUM(success), 0) AS BIGINT) AS success, \
-                CAST(COALESCE(SUM(degraded), 0) AS BIGINT) AS degraded, \
-                CAST(COALESCE(SUM(failure), 0) AS BIGINT) AS failure, \
-                CAST(COALESCE(SUM(latency_sum), 0) AS BIGINT) AS latency_sum, \
-                CAST(COALESCE(SUM(latency_count), 0) AS BIGINT) AS latency_count \
-         FROM monitor_daily_stats WHERE day = $1",
-    )
-    .bind(today)
-    .fetch_one(db.pool())
-    .await?;
+    let sql = format!(
+        "SELECT CAST(COALESCE(SUM(d.success), 0) AS BIGINT) AS success, \
+                CAST(COALESCE(SUM(d.degraded), 0) AS BIGINT) AS degraded, \
+                CAST(COALESCE(SUM(d.failure), 0) AS BIGINT) AS failure, \
+                CAST(COALESCE(SUM(d.latency_sum), 0) AS BIGINT) AS latency_sum, \
+                CAST(COALESCE(SUM(d.latency_count), 0) AS BIGINT) AS latency_count \
+         FROM monitor_daily_stats d \
+         JOIN monitors m ON m.id = d.monitor_id \
+         JOIN projects pr ON pr.id = m.project_id \
+         WHERE d.day = $3 AND {SCOPE}"
+    );
+    let rollup = scope.query(&sql).bind(today).fetch_one(db.pool()).await?;
     summary.uptime_today = ratio(
         rollup.try_get::<i64, _>("success")? + rollup.try_get::<i64, _>("degraded")?,
         rollup.try_get("failure")?,
@@ -224,10 +261,11 @@ async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppEr
         rollup.try_get("latency_count")?,
     );
 
-    let failing = sqlx::query(
+    let sql = format!(
         "WITH failing AS ( \
-            SELECT id, name, url, state FROM monitors \
-            WHERE active = 1 AND state IN ('down', 'degraded') \
+            SELECT m.id, m.name, m.url, m.state FROM monitors m \
+            JOIN projects pr ON pr.id = m.project_id \
+            WHERE m.active = 1 AND m.state IN ('down', 'degraded') AND {SCOPE} \
          ), \
          needs_streak AS ( \
             SELECT f.id FROM failing f \
@@ -265,7 +303,7 @@ async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppEr
                    CAST(SUM(failure) AS BIGINT) AS failure, \
                    CAST(SUM(latency_sum) AS BIGINT) AS latency_sum, \
                    CAST(SUM(latency_count) AS BIGINT) AS latency_count \
-            FROM monitor_daily_stats WHERE day = $1 \
+            FROM monitor_daily_stats WHERE day = $3 \
             GROUP BY monitor_id \
          ) \
          SELECT f.id, f.name, f.url, f.state, \
@@ -280,11 +318,9 @@ async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppEr
          LEFT JOIN streak s ON s.monitor_id = f.id \
          LEFT JOIN day_stats t ON t.monitor_id = f.id \
          ORDER BY CASE f.state WHEN 'down' THEN 0 ELSE 1 END, since_ms ASC NULLS LAST \
-         LIMIT 8",
-    )
-    .bind(today)
-    .fetch_all(db.pool())
-    .await?;
+         LIMIT 8"
+    );
+    let failing = scope.query(&sql).bind(today).fetch_all(db.pool()).await?;
     for row in &failing {
         let since_ms: Option<i64> = row.try_get("since_ms")?;
         summary.failing.push(FailingMonitor {
@@ -305,19 +341,19 @@ async fn monitors(db: &Database, now: TimestampMillis) -> Result<Monitors, AppEr
     Ok(summary)
 }
 
-async fn incidents(db: &Database) -> Result<Incidents, AppError> {
-    let open: i64 = sqlx::query(
-        "SELECT CAST(COUNT(*) AS BIGINT) AS n FROM incidents WHERE status != 'resolved'",
-    )
-    .fetch_one(db.pool())
-    .await?
-    .try_get("n")?;
-    let rows = sqlx::query(
-        "SELECT id, title, status, impact, started_at FROM incidents \
-         WHERE status != 'resolved' ORDER BY started_at DESC LIMIT 8",
-    )
-    .fetch_all(db.pool())
-    .await?;
+async fn incidents(db: &Database, scope: &Scope) -> Result<Incidents, AppError> {
+    let sql = format!(
+        "SELECT CAST(COUNT(*) AS BIGINT) AS n FROM incidents i \
+         JOIN projects pr ON pr.id = i.project_id \
+         WHERE i.status != 'resolved' AND {SCOPE}"
+    );
+    let open: i64 = scope.query(&sql).fetch_one(db.pool()).await?.try_get("n")?;
+    let sql = format!(
+        "SELECT i.id, i.title, i.status, i.impact, i.started_at FROM incidents i \
+         JOIN projects pr ON pr.id = i.project_id \
+         WHERE i.status != 'resolved' AND {SCOPE} ORDER BY i.started_at DESC LIMIT 8"
+    );
+    let rows = scope.query(&sql).fetch_all(db.pool()).await?;
     let mut items = Vec::new();
     for row in &rows {
         let started_at: i64 = row.try_get("started_at")?;
@@ -341,16 +377,17 @@ struct PageAccum {
     impacts: Vec<IncidentImpact>,
 }
 
-async fn pages(db: &Database) -> Result<Vec<PageRow>, AppError> {
-    let rows = sqlx::query(
+async fn pages(db: &Database, scope: &Scope) -> Result<Vec<PageRow>, AppError> {
+    let sql = format!(
         "SELECT p.id, p.title, p.slug, CAST(p.published AS BIGINT) AS published, m.state \
          FROM status_pages p \
+         JOIN projects pr ON pr.id = p.project_id \
          LEFT JOIN page_components c ON c.page_id = p.id \
          LEFT JOIN monitors m ON m.id = c.monitor_id \
-         ORDER BY lower(p.title), c.position",
-    )
-    .fetch_all(db.pool())
-    .await?;
+         WHERE {SCOPE} \
+         ORDER BY lower(p.title), c.position"
+    );
+    let rows = scope.query(&sql).fetch_all(db.pool()).await?;
     let mut pages = Vec::<PageAccum>::new();
     for row in &rows {
         let id: String = row.try_get("id")?;
@@ -374,10 +411,13 @@ async fn pages(db: &Database) -> Result<Vec<PageRow>, AppError> {
         });
     }
 
+    // Any project's incident may name a page, so only the workspace bounds this.
     let impacts = sqlx::query(
-        "SELECT page_id, impact FROM incidents \
-         WHERE status != 'resolved' AND page_id IS NOT NULL",
+        "SELECT i.page_id, i.impact FROM incidents i \
+         JOIN projects pr ON pr.id = i.project_id \
+         WHERE i.status != 'resolved' AND i.page_id IS NOT NULL AND pr.workspace_id = $1",
     )
+    .bind(&scope.workspace)
     .fetch_all(db.pool())
     .await?;
     for row in &impacts {
@@ -415,52 +455,53 @@ async fn pages(db: &Database) -> Result<Vec<PageRow>, AppError> {
         .collect())
 }
 
-async fn errors(db: &Database) -> Result<Errors, AppError> {
+/// Error apps joined as `a` with their project as `pr`.
+const APPS: &str = "error_apps a JOIN projects pr ON pr.id = a.project_id";
+const ISSUE_APPS: &str = "error_apps a ON a.id = i.app_id JOIN projects pr ON pr.id = a.project_id";
+const EVENT_APPS: &str = "error_apps a ON a.id = e.app_id JOIN projects pr ON pr.id = a.project_id";
+
+async fn errors(db: &Database, scope: &Scope) -> Result<Errors, AppError> {
     let start = trend_start(Utc::now());
     let cutoff = start.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let counts = sqlx::query(
+    let sql = format!(
         "SELECT \
-            (SELECT CAST(COUNT(*) AS BIGINT) FROM projects) AS projects, \
-            (SELECT CAST(COUNT(*) AS BIGINT) FROM issues WHERE status = 'unresolved') AS unresolved, \
-            (SELECT CAST(COUNT(*) AS BIGINT) FROM issues \
-             WHERE status = 'unresolved' AND first_seen >= $1) AS new_24h",
-    )
-    .bind(&cutoff)
-    .fetch_one(db.pool())
-    .await?;
+            (SELECT CAST(COUNT(*) AS BIGINT) FROM {APPS} WHERE {SCOPE}) AS apps, \
+            (SELECT CAST(COUNT(*) AS BIGINT) FROM issues i JOIN {ISSUE_APPS} \
+             WHERE i.status = 'unresolved' AND {SCOPE}) AS unresolved, \
+            (SELECT CAST(COUNT(*) AS BIGINT) FROM issues i JOIN {ISSUE_APPS} \
+             WHERE i.status = 'unresolved' AND i.first_seen >= $3 AND {SCOPE}) AS new_24h"
+    );
+    let counts = scope.query(&sql).bind(&cutoff).fetch_one(db.pool()).await?;
 
-    let issue_rows = sqlx::query(
+    let sql = format!(
         "SELECT i.id, i.short_id, i.title, i.level, i.event_count, i.last_seen, \
-                p.name AS project_name \
-         FROM issues i \
-         JOIN projects p ON p.id = i.project_id \
-         WHERE i.status = 'unresolved' \
+                a.name AS app_name \
+         FROM issues i JOIN {ISSUE_APPS} \
+         WHERE i.status = 'unresolved' AND {SCOPE} \
          ORDER BY i.last_seen DESC \
-         LIMIT 5",
-    )
-    .fetch_all(db.pool())
-    .await?;
+         LIMIT 5"
+    );
+    let issue_rows = scope.query(&sql).fetch_all(db.pool()).await?;
     let mut issues = Vec::new();
     for row in &issue_rows {
         issues.push(IssueItem {
             id: row.try_get("id")?,
             short_id: row.try_get("short_id")?,
             title: row.try_get("title")?,
-            project_name: row.try_get("project_name")?,
+            app_name: row.try_get("app_name")?,
             level: row.try_get("level")?,
             event_count: row.try_get("event_count")?,
             last_seen: row.try_get("last_seen")?,
         });
     }
 
-    let buckets = sqlx::query(
-        "SELECT substr(timestamp, 1, 13) AS bucket, CAST(COUNT(*) AS BIGINT) AS n \
-         FROM events WHERE timestamp >= $1 \
-         GROUP BY substr(timestamp, 1, 13)",
-    )
-    .bind(&cutoff)
-    .fetch_all(db.pool())
-    .await?;
+    let sql = format!(
+        "SELECT substr(e.timestamp, 1, 13) AS bucket, CAST(COUNT(*) AS BIGINT) AS n \
+         FROM events e JOIN {EVENT_APPS} \
+         WHERE e.timestamp >= $3 AND {SCOPE} \
+         GROUP BY substr(e.timestamp, 1, 13)"
+    );
+    let buckets = scope.query(&sql).bind(&cutoff).fetch_all(db.pool()).await?;
     let mut by_hour = BTreeMap::new();
     for row in &buckets {
         by_hour.insert(
@@ -477,7 +518,7 @@ async fn errors(db: &Database) -> Result<Errors, AppError> {
     }
 
     Ok(Errors {
-        projects: counts.try_get("projects")?,
+        apps: counts.try_get("apps")?,
         unresolved: counts.try_get("unresolved")?,
         new_24h: counts.try_get("new_24h")?,
         events_24h,
@@ -485,55 +526,71 @@ async fn errors(db: &Database) -> Result<Errors, AppError> {
     })
 }
 
-async fn analytics(db: &Database) -> Result<Analytics, AppError> {
+/// Sites and links of the scope, joined as `s` and `l` with their project as `pr`.
+const SITES: &str = "insight_sites s JOIN projects pr ON pr.id = s.project_id";
+const LINKS: &str = "insight_links l JOIN projects pr ON pr.id = l.project_id";
+const DAILY_SITES: &str =
+    "insight_sites s ON s.id = d.site_id JOIN projects pr ON pr.id = s.project_id";
+const DAILY_LINKS: &str =
+    "insight_links l ON l.id = d.link_id JOIN projects pr ON pr.id = l.project_id";
+
+async fn analytics(db: &Database, scope: &Scope) -> Result<Analytics, AppError> {
     let today = day(owlee_insights::now_secs());
     let current_from = today - (RANGE_DAYS - 1) * DAY_SECS;
     let previous_from = today - (RANGE_DAYS * 2 - 1) * DAY_SECS;
-    let counts = sqlx::query(
+    let sql = format!(
         "SELECT \
-            (SELECT CAST(COUNT(*) AS BIGINT) FROM insight_sites) AS sites, \
-            (SELECT CAST(COUNT(*) AS BIGINT) FROM insight_links) AS links",
-    )
-    .fetch_one(db.pool())
-    .await?;
-    let traffic = sqlx::query(
+            (SELECT CAST(COUNT(*) AS BIGINT) FROM {SITES} WHERE {SCOPE}) AS sites, \
+            (SELECT CAST(COUNT(*) AS BIGINT) FROM {LINKS} WHERE {SCOPE}) AS links"
+    );
+    let counts = scope.query(&sql).fetch_one(db.pool()).await?;
+    let sql = format!(
         "SELECT \
-            CAST(COALESCE(SUM(CASE WHEN day >= $1 THEN pageviews ELSE 0 END), 0) AS BIGINT) AS pageviews, \
-            CAST(COALESCE(SUM(CASE WHEN day >= $1 THEN visitors ELSE 0 END), 0) AS BIGINT) AS visitors, \
-            CAST(COALESCE(SUM(CASE WHEN day < $1 THEN pageviews ELSE 0 END), 0) AS BIGINT) AS previous_pageviews, \
-            CAST(COALESCE(SUM(CASE WHEN day < $1 THEN visitors ELSE 0 END), 0) AS BIGINT) AS previous_visitors \
-         FROM insight_daily WHERE day >= $2 AND day <= $3",
-    )
-    .bind(current_from)
-    .bind(previous_from)
-    .bind(today)
-    .fetch_one(db.pool())
-    .await?;
-    let clicks = sqlx::query(
+            CAST(COALESCE(SUM(CASE WHEN d.day >= $3 THEN d.pageviews ELSE 0 END), 0) AS BIGINT) AS pageviews, \
+            CAST(COALESCE(SUM(CASE WHEN d.day >= $3 THEN d.visitors ELSE 0 END), 0) AS BIGINT) AS visitors, \
+            CAST(COALESCE(SUM(CASE WHEN d.day < $3 THEN d.pageviews ELSE 0 END), 0) AS BIGINT) AS previous_pageviews, \
+            CAST(COALESCE(SUM(CASE WHEN d.day < $3 THEN d.visitors ELSE 0 END), 0) AS BIGINT) AS previous_visitors \
+         FROM insight_daily d JOIN {DAILY_SITES} \
+         WHERE d.day >= $4 AND d.day <= $5 AND {SCOPE}"
+    );
+    let traffic = scope
+        .query(&sql)
+        .bind(current_from)
+        .bind(previous_from)
+        .bind(today)
+        .fetch_one(db.pool())
+        .await?;
+    let sql = format!(
         "SELECT \
-            CAST(COALESCE(SUM(CASE WHEN day >= $1 THEN clicks ELSE 0 END), 0) AS BIGINT) AS clicks, \
-            CAST(COALESCE(SUM(CASE WHEN day < $1 THEN clicks ELSE 0 END), 0) AS BIGINT) AS previous_clicks \
-         FROM insight_link_daily WHERE day >= $2 AND day <= $3",
-    )
-    .bind(current_from)
-    .bind(previous_from)
-    .bind(today)
-    .fetch_one(db.pool())
-    .await?;
-    let sites = sqlx::query(
+            CAST(COALESCE(SUM(CASE WHEN d.day >= $3 THEN d.clicks ELSE 0 END), 0) AS BIGINT) AS clicks, \
+            CAST(COALESCE(SUM(CASE WHEN d.day < $3 THEN d.clicks ELSE 0 END), 0) AS BIGINT) AS previous_clicks \
+         FROM insight_link_daily d JOIN {DAILY_LINKS} \
+         WHERE d.day >= $4 AND d.day <= $5 AND {SCOPE}"
+    );
+    let clicks = scope
+        .query(&sql)
+        .bind(current_from)
+        .bind(previous_from)
+        .bind(today)
+        .fetch_one(db.pool())
+        .await?;
+    let sql = format!(
         "SELECT s.id, s.name, s.domain, \
                 CAST(COALESCE(SUM(d.pageviews), 0) AS BIGINT) AS pageviews, \
                 CAST(COALESCE(SUM(d.visitors), 0) AS BIGINT) AS visitors \
-         FROM insight_sites s \
-         LEFT JOIN insight_daily d ON d.site_id = s.id AND d.day >= $1 AND d.day <= $2 \
+         FROM {SITES} \
+         LEFT JOIN insight_daily d ON d.site_id = s.id AND d.day >= $3 AND d.day <= $4 \
+         WHERE {SCOPE} \
          GROUP BY s.id, s.name, s.domain \
          ORDER BY pageviews DESC, s.name \
-         LIMIT 5",
-    )
-    .bind(current_from)
-    .bind(today)
-    .fetch_all(db.pool())
-    .await?;
+         LIMIT 5"
+    );
+    let sites = scope
+        .query(&sql)
+        .bind(current_from)
+        .bind(today)
+        .fetch_all(db.pool())
+        .await?;
     let mut top_sites = Vec::new();
     for row in &sites {
         top_sites.push(SiteTraffic {

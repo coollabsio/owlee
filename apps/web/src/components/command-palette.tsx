@@ -5,16 +5,17 @@ import { useNavigate } from "react-router";
 import { ArrowRight, Search4 as Search } from "reicon-react";
 import { manage, products } from "@/app/nav";
 import {
+  type Agent,
   api,
+  type ErrorApp,
   type Incident,
   type InsightLink,
   type InsightSite,
-  listAgents,
   type Monitor,
-  type Project,
   type StatusPage,
 } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope } from "@/lib/workspace";
 import { cn } from "@/lib/utils";
 
 type Item = { group: string; label: string; meta?: string; to: string };
@@ -32,13 +33,15 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
 
-  const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors"), enabled: open });
-  const pages = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages"), enabled: open });
-  const incidents = useQuery({ queryKey: ["incidents"], queryFn: () => api<Incident[]>("/api/incidents"), enabled: open });
-  const sites = useQuery({ queryKey: ["sites"], queryFn: () => api<InsightSite[]>("/api/sites"), enabled: open });
-  const links = useQuery({ queryKey: ["links"], queryFn: () => api<InsightLink[]>("/api/links"), enabled: open });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/api/error-projects"), enabled: open });
-  const agents = useQuery({ queryKey: ["agents"], queryFn: listAgents, enabled: open });
+  const scope = useListScope();
+  const scopedList = <T,>(name: string, path: string) => ({ queryKey: scope.key(name), queryFn: () => api<T[]>(scope.path(path)), enabled: open });
+  const monitors = useQuery(scopedList<Monitor>("monitors", "/api/monitors"));
+  const pages = useQuery(scopedList<StatusPage>("pages", "/api/pages"));
+  const incidents = useQuery(scopedList<Incident>("incidents", "/api/incidents"));
+  const sites = useQuery(scopedList<InsightSite>("sites", "/api/sites"));
+  const links = useQuery(scopedList<InsightLink>("links", "/api/links"));
+  const apps = useQuery(scopedList<ErrorApp>("apps", "/api/error-apps"));
+  const agents = useQuery(scopedList<Agent>("agents", "/api/agents"));
   const canEdit = useCanEdit();
 
   const items = useMemo<Item[]>(() => {
@@ -57,11 +60,11 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       ...(pages.data ?? []).map((p) => ({ group: "Status pages", label: p.title, meta: `/status/${p.slug}`, to: `/pages/${p.id}` })),
       ...(incidents.data ?? []).map((i) => ({ group: "Incidents", label: i.title, meta: i.status, to: `/incidents/${i.id}` })),
       ...(agents.data ?? []).map((a) => ({ group: "Agents", label: a.name, to: "/agents" })),
-      ...(projects.data ?? []).map((p) => ({ group: "Error projects", label: p.name, meta: p.platform, to: `/error-projects/${p.id}` })),
+      ...(apps.data ?? []).map((a) => ({ group: "Error apps", label: a.name, meta: a.platform, to: `/errors/apps/${a.id}` })),
       ...(sites.data ?? []).map((s) => ({ group: "Sites", label: s.name, meta: s.domain, to: `/analytics/${s.id}` })),
       ...(links.data ?? []).map((l) => ({ group: "Links", label: `/${l.slug}`, meta: l.destination, to: `/links/${l.id}` })),
     ];
-  }, [canEdit, monitors.data, pages.data, incidents.data, agents.data, projects.data, sites.data, links.data]);
+  }, [canEdit, monitors.data, pages.data, incidents.data, agents.data, apps.data, sites.data, links.data]);
 
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -106,7 +109,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   }
 
   if (!open) return null;
-  const loading = [monitors, pages, incidents, sites, links, projects, agents].some((q) => q.isLoading);
+  const loading = [monitors, pages, incidents, sites, links, apps, agents].some((q) => q.isLoading);
   return createPortal(
     <div className="command-palette-root" role="dialog" aria-modal="true" aria-label="Search">
       <button type="button" className="command-palette-backdrop" aria-label="Close search" onClick={onClose} />

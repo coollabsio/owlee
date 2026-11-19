@@ -195,27 +195,82 @@ pub fn testing_config(path: PathBuf) -> Config {
     }
 }
 
-/// Signs in a new admin without mail, for tests on a reused database where
-/// setup already ran. Returns the `name=value` cookie pair.
-pub async fn editor_session(state: &AppState) -> Result<String, sqlx::Error> {
-    session_with_role(state, "admin").await
+/// A signed-in test user inside one workspace.
+pub struct TestSession {
+    /// The `name=value` cookie pair.
+    pub cookie: String,
+    pub user_id: owlee_platform::Id,
+    pub workspace_id: owlee_platform::Id,
+    /// The workspace's first project.
+    pub project_id: owlee_platform::Id,
 }
 
-/// Like `editor_session`, for a read-only member.
-pub async fn member_session(state: &AppState) -> Result<String, sqlx::Error> {
-    session_with_role(state, "member").await
+/// Signs in a new user who owns a new workspace with a "Default" project.
+/// Needs no mail and no setup, so it works on a reused database.
+pub async fn editor_session(state: &AppState) -> Result<TestSession, sqlx::Error> {
+    use owlee_platform::TimestampMillis;
+
+    let (user_id, cookie) = test_user(state, "editor").await?;
+    let mut tx = state.db.begin_immediate().await?;
+    let created = crate::workspaces::create_workspace(
+        &mut tx,
+        user_id,
+        "Test workspace",
+        "Default",
+        TimestampMillis::now(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(TestSession {
+        cookie,
+        user_id,
+        workspace_id: created.workspace_id,
+        project_id: created.project_id,
+    })
 }
 
-async fn session_with_role(state: &AppState, role: &str) -> Result<String, sqlx::Error> {
+/// Signs in a new read-only member of an existing workspace, such as the one
+/// `editor_session` made.
+pub async fn member_session(
+    state: &AppState,
+    workspace_id: owlee_platform::Id,
+) -> Result<TestSession, sqlx::Error> {
+    use owlee_platform::TimestampMillis;
+
+    let (user_id, cookie) = test_user(state, "member").await?;
+    let mut tx = state.db.begin_immediate().await?;
+    crate::workspaces::insert_membership(
+        &mut tx,
+        workspace_id,
+        user_id,
+        crate::workspaces::Role::Member,
+        TimestampMillis::now(),
+    )
+    .await?;
+    tx.commit().await?;
+    let project_id = crate::workspaces::projects_in(&state.db, workspace_id)
+        .await?
+        .first()
+        .map(|project| project.id)
+        .ok_or(sqlx::Error::RowNotFound)?;
+    Ok(TestSession {
+        cookie,
+        user_id,
+        workspace_id,
+        project_id,
+    })
+}
+
+async fn test_user(
+    state: &AppState,
+    label: &str,
+) -> Result<(owlee_platform::Id, String), sqlx::Error> {
     use owlee_platform::{Id, TimestampMillis, generate_token, hash_token};
 
     let now = TimestampMillis::now();
     let id = Id::new();
-    let email = format!("{role}-{id}@example.com");
-    crate::repo::insert_user(
-        &state.db, id, &email, &email, "Editor", "unusable", role, now,
-    )
-    .await?;
+    let email = format!("{label}-{id}@example.com");
+    crate::repo::insert_user(&state.db, id, &email, &email, "Editor", "unusable", now).await?;
     let token = generate_token();
     let later = TimestampMillis::from_millis(now.as_millis() + 86_400_000);
     crate::repo::insert_session(
@@ -228,7 +283,7 @@ async fn session_with_role(state: &AppState, role: &str) -> Result<String, sqlx:
         later,
     )
     .await?;
-    Ok(format!("owlee_session={token}"))
+    Ok((id, format!("owlee_session={token}")))
 }
 
 #[derive(Debug, Error)]

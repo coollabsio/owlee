@@ -4,8 +4,10 @@ import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
-import { ApiError, api, type Assertion, listAgents, type Monitor } from "@/lib/api";
+import { ProjectField, ProjectTag } from "@/components/project";
+import { ApiError, type Agent, api, type Assertion, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
 
 type Draft = {
@@ -90,6 +92,7 @@ function MonitorRow({ monitor, subtitle }: { monitor: Monitor; subtitle: string 
     <tr className="clickable-row">
       <td className="cell-link">
         <Link className="row-link" to={to}>{monitor.name}</Link>
+        <ProjectTag id={monitor.project_id} />
         {rowCover(to)}
         <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{subtitle}</div>
       </td>
@@ -114,7 +117,8 @@ function MonitorRow({ monitor, subtitle }: { monitor: Monitor; subtitle: string 
 }
 
 export function MonitorsPage() {
-  const query = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors"), refetchInterval: 10_000 });
+  const scope = useListScope();
+  const query = useQuery({ queryKey: scope.key("monitors"), queryFn: () => api<Monitor[]>(scope.path("/api/monitors")), refetchInterval: 10_000 });
   const label = useMonitorLabel();
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
@@ -294,7 +298,8 @@ export function MonitorDetailPage() {
 const checksPerPage = 20;
 
 function useMonitorLabel() {
-  const agents = useQuery({ queryKey: ["agents"], queryFn: listAgents });
+  const scope = useListScope({ allProjects: true });
+  const agents = useQuery({ queryKey: scope.key("agents"), queryFn: () => api<Agent[]>(scope.path("/api/agents")) });
   return (monitor: Monitor) => {
     const base = `${monitor.check_type.toUpperCase()} · ${monitor.url}`;
     if (!monitor.agent_id) return base;
@@ -329,13 +334,14 @@ const methods = ["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE"].map((method) =
 
 function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () => void; monitor?: Monitor }) {
   const client = useQueryClient();
+  const [projectId, setProjectId] = useProjectChoice();
   const [draft, setDraft] = useState<Draft>(monitor ? draftFrom(monitor) : emptyDraft);
   const [fields, setFields] = useState<Record<string, string>>({});
   const save = useMutation({
     mutationFn: () =>
       api<Monitor>(monitor ? `/api/monitors/${monitor.id}` : "/api/monitors", {
         method: monitor ? "PUT" : "POST",
-        body: JSON.stringify(payload(draft)),
+        body: JSON.stringify(monitor ? payload(draft) : { ...payload(draft), project_id: projectId }),
       }),
     onSuccess: async (saved) => {
       await client.invalidateQueries({ queryKey: ["monitors"] });
@@ -366,6 +372,7 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
         <Field label="Name" error={fields.name}>
           <Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required />
         </Field>
+        {monitor ? null : <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />}
         <Field label="Description">
           <Textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
         </Field>

@@ -1,7 +1,9 @@
+import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 import { Shell } from "@/app/Shell";
-import { ApiError } from "@/lib/api";
+import { ApiError, api, type Project } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { savedProject, useSelectionVersion, WorkspaceContext, workspaceFor } from "@/lib/workspace";
 import {
   ForgotPasswordPage,
   LoginPage,
@@ -15,7 +17,7 @@ import { AnalyticsPage, VisitorPage } from "@/pages/analytics";
 import { DashboardPage } from "@/pages/dashboard";
 import { HomePage } from "@/pages/home";
 import { LinkDetailPage, LinksPage } from "@/pages/links";
-import { ErrorProjectsPage, ProjectDetailPage } from "@/pages/error-projects";
+import { ErrorAppDetailPage, ErrorAppsPage } from "@/pages/error-apps";
 import { IncidentDetailPage, IncidentsPage } from "@/pages/incidents";
 import { IssueDetailPage } from "@/pages/issue-detail";
 import { IssuesPage } from "@/pages/issues";
@@ -27,8 +29,13 @@ import { PublicStatusPage } from "@/pages/public";
 import { SharePage } from "@/pages/share";
 import { SettingsPage } from "@/pages/settings";
 import { AppearancePage } from "@/pages/appearance";
+import { InvitePage } from "@/pages/invite";
+import { OnboardingPage } from "@/pages/onboarding";
+import { WorkspaceSettingsPage } from "@/pages/workspace-settings";
 
 function RequireAuth() {
+  // A workspace switch clears the cache; re-rendering here refetches `me` and remounts the app.
+  useSelectionVersion();
   const location = useLocation();
   const me = useMe();
   if (me.isLoading) {
@@ -43,6 +50,28 @@ function RequireAuth() {
   return <Outlet />;
 }
 
+/** Picks the current workspace and project for everything below it. Users without a workspace go to onboarding. */
+function RequireWorkspace() {
+  useSelectionVersion();
+  const me = useMe();
+  const workspace = workspaceFor(me.data);
+  const projects = useQuery({
+    queryKey: ["projects", workspace?.id],
+    queryFn: () => api<Project[]>("/api/projects"),
+    enabled: workspace != null,
+  });
+  if (!me.data) return null;
+  if (!workspace) return <Navigate to="/onboarding" replace />;
+  const saved = savedProject(workspace.id);
+  // A deleted project falls back to "all" once the list proves it is gone.
+  const project = saved === "all" || !projects.data || projects.data.some((item) => item.id === saved) ? saved : "all";
+  return (
+    <WorkspaceContext.Provider value={{ workspace, projects: projects.data ?? [], project }}>
+      <Outlet />
+    </WorkspaceContext.Provider>
+  );
+}
+
 export function App() {
   return (
     <Routes>
@@ -54,7 +83,10 @@ export function App() {
       <Route path="/setup" element={<SetupPage />} />
       <Route path="/status/:slug" element={<PublicStatusPage />} />
       <Route path="/share/:kind/:slug" element={<SharePage />} />
+      <Route path="/invite/:token" element={<InvitePage />} />
       <Route element={<RequireAuth />}>
+        <Route path="onboarding" element={<OnboardingPage />} />
+        <Route element={<RequireWorkspace />}>
         <Route element={<Shell />}>
           <Route index element={<HomePage />} />
           <Route path="status" element={<DashboardPage />} />
@@ -75,10 +107,12 @@ export function App() {
           <Route path="errors" element={<IssuesPage />} />
           <Route path="errors/:id" element={<IssueDetailPage />} />
           <Route path="errors/:id/events/:eventId" element={<IssueDetailPage />} />
-          <Route path="error-projects" element={<ErrorProjectsPage />} />
-          <Route path="error-projects/:id" element={<ProjectDetailPage />} />
+          <Route path="errors/apps" element={<ErrorAppsPage />} />
+          <Route path="errors/apps/:id" element={<ErrorAppDetailPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="settings/appearance" element={<AppearancePage />} />
+          <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
+        </Route>
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

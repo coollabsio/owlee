@@ -3,6 +3,7 @@ import { type FormEvent, useState } from "react";
 import { Button, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { ApiError, api, type Channel, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope } from "@/lib/workspace";
 import { formatTime } from "@/lib/utils";
 
 const providers = ["email", "webhook", "slack", "discord"] as const;
@@ -22,7 +23,8 @@ export function NotificationsPage() {
 function NotificationChannels() {
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["notifications"], queryFn: () => api<Channel[]>("/api/notifications") });
-  const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors") });
+  const workspaceWide = useListScope({ allProjects: true });
+  const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<(typeof providers)[number]>("email");
   const [target, setTarget] = useState("");

@@ -10,9 +10,8 @@ function initial(name: string, email: string) {
 }
 
 function roleLabel(user?: User) {
-  if (!user?.role) return "";
-  if (user.root) return "Root";
-  return user.role.charAt(0).toUpperCase() + user.role.slice(1);
+  if (user?.root) return "Root";
+  return user?.installation_admin ? "Installation admin" : "";
 }
 
 export function ProfileMenu({

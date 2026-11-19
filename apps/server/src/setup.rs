@@ -1,8 +1,8 @@
 //! One-time installation setup, adapted from Orbit's setup token.
 //!
 //! A fresh database gets a single opaque token (hash stored, 30 minute lifetime).
-//! Completing setup creates the owner, marks `installation_state` initialized, and
-//! deletes every setup token. Setup cannot run again. Public registration stays closed
+//! Completing setup creates the root user with a first workspace and project, marks
+//! `installation_state` initialized, and deletes every setup token. Setup cannot run again. Public registration stays closed
 //! until the root user opens it in Settings, and only after a mail server is saved.
 
 use std::ops::DerefMut;
@@ -158,8 +158,8 @@ pub async fn complete_setup(
     let session_token = generate_token();
     let timestamp = now.as_millis();
     sqlx::query(
-        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, role, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, 'owner', $6, $6)",
+        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $6)",
     )
     .bind(user_id.to_string())
     .bind(&owner.email)
@@ -169,6 +169,7 @@ pub async fn complete_setup(
     .bind(timestamp)
     .execute(tx.deref_mut())
     .await?;
+    crate::workspaces::create_workspace(&mut tx, user_id, "My workspace", "Default", now).await?;
     let idle = TimestampMillis::from_millis(timestamp + 30 * DAY_MS);
     let absolute = TimestampMillis::from_millis(timestamp + 90 * DAY_MS);
     sqlx::query(

@@ -1,11 +1,11 @@
-//! Per-project and per-site daily ingest quotas.
+//! Per-app and per-site daily ingest quotas.
 //!
-//! The instance number is the default for every project and site. A subject
+//! The instance number is the default for every error app and site. A subject
 //! with its own `daily_quota` uses that instead. The counter is still per
-//! subject, so one project cannot spend another's allowance.
+//! subject, so one app cannot spend another's allowance.
 
 use chrono::{Duration, Utc};
-use owlee_platform::Database;
+use owlee_platform::{Database, Id};
 use sqlx::Row;
 
 use crate::error::AppError;
@@ -21,7 +21,7 @@ pub struct UsageHit {
     pub quota: i64,
 }
 
-/// `custom` replaces `global` when the project or site set its own cap.
+/// `custom` replaces `global` when the app or site set its own cap.
 pub fn effective(global: i64, custom: Option<i64>) -> i64 {
     custom.unwrap_or(global)
 }
@@ -90,19 +90,30 @@ where
     Ok(row.is_some())
 }
 
-pub async fn hits(db: &Database) -> Result<Vec<UsageHit>, AppError> {
+/// Apps and sites of the workspace, or of one project in it, that spent today's cap.
+pub async fn hits(
+    db: &Database,
+    workspace_id: Id,
+    project_id: Option<Id>,
+) -> Result<Vec<UsageHit>, AppError> {
     let day = today();
+    let workspace = workspace_id.to_string();
+    let project = project_id.map(|id| id.to_string()).unwrap_or_default();
     let mut hits = Vec::new();
     let errors = sqlx::query(
         "SELECT p.id, p.name, u.count AS used, \
                 COALESCE(p.daily_quota, s.error_daily_quota) AS quota \
-         FROM projects p \
+         FROM error_apps p \
+         JOIN projects pr ON pr.id = p.project_id \
          JOIN instance_settings s ON s.id = 1 \
          JOIN ingest_usage u ON u.kind = 'error' AND u.subject_id = p.id AND u.day = $1 \
          WHERE u.count >= COALESCE(p.daily_quota, s.error_daily_quota) \
+           AND pr.workspace_id = $2 AND ($3 = '' OR pr.id = $3) \
          ORDER BY p.name",
     )
     .bind(&day)
+    .bind(&workspace)
+    .bind(&project)
     .fetch_all(db.pool())
     .await?;
     for row in &errors {
@@ -118,12 +129,16 @@ pub async fn hits(db: &Database) -> Result<Vec<UsageHit>, AppError> {
         "SELECT p.id, p.name, u.count AS used, \
                 COALESCE(p.daily_quota, s.analytics_daily_quota) AS quota \
          FROM insight_sites p \
+         JOIN projects pr ON pr.id = p.project_id \
          JOIN instance_settings s ON s.id = 1 \
          JOIN ingest_usage u ON u.kind = 'analytics' AND u.subject_id = p.id AND u.day = $1 \
          WHERE u.count >= COALESCE(p.daily_quota, s.analytics_daily_quota) \
+           AND pr.workspace_id = $2 AND ($3 = '' OR pr.id = $3) \
          ORDER BY p.name",
     )
     .bind(&day)
+    .bind(&workspace)
+    .bind(&project)
     .fetch_all(db.pool())
     .await?;
     for row in &sites {
@@ -148,7 +163,8 @@ pub fn resets_at() -> String {
     let next = (now.date_naive() + Duration::days(1))
         .and_hms_opt(0, 0, 0)
         .unwrap_or(now.naive_utc());
-    next.and_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    next.and_utc()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 pub fn secs_until_utc_midnight() -> u64 {

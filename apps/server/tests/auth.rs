@@ -6,7 +6,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use owlee_platform::{Id, TimestampMillis};
 use owlee_server::{
-    AppState, Outbox, boot, initialize_setup_token, permit_signup, router, testing_config,
+    AppState, Outbox, boot, initialize_setup_token, member_session, permit_signup, router,
+    testing_config,
 };
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -28,6 +29,21 @@ struct App {
     state: AppState,
     outbox: Outbox,
     root: String,
+    /// The workspace setup made for root, and its "Default" project.
+    workspace: String,
+    project: String,
+}
+
+impl App {
+    fn scope(&self) -> [(&'static str, &str); 1] {
+        [("x-owlee-workspace", self.workspace.as_str())]
+    }
+
+    /// A read-only member of root's workspace.
+    async fn member(&self) -> String {
+        let workspace = self.workspace.parse().unwrap();
+        member_session(&self.state, workspace).await.unwrap().cookie
+    }
 }
 
 async fn app() -> App {
@@ -59,11 +75,31 @@ async fn app() -> App {
     .await;
     assert_eq!(hit.status, StatusCode::CREATED, "{}", hit.body);
     permit_signup(&state.db).await.unwrap();
+    let root = hit.cookie.expect("root session");
+    let workspace = hit.body["workspaces"][0]["id"]
+        .as_str()
+        .expect("setup workspace")
+        .to_owned();
+    let projects = call(
+        &router,
+        "GET",
+        "/api/projects",
+        None,
+        Some(&root),
+        &[("x-owlee-workspace", workspace.as_str())],
+    )
+    .await;
+    let project = projects.body[0]["id"]
+        .as_str()
+        .expect("default project")
+        .to_owned();
     App {
         router,
         state,
         outbox,
-        root: hit.cookie.expect("root session"),
+        root,
+        workspace,
+        project,
     }
 }
 
@@ -175,20 +211,22 @@ async fn login(app: &App, email: &str, password: &str) -> Hit {
 #[tokio::test]
 async fn members_get_403_on_every_mutating_route_and_still_read() {
     let app = app().await;
-    let (_, member) = register(&app, "member@coollabs.io").await;
+    let member = app.member().await;
     let id = Id::new().to_string();
-    let monitor = json!({"name": "API", "job_type": "http", "url": "https://example.com"});
-    let page = json!({"title": "Status", "slug": "status", "monitor_ids": []});
-    let incident = json!({"title": "Down", "status": "investigating", "impact": "minor", "message": "Looking"});
+    let project = app.project.as_str();
+    let monitor = json!({"project_id": project, "name": "API", "job_type": "http", "url": "https://example.com"});
+    let page =
+        json!({"project_id": project, "title": "Status", "slug": "status", "monitor_ids": []});
+    let incident = json!({"project_id": project, "title": "Down", "status": "investigating", "impact": "minor", "message": "Looking"});
     let update = json!({"status": "resolved", "message": "Fixed"});
     let maintenance = json!({
-        "title": "Upgrade", "message": "Short", "page_id": id, "monitor_ids": [],
+        "project_id": project, "title": "Upgrade", "message": "Short", "page_id": id, "monitor_ids": [],
         "starts_at": "2026-12-01T00:00:00.000Z", "ends_at": "2026-12-01T01:00:00.000Z"
     });
     let channel = json!({"name": "Ops", "provider": "webhook", "config": {}, "monitor_ids": []});
     let public = json!({"enabled": true, "slug": "share", "threshold": 0, "sections": []});
     let domain = json!({"hostname": "go.example.com"});
-    let link = json!({"domain_id": id, "slug": "x", "destination": "https://example.com"});
+    let link = json!({"project_id": project, "domain_id": id, "slug": "x", "destination": "https://example.com"});
     let quota = json!({"daily_quota": 10});
     let routes: Vec<(&str, String, Option<Value>)> = vec![
         ("POST", "/api/monitors".into(), Some(monitor.clone())),
@@ -200,7 +238,11 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
             format!("/api/monitors/{id}/active"),
             Some(json!({"active": false})),
         ),
-        ("POST", "/api/agents".into(), Some(json!({"name": "edge"}))),
+        (
+            "POST",
+            "/api/agents".into(),
+            Some(json!({"project_id": project, "name": "edge"})),
+        ),
         ("DELETE", format!("/api/agents/{id}"), None),
         ("POST", "/api/pages".into(), Some(page.clone())),
         ("PUT", format!("/api/pages/{id}"), Some(page)),
@@ -217,7 +259,7 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
         (
             "POST",
             "/api/sites".into(),
-            Some(json!({"name": "Site", "domain": "example.com"})),
+            Some(json!({"project_id": project, "name": "Site", "domain": "example.com"})),
         ),
         (
             "PUT",
@@ -242,15 +284,11 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
         ("PUT", format!("/api/links/{id}/public"), Some(public)),
         (
             "POST",
-            "/api/error-projects".into(),
-            Some(json!({"name": "App", "platform": "php"})),
+            "/api/error-apps".into(),
+            Some(json!({"project_id": project, "name": "App", "platform": "php"})),
         ),
-        ("DELETE", format!("/api/error-projects/{id}"), None),
-        (
-            "PUT",
-            format!("/api/error-projects/{id}/quota"),
-            Some(quota),
-        ),
+        ("DELETE", format!("/api/error-apps/{id}"), None),
+        ("PUT", format!("/api/error-apps/{id}/quota"), Some(quota)),
         (
             "POST",
             "/api/error-issues/bulk".into(),
@@ -287,7 +325,15 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
     ];
     let mut allowed = Vec::new();
     for (method, path, body) in &routes {
-        let hit = call(&app.router, method, path, body.clone(), Some(&member), &[]).await;
+        let hit = call(
+            &app.router,
+            method,
+            path,
+            body.clone(),
+            Some(&member),
+            &app.scope(),
+        )
+        .await;
         if hit.status != StatusCode::FORBIDDEN {
             allowed.push(format!("{method} {path} -> {} {}", hit.status, hit.body));
         }
@@ -298,34 +344,41 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
         allowed.join("\n")
     );
 
+    let agent = json!({"project_id": project, "name": "edge"});
     let denied = call(
         &app.router,
         "POST",
         "/api/agents",
-        Some(json!({"name": "edge"})),
+        Some(agent.clone()),
         Some(&member),
-        &[],
+        &app.scope(),
     )
     .await;
-    assert_eq!(denied.body["detail"], "Only an admin can change this.");
+    assert_eq!(
+        denied.body["detail"],
+        "Only a workspace admin can change this."
+    );
     for path in [
         "/api/monitors",
         "/api/overview",
         "/api/agents",
+        "/api/pages",
+        "/api/incidents",
+        "/api/maintenances",
         "/api/sites",
-        "/api/error-projects",
+        "/api/error-apps",
         "/api/auth/sessions",
     ] {
-        let hit = call(&app.router, "GET", path, None, Some(&member), &[]).await;
+        let hit = call(&app.router, "GET", path, None, Some(&member), &app.scope()).await;
         assert_eq!(hit.status, StatusCode::OK, "{path} {}", hit.body);
     }
     let created = call(
         &app.router,
         "POST",
         "/api/agents",
-        Some(json!({"name": "edge"})),
+        Some(agent),
         Some(&app.root),
-        &[],
+        &app.scope(),
     )
     .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
@@ -334,25 +387,34 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
 #[tokio::test]
 async fn members_read_monitors_without_request_headers_or_body() {
     let app = app().await;
-    let (_, member) = register(&app, "member@coollabs.io").await;
+    let member = app.member().await;
     let created = call(
         &app.router,
         "POST",
         "/api/monitors",
         Some(json!({
+            "project_id": app.project,
             "name": "API", "job_type": "http", "url": "https://ops:hunter2@example.com/health?api_key=abc", "method": "POST",
             "headers": [{"name": "Authorization", "value": "Bearer secret"}],
             "body": "{\"token\":\"secret\"}"
         })),
         Some(&app.root),
-        &[],
+        &app.scope(),
     )
     .await;
     assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     let id = created.body["id"].as_str().expect("monitor id").to_owned();
     let detail = format!("/api/monitors/{id}");
 
-    let admin = call(&app.router, "GET", &detail, None, Some(&app.root), &[]).await;
+    let admin = call(
+        &app.router,
+        "GET",
+        &detail,
+        None,
+        Some(&app.root),
+        &app.scope(),
+    )
+    .await;
     assert_eq!(
         admin.body["headers"],
         json!([{"name": "Authorization", "value": "Bearer secret"}])
@@ -363,7 +425,15 @@ async fn members_read_monitors_without_request_headers_or_body() {
         "https://ops:hunter2@example.com/health?api_key=abc"
     );
 
-    let seen = call(&app.router, "GET", &detail, None, Some(&member), &[]).await;
+    let seen = call(
+        &app.router,
+        "GET",
+        &detail,
+        None,
+        Some(&member),
+        &app.scope(),
+    )
+    .await;
     assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
     assert_eq!(seen.body["headers"], json!([]));
     assert_eq!(seen.body["body"], "");
@@ -374,7 +444,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
         "/api/monitors",
         None,
         Some(&member),
-        &[],
+        &app.scope(),
     )
     .await;
     assert_eq!(list.body[0]["headers"], json!([]));
@@ -386,7 +456,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
         "/api/overview",
         None,
         Some(&member),
-        &[],
+        &app.scope(),
     )
     .await;
     assert_eq!(overview.body["monitors"][0]["headers"], json!([]));
@@ -452,7 +522,11 @@ async fn register_sends_a_single_use_link_and_answers_the_same_for_taken_emails(
     assert_eq!(done.status, StatusCode::CREATED, "{}", done.body);
     assert_eq!(done.body["email"], "new@coollabs.io");
     assert_eq!(done.body["display_name"], "new");
-    assert_eq!(done.body["role"], "member");
+    assert_eq!(
+        done.body["workspaces"],
+        json!([]),
+        "register makes no workspace"
+    );
     assert_eq!(done.body["installation_admin"], false);
     let session = done
         .set_cookie
@@ -805,14 +879,15 @@ async fn sessions_list_and_revoke_only_the_callers_own() {
 #[tokio::test]
 async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
     let app = app().await;
-    let agent = Some(json!({"name": "edge"}));
+    let agent = Some(json!({"project_id": app.project, "name": "edge"}));
+    let scope = app.scope()[0];
     let foreign = call(
         &app.router,
         "POST",
         "/api/agents",
         agent.clone(),
         Some(&app.root),
-        &[("origin", "https://evil.example")],
+        &[scope, ("origin", "https://evil.example")],
     )
     .await;
     assert_eq!(foreign.status, StatusCode::FORBIDDEN);
@@ -826,7 +901,7 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
         "/api/agents",
         agent.clone(),
         Some(&app.root),
-        &[("sec-fetch-site", "cross-site")],
+        &[scope, ("sec-fetch-site", "cross-site")],
     )
     .await;
     assert_eq!(cross.status, StatusCode::FORBIDDEN);
@@ -846,7 +921,7 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
         "/api/agents",
         agent,
         Some(&app.root),
-        &[("origin", ORIGIN), ("sec-fetch-site", "same-origin")],
+        &[scope, ("origin", ORIGIN), ("sec-fetch-site", "same-origin")],
     )
     .await;
     assert_eq!(same.status, StatusCode::CREATED, "{}", same.body);
@@ -856,7 +931,7 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
         "/api/agents",
         None,
         Some(&app.root),
-        &[("origin", "https://evil.example")],
+        &[scope, ("origin", "https://evil.example")],
     )
     .await;
     assert_eq!(read.status, StatusCode::OK);
@@ -864,10 +939,10 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
     let project = call(
         &app.router,
         "POST",
-        "/api/error-projects",
-        Some(json!({"name": "App", "platform": "php"})),
+        "/api/error-apps",
+        Some(json!({"project_id": app.project, "name": "App", "platform": "php"})),
         Some(&app.root),
-        &[],
+        &[scope],
     )
     .await;
     assert_eq!(project.status, StatusCode::OK, "{}", project.body);

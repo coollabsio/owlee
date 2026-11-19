@@ -168,6 +168,7 @@ async fn record(
             );
             let incident = Incident {
                 id: incident_id,
+                project_id: monitor.project_id,
                 page_id: None,
                 monitor_id: Some(id),
                 title: format!("{} is down", monitor.name),
@@ -269,7 +270,14 @@ async fn record(
             }),
             message: Some(message),
         };
-        notify::fanout(state, &payload, Some(id), Some(incident_id)).await;
+        notify::fanout(
+            state,
+            &payload,
+            monitor.project_id,
+            Some(id),
+            Some(incident_id),
+        )
+        .await;
     }
     Ok(())
 }

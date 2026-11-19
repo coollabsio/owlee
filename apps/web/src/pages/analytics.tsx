@@ -4,8 +4,10 @@ import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { useCanEdit } from "@/lib/me";
 import { cn } from "@/lib/utils";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 const ranges = [
   { id: "24h", label: "24 hours", seconds: 86_400 },
@@ -23,7 +25,9 @@ function rangeQuery(seconds: number) {
 
 export function AnalyticsPage() {
   const { siteId } = useParams();
-  const sites = useQuery({ queryKey: ["sites"], queryFn: () => api<InsightSite[]>("/api/sites") });
+  // A site page looks its site up across the workspace, so a link from another project still opens.
+  const scope = useListScope({ allProjects: siteId != null });
+  const sites = useQuery({ queryKey: scope.key("sites"), queryFn: () => api<InsightSite[]>(scope.path("/api/sites")) });
   if (!siteId) return <SiteList sites={sites.data ?? []} loading={sites.isLoading} error={sites.error} />;
   const site = sites.data?.find((item) => item.id === siteId);
   return <SiteDetail siteId={siteId} site={site} />;
@@ -48,8 +52,9 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("");
+  const [projectId, setProjectId] = useProjectChoice();
   const create = useMutation({
-    mutationFn: () => api<InsightSite>("/api/sites", { method: "POST", body: JSON.stringify({ name, domain }) }),
+    mutationFn: () => api<InsightSite>("/api/sites", { method: "POST", body: JSON.stringify({ name, domain, project_id: projectId }) }),
     onSuccess: async () => {
       setOpen(false);
       setName("");
@@ -83,7 +88,7 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
                   const to = `/analytics/${site.id}`;
                   return (
                     <tr key={site.id} className="clickable-row">
-                      <td className="cell-link"><Link className="row-link" to={to}>{site.name}</Link>{rowCover(to)}</td>
+                      <td className="cell-link"><Link className="row-link" to={to}>{site.name}</Link><ProjectTag id={site.project_id} />{rowCover(to)}</td>
                       <td className="cell-link">
                         {rowCover(to)}
                         <span className="inline-flex items-center gap-2">
@@ -105,6 +110,7 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
         <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
           <Field label="Name"><Input required value={name} onChange={(event) => setName(event.target.value)} placeholder="coolLabs website" /></Field>
           <Field label="Domain"><Input required value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="coolify.io" /></Field>
+          <ProjectField value={projectId} onChange={setProjectId} />
           <ErrorText error={create.error} />
           <Button variant="primary" type="submit" disabled={create.isPending}>Create site</Button>
         </form>

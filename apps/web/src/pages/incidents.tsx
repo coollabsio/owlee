@@ -3,8 +3,10 @@ import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Incident, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { formatTime, stateLabel } from "@/lib/utils";
 
 const statuses = ["investigating", "identified", "monitoring", "resolved"].map((item) => ({ value: item, label: stateLabel[item] }));
@@ -32,7 +34,8 @@ function CardText({ title, body }: { title: string; body?: string }) {
 }
 
 export function IncidentsPage() {
-  const query = useQuery({ queryKey: ["incidents"], queryFn: () => api<Incident[]>("/api/incidents") });
+  const scope = useListScope();
+  const query = useQuery({ queryKey: scope.key("incidents"), queryFn: () => api<Incident[]>(scope.path("/api/incidents")) });
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -78,6 +81,7 @@ export function IncidentsPage() {
                       <tr key={incident.id} className="clickable-row">
                         <td className="cell-link max-w-[28rem]">
                           <Link className="row-link" to={to}>{incident.title}</Link>
+                          <ProjectTag id={incident.project_id} />
                           {rowCover(to)}
                           <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{incident.updates.at(-1)?.message || "-"}</div>
                         </td>
@@ -194,8 +198,10 @@ export function IncidentDetailPage() {
 function IncidentDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate();
   const client = useQueryClient();
-  const pages = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages"), enabled: open });
-  const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors"), enabled: open });
+  const workspaceWide = useListScope({ allProjects: true });
+  const pages = useQuery({ queryKey: workspaceWide.key("pages"), queryFn: () => api<StatusPage[]>(workspaceWide.path("/api/pages")), enabled: open });
+  const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")), enabled: open });
+  const [projectId, setProjectId] = useProjectChoice();
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState("investigating");
@@ -214,6 +220,7 @@ function IncidentDialog({ open, onClose }: { open: boolean; onClose: () => void 
           impact,
           page_id: pageId || null,
           monitor_id: monitorId || null,
+          project_id: projectId,
         }),
       }),
     onSuccess: async (incident) => {
@@ -233,6 +240,7 @@ function IncidentDialog({ open, onClose }: { open: boolean; onClose: () => void 
     <Dialog open={open} onClose={onClose} title="Report an incident" description="The first message becomes the start of the public timeline.">
       <form className="space-y-3" onSubmit={submit}>
         <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
+        <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Status">
             <Select value={status} options={statuses} onChange={setStatus} aria-label="Status" />

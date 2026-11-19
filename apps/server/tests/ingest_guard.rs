@@ -17,6 +17,13 @@ use tower::ServiceExt;
 
 const BROWSER: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36";
 
+/// A signed-in user and the workspace and project their requests act in.
+struct Session {
+    cookie: String,
+    workspace: String,
+    project: String,
+}
+
 struct Hit {
     status: StatusCode,
     body: Value,
@@ -57,7 +64,7 @@ async fn send(
     method: &str,
     uri: &str,
     body: Vec<u8>,
-    cookie: Option<&str>,
+    session: Option<&Session>,
     extra: &[(&str, &str)],
 ) -> Hit {
     // The peer is a proxy on the Docker network, as with Traefik in Coolify.
@@ -66,8 +73,10 @@ async fn send(
         .method(method)
         .uri(uri)
         .extension(axum::extract::ConnectInfo(proxy));
-    if let Some(cookie) = cookie {
-        request = request.header("cookie", cookie);
+    if let Some(session) = session {
+        request = request
+            .header("cookie", &session.cookie)
+            .header("x-owlee-workspace", &session.workspace);
     }
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -109,9 +118,16 @@ async fn send(
     }
 }
 
-async fn owner(app: &Router, state: &AppState, setup_token: Option<&str>) -> String {
+/// The root user when setup is still open, so instance settings are reachable.
+/// On a reused Postgres database, a fresh editor instead.
+async fn owner(app: &Router, state: &AppState, setup_token: Option<&str>) -> Session {
     let Some(token) = setup_token else {
-        return editor_session(state).await.unwrap();
+        let session = editor_session(state).await.unwrap();
+        return Session {
+            cookie: session.cookie,
+            workspace: session.workspace_id.to_string(),
+            project: session.project_id.to_string(),
+        };
     };
     let body = json!({
         "token": token,
@@ -129,7 +145,19 @@ async fn owner(app: &Router, state: &AppState, setup_token: Option<&str>) -> Str
     )
     .await;
     assert!(hit.status.is_success(), "{} {}", hit.status, hit.body);
-    hit.cookie.expect("session")
+    let mut session = Session {
+        cookie: hit.cookie.expect("session"),
+        workspace: String::new(),
+        project: String::new(),
+    };
+    let me = send(app, "GET", "/api/auth/me", Vec::new(), Some(&session), &[]).await;
+    session.workspace = me.body["workspaces"][0]["id"]
+        .as_str()
+        .expect("workspace")
+        .to_owned();
+    let projects = send(app, "GET", "/api/projects", Vec::new(), Some(&session), &[]).await;
+    session.project = projects.body[0]["id"].as_str().expect("project").to_owned();
+    session
 }
 
 fn envelope(event_json: &str) -> Vec<u8> {
@@ -160,12 +188,12 @@ fn event(id: &str, message: &str) -> Value {
     })
 }
 
-async fn project(app: &Router, cookie: &str) -> (String, String) {
+async fn error_app(app: &Router, cookie: &Session) -> (String, String) {
     let hit = send(
         app,
         "POST",
-        "/api/error-projects",
-        json!({"name": "Checkout", "platform": "javascript"})
+        "/api/error-apps",
+        json!({"name": "Checkout", "platform": "javascript", "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(cookie),
@@ -213,7 +241,7 @@ async fn exercise(config: Config) {
 async fn oversized_body(config: &Config) {
     let (app, state, token) = boot_app(config.clone()).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     let mut huge = "x".repeat(config.ingest.error_max_body_bytes + 8);
     huge.insert_str(0, "{");
     let hit = post_event(&app, &id, &key, huge.into_bytes()).await;
@@ -225,7 +253,7 @@ async fn oversized_body(config: &Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": site_host()})
+        json!({"name": "Docs", "domain": site_host(), "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(&cookie),
@@ -289,7 +317,7 @@ async fn burst_is_429(mut config: Config) {
     config.ingest.error_rate_project_burst = 100;
     let (app, state, token) = boot_app(config).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     for index in 0..2 {
         let body = envelope(&event(&event_id(), "disk full").to_string());
         let hit = post_event(&app, &id, &key, body).await;
@@ -328,7 +356,7 @@ async fn wrong_origin(config: Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": site_host()})
+        json!({"name": "Docs", "domain": site_host(), "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(&cookie),
@@ -388,7 +416,7 @@ async fn flood_is_capped(config: Config) {
     let keep = config.ingest.error_keep_first;
     let (app, state, token) = boot_app(config).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     for _ in 0..8 {
         let body = envelope(&event(&event_id(), "disk full on volume 3").to_string());
         let hit = post_event(&app, &id, &key, body).await;
@@ -397,7 +425,7 @@ async fn flood_is_capped(config: Config) {
     let feed = send(
         &app,
         "GET",
-        &format!("/api/error-issues?project_id={id}"),
+        &format!("/api/error-issues?app_id={id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -424,7 +452,7 @@ async fn flood_is_capped(config: Config) {
 async fn retention_keeps_rollups(config: Config) {
     let (app, state, token) = boot_app(config).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     let first = post_event(
         &app,
         &id,
@@ -445,7 +473,7 @@ async fn retention_keeps_rollups(config: Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": site_host()})
+        json!({"name": "Docs", "domain": site_host(), "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(&cookie),
@@ -528,7 +556,7 @@ async fn retention_keeps_rollups(config: Config) {
     let feed = send(
         &app,
         "GET",
-        &format!("/api/error-issues?project_id={id}"),
+        &format!("/api/error-issues?app_id={id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -571,7 +599,7 @@ async fn quota_is_enforced(config: Config) {
     let (app, state, token) = boot_app(config).await;
     let root = token.is_some();
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     if root {
         let before = send(
             &app,
@@ -614,7 +642,7 @@ async fn quota_is_enforced(config: Config) {
     let current = send(
         &app,
         "GET",
-        &format!("/api/error-projects/{id}"),
+        &format!("/api/error-apps/{id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -658,20 +686,20 @@ async fn quota_is_enforced(config: Config) {
     let listed = send(
         &app,
         "GET",
-        "/api/error-projects",
+        "/api/error-apps",
         Vec::new(),
         Some(&cookie),
         &[],
     )
     .await;
-    let project = listed
+    let listed_app = listed
         .body
         .as_array()
         .unwrap()
         .iter()
         .find(|item| item["id"] == id)
         .unwrap();
-    assert_eq!(project["quotaExceeded"], true);
+    assert_eq!(listed_app["quotaExceeded"], true);
     sqlx::query("DELETE FROM ingest_usage WHERE subject_id = $1")
         .bind(&id)
         .execute(state.db.pool())
@@ -682,11 +710,11 @@ async fn quota_is_enforced(config: Config) {
 async fn override_replaces_the_global_cap(config: Config) {
     let (app, state, token) = boot_app(config).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
-    let (id, key) = project(&app, &cookie).await;
+    let (id, key) = error_app(&app, &cookie).await;
     let first = send(
         &app,
         "GET",
-        &format!("/api/error-projects/{id}"),
+        &format!("/api/error-apps/{id}"),
         Vec::new(),
         Some(&cookie),
         &[],
@@ -704,7 +732,7 @@ async fn override_replaces_the_global_cap(config: Config) {
     let set = send(
         &app,
         "PUT",
-        &format!("/api/error-projects/{id}/quota"),
+        &format!("/api/error-apps/{id}/quota"),
         json!({"daily_quota": 1}).to_string().into_bytes(),
         Some(&cookie),
         &[("content-type", "application/json")],
@@ -718,7 +746,7 @@ async fn override_replaces_the_global_cap(config: Config) {
         &app,
         &id,
         &key,
-        envelope(&event(&event_id(), "over the project cap").to_string()),
+        envelope(&event(&event_id(), "over the app cap").to_string()),
     )
     .await;
     assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
@@ -726,7 +754,7 @@ async fn override_replaces_the_global_cap(config: Config) {
         &app,
         &id,
         &key,
-        envelope(&event(&event_id(), "over the project cap").to_string()),
+        envelope(&event(&event_id(), "over the app cap").to_string()),
     )
     .await;
     assert_eq!(
@@ -766,7 +794,7 @@ async fn override_replaces_the_global_cap(config: Config) {
     let cleared = send(
         &app,
         "PUT",
-        &format!("/api/error-projects/{id}/quota"),
+        &format!("/api/error-apps/{id}/quota"),
         json!({"daily_quota": null}).to_string().into_bytes(),
         Some(&cookie),
         &[("content-type", "application/json")],
@@ -781,7 +809,7 @@ async fn override_replaces_the_global_cap(config: Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": domain.clone()})
+        json!({"name": "Docs", "domain": domain.clone(), "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(&cookie),
@@ -857,7 +885,7 @@ async fn txt_verification(mut config: Config) {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Example", "domain": domain.clone()})
+        json!({"name": "Example", "domain": domain.clone(), "project_id": cookie.project})
             .to_string()
             .into_bytes(),
         Some(&cookie),
@@ -933,7 +961,7 @@ async fn receive(app: &Router, public_id: &str, origin: &str) -> Hit {
     .await
 }
 
-async fn get_site(app: &Router, id: &str, cookie: &str) -> Value {
+async fn get_site(app: &Router, id: &str, cookie: &Session) -> Value {
     let hit = send(
         app,
         "GET",

@@ -24,14 +24,15 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         DEMO_EMAIL,
         "Test User",
         &hash,
-        "owner",
         now,
     )
     .await?;
     crate::setup::mark_initialized(&state.db, user_id, now).await?;
+    let scope = demo_scope(state, user_id, now).await?;
 
     let origin = state.config.public_origin.trim_end_matches('/');
     let api = monitor(
+        scope.api_project_id,
         "Coolify API",
         "Public API and health endpoint for the Coolify control plane.",
         JobType::Http,
@@ -46,6 +47,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         now,
     );
     let database = monitor(
+        scope.api_project_id,
         "PostgreSQL",
         "Primary database accept path. A TCP connect is enough to call it reachable.",
         JobType::Tcp,
@@ -60,6 +62,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         now,
     );
     let worker = monitor(
+        scope.website_project_id,
         "Webhook worker",
         "Background worker that delivers outbound hooks.",
         JobType::Http,
@@ -87,6 +90,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
 
     let page = Page {
         id: Id::new(),
+        project_id: scope.website_project_id,
         title: "coolLabs".to_owned(),
         description: "Status of Coolify and the services behind it.".to_owned(),
         slug: "coollabs".to_owned(),
@@ -114,6 +118,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
 
     let maintenance = Maintenance {
         id: Id::new(),
+        project_id: database.project_id,
         page_id: Some(page.id),
         title: "Database failover drill".to_owned(),
         message: "We will fail the primary over to the replica and watch replication catch up. Reads stay up; writes pause for a few minutes.".to_owned(),
@@ -126,6 +131,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
 
     let channel = Channel {
         id: Id::new(),
+        workspace_id: scope.workspace_id,
         name: "Ops email".to_owned(),
         provider: "email".to_owned(),
         config_json: format!(r#"{{"to":"{DEMO_EMAIL}"}}"#),
@@ -133,8 +139,8 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         created_at: now,
     };
     repo::insert_channel(&state.db, &channel, &[]).await?;
-    crate::insights::seed_demo(state).await?;
-    crate::errors::seed_demo(state).await?;
+    crate::insights::seed_demo(state, &scope).await?;
+    crate::errors::seed_demo(state, &scope).await?;
     let _ = repo::insert_audit(
         &state.db,
         Some(user_id),
@@ -147,7 +153,41 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
     Ok(true)
 }
 
+/// The demo workspace and its two projects. Every seed module writes into these.
+pub struct DemoScope {
+    pub workspace_id: Id,
+    pub website_project_id: Id,
+    pub api_project_id: Id,
+}
+
+async fn demo_scope(
+    state: &AppState,
+    user_id: Id,
+    now: TimestampMillis,
+) -> Result<DemoScope, AppError> {
+    let mut tx = state.db.begin_immediate().await?;
+    let created =
+        crate::workspaces::create_workspace(&mut tx, user_id, "coolLabs", "Website", now).await?;
+    let api_project_id = Id::new();
+    crate::workspaces::insert_project(
+        &mut tx,
+        api_project_id,
+        created.workspace_id,
+        "API",
+        "#0ea5e9",
+        now,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(DemoScope {
+        workspace_id: created.workspace_id,
+        website_project_id: created.project_id,
+        api_project_id,
+    })
+}
+
 fn monitor(
+    project_id: Id,
     name: &str,
     description: &str,
     job_type: JobType,
@@ -163,6 +203,7 @@ fn monitor(
 ) -> Monitor {
     Monitor {
         id: Id::new(),
+        project_id,
         name: name.to_owned(),
         description: description.to_owned(),
         job_type,
@@ -267,6 +308,7 @@ async fn insert_history(
 ) -> Result<(), AppError> {
     let incident = Incident {
         id: Id::new(),
+        project_id: api.project_id,
         page_id: Some(page_id),
         monitor_id: Some(api.id),
         title: "Elevated API latency".to_owned(),
@@ -329,6 +371,7 @@ async fn insert_open(
     let started = TimestampMillis::from_millis(now.as_millis() - 35 * 60_000);
     let incident = Incident {
         id: Id::new(),
+        project_id: worker.project_id,
         page_id: Some(page_id),
         monitor_id: Some(worker.id),
         title: "Webhook worker unreachable".to_owned(),

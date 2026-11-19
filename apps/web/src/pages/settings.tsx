@@ -15,11 +15,14 @@ import {
   revokeSession,
   type User,
 } from "@/lib/api";
-import { useMe } from "@/lib/me";
+import { useCanEdit, useMe } from "@/lib/me";
+import { useWorkspace, workspaceRoleLabel } from "@/lib/workspace";
 import { formatTime, timeAgo } from "@/lib/utils";
 
 export function SettingsPage() {
   const me = useMe();
+  const { workspace } = useWorkspace();
+  const canEdit = useCanEdit();
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const root = me.data?.root === true;
   const installationAdmin = me.data?.installation_admin === true;
@@ -38,10 +41,11 @@ export function SettingsPage() {
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
       <PageHeader title="Settings" description="This Owlee install and the signed-in operator." />
       <LayerCard title="Account" description="The operator signed in to this browser.">
-        <dl className="grid gap-4 sm:grid-cols-3">
+        <dl className="grid gap-4 sm:grid-cols-2">
           <Item label="Name">{me.data?.display_name ?? "…"}</Item>
           <Item label="Email">{me.data?.email ?? "…"}</Item>
-          <Item label="Role">{roleLabel(me.data)}</Item>
+          <Item label={`Role in ${workspace.name}`}>{workspaceRoleLabel[workspace.role]}</Item>
+          <Item label="Instance access">{instanceAccess(me.data)}</Item>
         </dl>
       </LayerCard>
       <PasswordCard />
@@ -65,7 +69,7 @@ export function SettingsPage() {
       {root ? <EmailCard settings={settings.data} /> : null}
       {root ? <QuotaCard settings={settings.data} /> : null}
       {installationAdmin ? <UsersCard users={users.data} error={users.error} canChange={root} /> : null}
-      {installationAdmin ? <PrivacyCard /> : null}
+      {canEdit ? <PrivacyCard workspaceName={workspace.name} /> : null}
     </div>
   );
 }
@@ -177,7 +181,7 @@ function QuotaForm({ settings }: { settings?: InstanceSettings }) {
   return (
     <LayerCard
       title="Ingest quotas"
-      description="A safety valve so a runaway client cannot fill the disk. Each project and site uses this number unless that project or site sets its own cap. Normal traffic should not reach it."
+      description="A safety valve so a runaway client cannot fill the disk. Each error app and site uses this number unless that app or site sets its own cap. Normal traffic should not reach it."
     >
       <form
         className="grid gap-3 sm:grid-cols-2"
@@ -186,7 +190,7 @@ function QuotaForm({ settings }: { settings?: InstanceSettings }) {
           save.mutate();
         }}
       >
-        <Field label="Errors per project per day" error={fields.error_daily}>
+        <Field label="Errors per app per day" error={fields.error_daily}>
           <Input
             inputMode="numeric"
             value={errorQuota}
@@ -213,10 +217,10 @@ function QuotaForm({ settings }: { settings?: InstanceSettings }) {
   );
 }
 
-function roleLabel(user: User | undefined) {
+function instanceAccess(user: User | undefined) {
   if (!user) return "…";
   if (user.root) return "Root";
-  return user.role.charAt(0).toUpperCase() + user.role.slice(1);
+  return user.installation_admin ? "Installation admin" : "None";
 }
 
 function RegistrationRow({ settings, error }: { settings?: InstanceSettings; error: unknown }) {
@@ -406,7 +410,7 @@ function UsersCard({
   );
 }
 
-function PrivacyCard() {
+function PrivacyCard({ workspaceName }: { workspaceName: string }) {
   const [user, setUser] = useState("");
   const [confirming, setConfirming] = useState(false);
   const exported = useMutation({
@@ -431,7 +435,7 @@ function PrivacyCard() {
   return (
     <LayerCard
       title="Privacy requests"
-      description="Export or erase the error events stored for one person. Analytics data cannot be tied to a person, so it needs no request."
+      description={`Export or erase the error events stored for one person in the apps of ${workspaceName}. Analytics data cannot be tied to a person, so it needs no request.`}
     >
       <form className="flex flex-col gap-3" onSubmit={submit}>
         <Field label="User" hint="Id, email, username, or IP address">

@@ -8,13 +8,15 @@ use serde_json::Value;
 use crate::repo::{self, Channel};
 use crate::state::AppState;
 
+/// Sends to the channels of the workspace that owns `project_id`.
 pub async fn fanout(
     state: &AppState,
     payload: &NotificationPayload,
+    project_id: Id,
     monitor_id: Option<Id>,
     incident_id: Option<Id>,
 ) {
-    let channels = match repo::channels_for_monitor(&state.db, monitor_id).await {
+    let channels = match repo::channels_for_monitor(&state.db, project_id, monitor_id).await {
         Ok(channels) => channels,
         Err(error) => {
             tracing::error!(%error, "loading notification channels");
@@ -139,7 +141,7 @@ async fn post_json(state: &AppState, url: &str, body: serde_json::Value) -> Resu
     }
 }
 
-async fn effective_smtp(state: &AppState) -> Option<owlee_platform::SmtpConfig> {
+pub(crate) async fn effective_smtp(state: &AppState) -> Option<owlee_platform::SmtpConfig> {
     match crate::instance_settings::load(&state.db, &state.config.app_key).await {
         Ok(settings) => settings
             .smtp

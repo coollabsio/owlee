@@ -1,14 +1,16 @@
-//! Demo error project and a few grouped events for `owlee seed`.
+//! Demo error apps and a few grouped events for `owlee seed`.
 use owlee_errors::normalize_event;
 use serde_json::{Value, json};
 
 use super::store;
 use crate::error::AppError;
+use crate::seed::DemoScope;
 use crate::state::AppState;
 
-pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
-    let project = store::create_project(&state.db, "Checkout", "php").await?;
-    let base = sample(&project.public_key, &project.id);
+pub async fn seed_demo(state: &AppState, scope: &DemoScope) -> Result<(), AppError> {
+    let checkout =
+        store::create_app(&state.db, scope.website_project_id, "Checkout", "php").await?;
+    let base = sample(&checkout.public_key, &checkout.id);
     for (id, message) in [
         ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "disk full on volume 3"),
         ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "disk full on volume 9"),
@@ -20,7 +22,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
         store::ingest_event(
             &state.db,
             &state.config.app_key,
-            &project,
+            &checkout,
             &normalize_event(event),
             1_000_000,
             state.config.ingest.error_keep_first,
@@ -54,22 +56,21 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
         "user": {"id": "42", "email": "ada@example.com"}
     });
     rust["event_id"] = json!("dddddddddddddddddddddddddddddddd");
-    let rust_project = store::create_project(&state.db, "API", "rust").await?;
+    let api = store::create_app(&state.db, scope.api_project_id, "API", "rust").await?;
     store::ingest_event(
         &state.db,
         &state.config.app_key,
-        &rust_project,
+        &api,
         &normalize_event(rust),
         1_000_000,
         state.config.ingest.error_keep_first,
         state.config.ingest.error_sample_window_secs,
     )
     .await?;
-    let _ = project;
     Ok(())
 }
 
-fn sample(key: &str, project_id: &str) -> Value {
+fn sample(key: &str, app_id: &str) -> Value {
     json!({
         "event_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "level": "error",
@@ -111,6 +112,6 @@ fn sample(key: &str, project_id: &str) -> Value {
         "contexts": {"runtime": {"name": "php", "version": "8.3"}},
         "user": {"id": "9", "email": "buyer@example.com"},
         "request": {"method": "POST", "url": "https://shop.example/pay"},
-        "extra": {"dsn_hint": format!("http://{key}@127.0.0.1/{project_id}")}
+        "extra": {"dsn_hint": format!("http://{key}@127.0.0.1/{app_id}")}
     })
 }

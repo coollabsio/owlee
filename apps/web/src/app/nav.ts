@@ -1,6 +1,7 @@
 import {
   Activity,
   Bell,
+  Briefcase,
   Bug,
   Category,
   CalendarDays,
@@ -73,7 +74,7 @@ export const products: Product[] = [
       {
         links: [
           { to: "/errors", label: "Issues", icon: Bug },
-          { to: "/error-projects", label: "Projects", icon: Element3 },
+          { to: "/errors/apps", label: "Apps", icon: Element3 },
         ],
       },
     ],
@@ -95,5 +96,6 @@ export const products: Product[] = [
 ];
 
 export const manage: NavLinkItem[] = [
-  { to: "/settings", label: "Settings", icon: Setting2 },
+  { to: "/settings/workspace", label: "Workspace", icon: Briefcase },
+  { to: "/settings", label: "Settings", icon: Setting2, end: true },
 ];

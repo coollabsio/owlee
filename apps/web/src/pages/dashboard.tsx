@@ -4,6 +4,7 @@ import { UptimeBars } from "@/components/charts";
 import { Empty, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
 import { api, type Overview } from "@/lib/api";
 import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
+import { useListScope } from "@/lib/workspace";
 
 function tone(state: string): "success" | "warning" | "error" | "neutral" | "info" {
   if (state === "up" || state === "resolved" || state === "success") return "success";
@@ -14,9 +15,10 @@ function tone(state: string): "success" | "warning" | "error" | "neutral" | "inf
 }
 
 export function DashboardPage() {
+  const scope = useListScope();
   const overview = useQuery({
-    queryKey: ["overview"],
-    queryFn: () => api<Overview>("/api/overview"),
+    queryKey: scope.key("overview"),
+    queryFn: () => api<Overview>(scope.path("/api/overview")),
     refetchInterval: 10_000,
   });
   const monitors = overview.data?.monitors ?? [];

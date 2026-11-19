@@ -4,18 +4,20 @@ use owlee_platform::Id;
 
 use super::record;
 use crate::error::AppError;
+use crate::seed::DemoScope;
 use crate::state::AppState;
 
-pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
+pub async fn seed_demo(state: &AppState, scope: &DemoScope) -> Result<(), AppError> {
     let now = now_secs();
     let salt = state.insights_salt.for_time(&state.db, now).await?;
     let site_id = Id::new().to_string();
     let public_id = "pub_coollabs_demo".to_owned();
     sqlx::query(
-        "INSERT INTO insight_sites (id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 1, 1, $7, $8)",
+        "INSERT INTO insight_sites (id, project_id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $9)",
     )
     .bind(&site_id)
+    .bind(scope.website_project_id.to_string())
     .bind(&public_id)
     .bind("coolLabs website")
     .bind("coolify.io")
@@ -28,9 +30,10 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
 
     let domain_id = Id::new().to_string();
     sqlx::query(
-        "INSERT INTO insight_domains (id, site_id, hostname, note, enabled, created_at) VALUES ($1, $2, $3, $4, 1, $5)",
+        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at) VALUES ($1, $2, $3, $4, $5, 1, $6)",
     )
     .bind(&domain_id)
+    .bind(scope.workspace_id.to_string())
     .bind(&site_id)
     .bind("go.owlee.test")
     .bind("Demo short domain. On this server, open /go/{slug}.")
@@ -40,6 +43,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
 
     let coolify = insert_link(
         state,
+        scope.website_project_id,
         &domain_id,
         "coolify",
         "https://coolify.io",
@@ -49,6 +53,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
     .await?;
     let docs = insert_link(
         state,
+        scope.api_project_id,
         &domain_id,
         "docs",
         "https://coolify.io/docs",
@@ -222,6 +227,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
 
 async fn insert_link(
     state: &AppState,
+    project_id: Id,
     domain_id: &str,
     slug: &str,
     destination: &str,
@@ -230,10 +236,11 @@ async fn insert_link(
 ) -> Result<String, AppError> {
     let id = Id::new().to_string();
     sqlx::query(
-        "INSERT INTO insight_links (id, domain_id, slug, destination, redirect_type, enabled, public_slug, public_sections, created_at) \
-         VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8)",
+        "INSERT INTO insight_links (id, project_id, domain_id, slug, destination, redirect_type, enabled, public_slug, public_sections, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9)",
     )
     .bind(&id)
+    .bind(project_id.to_string())
     .bind(domain_id)
     .bind(slug)
     .bind(destination)

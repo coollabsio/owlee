@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::http::header::{self, HeaderValue};
 use axum::http::StatusCode;
+use axum::http::header::{self, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use owlee_platform::Problem;
 
@@ -12,6 +12,8 @@ pub enum AppError {
     InvalidLogin,
     Forbidden(&'static str),
     NotFound,
+    /// No workspace header, or the user is not a member of that workspace.
+    WorkspaceNotFound,
     Busy,
     /// The Owlee host has no network, so a failed check proves nothing.
     Offline,
@@ -22,7 +24,9 @@ pub enum AppError {
     EmailNotConfigured,
     BadRequest(String),
     Validation(BTreeMap<String, String>),
-    TooManyRequests { retry_after_secs: u64 },
+    TooManyRequests {
+        retry_after_secs: u64,
+    },
     Internal,
 }
 
@@ -49,6 +53,7 @@ impl std::fmt::Display for AppError {
             Self::InvalidLogin => formatter.write_str("invalid login"),
             Self::Forbidden(detail) => write!(formatter, "forbidden: {detail}"),
             Self::NotFound => formatter.write_str("not found"),
+            Self::WorkspaceNotFound => formatter.write_str("workspace not found"),
             Self::Busy => formatter.write_str("check already running"),
             Self::Offline => formatter.write_str("status host has no network"),
             Self::Conflict(detail) => write!(formatter, "conflict: {detail}"),
@@ -96,6 +101,14 @@ impl IntoResponse for AppError {
                 fields: None,
             },
             Self::NotFound => Problem::not_found(),
+            Self::WorkspaceNotFound => Problem {
+                type_uri: "https://owlee.io/problems/workspace-not-found".to_owned(),
+                title: "Workspace not found".to_owned(),
+                status: 404,
+                code: "workspace_not_found".to_owned(),
+                detail: "Workspace not found.".to_owned(),
+                fields: None,
+            },
             Self::TooManyRequests { .. } => Problem {
                 type_uri: "https://owlee.io/problems/too-many-requests".to_owned(),
                 title: "Too many requests".to_owned(),

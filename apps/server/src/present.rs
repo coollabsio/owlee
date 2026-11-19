@@ -11,30 +11,35 @@ use crate::repo::{
     self, Audit, Channel, CheckRow, Component, DailyRow, Delivery, Incident, IncidentUpdate,
     Maintenance, Monitor, Page, StatusCount, User,
 };
+use crate::workspaces::WorkspaceAccess;
 
 #[derive(Serialize)]
 pub struct UserResponse {
     pub id: Id,
     pub email: String,
     pub display_name: String,
-    pub role: String,
     /// The account created at setup. It cannot be demoted.
     pub root: bool,
     /// Root, or an account the root user promoted. Can view the user list.
     pub installation_admin: bool,
+    pub workspaces: Vec<WorkspaceAccess>,
 }
 
 impl UserResponse {
     #[must_use]
-    pub fn with_access(user: &User, root_user_id: Option<Id>) -> Self {
+    pub fn with_access(
+        user: &User,
+        root_user_id: Option<Id>,
+        workspaces: Vec<WorkspaceAccess>,
+    ) -> Self {
         let root = root_user_id == Some(user.id);
         Self {
             id: user.id,
             email: user.email.clone(),
             display_name: user.display_name.clone(),
-            role: user.role.clone(),
             root,
-            installation_admin: root || user.role == "owner" || user.role == "admin",
+            installation_admin: root || user.installation_admin,
+            workspaces,
         }
     }
 }
@@ -63,6 +68,7 @@ pub struct CheckResponse {
 #[derive(Serialize)]
 pub struct MonitorResponse {
     pub id: Id,
+    pub project_id: Id,
     pub name: String,
     pub description: String,
     pub job_type: JobType,
@@ -118,6 +124,7 @@ pub fn monitor_response(
     let today_bucket = mine.iter().find(|count| count.day == today);
     MonitorResponse {
         id: monitor.id,
+        project_id: monitor.project_id,
         name: monitor.name.clone(),
         description: monitor.description.clone(),
         job_type: monitor.job_type,
@@ -216,6 +223,7 @@ pub fn day_label(day: i64) -> String {
 #[derive(Serialize)]
 pub struct PageResponse {
     pub id: Id,
+    pub project_id: Id,
     pub title: String,
     pub description: String,
     pub slug: String,
@@ -237,6 +245,7 @@ pub struct ComponentResponse {
 pub fn page_response(page: &Page, components: &[Component]) -> PageResponse {
     PageResponse {
         id: page.id,
+        project_id: page.project_id,
         title: page.title.clone(),
         description: page.description.clone(),
         slug: page.slug.clone(),
@@ -267,6 +276,7 @@ pub struct UpdateResponse {
 #[derive(Serialize)]
 pub struct IncidentResponse {
     pub id: Id,
+    pub project_id: Id,
     pub page_id: Option<Id>,
     pub monitor_id: Option<Id>,
     pub title: String,
@@ -281,6 +291,7 @@ pub struct IncidentResponse {
 pub fn incident_response(incident: &Incident, updates: &[IncidentUpdate]) -> IncidentResponse {
     IncidentResponse {
         id: incident.id,
+        project_id: incident.project_id,
         page_id: incident.page_id,
         monitor_id: incident.monitor_id,
         title: incident.title.clone(),
@@ -305,6 +316,7 @@ pub fn incident_response(incident: &Incident, updates: &[IncidentUpdate]) -> Inc
 #[derive(Serialize)]
 pub struct MaintenanceResponse {
     pub id: Id,
+    pub project_id: Id,
     pub page_id: Option<Id>,
     pub title: String,
     pub message: String,
@@ -321,6 +333,7 @@ pub fn maintenance_response(
     let now = now.as_millis();
     MaintenanceResponse {
         id: maintenance.id,
+        project_id: maintenance.project_id,
         page_id: maintenance.page_id,
         title: maintenance.title.clone(),
         message: maintenance.message.clone(),
@@ -429,6 +442,7 @@ const AGENT_ONLINE_MS: i64 = 30_000;
 #[derive(Serialize)]
 pub struct AgentResponse {
     pub id: Id,
+    pub project_id: Id,
     pub name: String,
     pub last_seen_at: Option<TimestampMillis>,
     pub online: bool,
@@ -441,6 +455,7 @@ impl From<&repo::Agent> for AgentResponse {
         let now = TimestampMillis::now().as_millis();
         Self {
             id: agent.id,
+            project_id: agent.project_id,
             name: agent.name.clone(),
             last_seen_at: agent.last_seen_at,
             online: agent

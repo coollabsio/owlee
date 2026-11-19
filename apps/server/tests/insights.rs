@@ -2,21 +2,16 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use owlee_platform::TimestampMillis;
-use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
+use owlee_server::{AppState, TestSession, boot, editor_session, router, testing_config};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn app() -> (Router, Option<String>) {
+async fn app() -> (Router, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owlee.sqlite");
     let _keep = Box::leak(Box::new(dir));
     let state = boot(testing_config(path)).await.unwrap();
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    (router(state), token)
+    (router(state.clone()), state)
 }
 
 async fn call(
@@ -24,15 +19,17 @@ async fn call(
     method: &str,
     uri: &str,
     body: Option<Value>,
-    cookie: Option<&str>,
+    session: Option<&TestSession>,
     user_agent: Option<&str>,
-) -> (StatusCode, Value, Option<String>, Option<String>) {
+) -> (StatusCode, Value, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri);
     if body.is_some() {
         request = request.header("content-type", "application/json");
     }
-    if let Some(cookie) = cookie {
-        request = request.header("cookie", cookie);
+    if let Some(session) = session {
+        request = request
+            .header("cookie", &session.cookie)
+            .header("x-owlee-workspace", session.workspace_id.to_string());
     }
     if let Some(user_agent) = user_agent {
         request = request.header("user-agent", user_agent);
@@ -52,9 +49,8 @@ async fn call(
         .await
         .unwrap();
     let status = response.status();
-    let headers = response.headers().clone();
-    let cookie = session_cookie(&headers);
-    let location = headers
+    let location = response
+        .headers()
         .get("location")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
@@ -65,22 +61,7 @@ async fn call(
         serde_json::from_slice(&bytes)
             .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
     };
-    (status, json, cookie, location)
-}
-
-fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
-    let pairs: Vec<&str> = headers
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(|value| value.split(';').next())
-        .collect();
-    pairs
-        .iter()
-        .copied()
-        .find(|value| value.starts_with("owlee_session="))
-        .or_else(|| pairs.first().copied())
-        .map(str::to_owned)
+    (status, json, location)
 }
 
 fn origin_for(body: &Value) -> Option<String> {
@@ -97,49 +78,35 @@ fn origin_for(body: &Value) -> Option<String> {
 const BROWSER: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36";
 const BOT: &str = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
 
-async fn owner(app: &Router, token: &str) -> String {
-    let (status, body, cookie, _) = call(
+async fn create_site(app: &Router, session: &TestSession, domain: &str) -> Value {
+    let (status, site, _) = call(
         app,
         "POST",
-        "/api/setup/complete",
-        Some(json!({
-            "token": token,
-            "email": "ada@coollabs.io",
-            "password": "correct-horse-battery",
-            "display_name": "Ada"
-        })),
-        None,
+        "/api/sites",
+        Some(json!({"project_id": session.project_id, "name": "Docs", "domain": domain})),
+        Some(session),
         Some(BROWSER),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    cookie.unwrap()
+    assert_eq!(status, StatusCode::CREATED, "{site}");
+    site
 }
 
 #[tokio::test]
 async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
-    let (app, token) = app().await;
-    let cookie = owner(&app, token.as_deref().expect("setup token")).await;
-    let (status, script, _, _) = call(&app, "GET", "/data.js", None, None, Some(BROWSER)).await;
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let (status, script, _) = call(&app, "GET", "/data.js", None, None, Some(BROWSER)).await;
     assert_eq!(status, StatusCode::OK);
     let script = script.as_str().unwrap_or("");
     assert!(script.contains("/api/receive"), "{script}");
     assert!(script.contains("window.owleeEvent"), "{script}");
 
-    let (status, site, _, _) = call(
-        &app,
-        "POST",
-        "/api/sites",
-        Some(json!({"name": "Docs", "domain": "coolify.io"})),
-        Some(&cookie),
-        Some(BROWSER),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{site}");
+    let site = create_site(&app, &editor, "coolify.io").await;
     let site_id = site["id"].as_str().unwrap();
     let public_id = site["public_id"].as_str().unwrap();
 
-    let (status, missing, _, _) = call(
+    let (status, missing, _) = call(
         &app,
         "POST",
         "/api/receive",
@@ -150,7 +117,7 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{missing}");
 
-    let (status, _, _, _) = call(
+    let (status, _, _) = call(
         &app,
         "POST",
         "/api/receive",
@@ -168,7 +135,7 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let (status, _, _, _) = call(
+    let (status, _, _) = call(
         &app,
         "POST",
         "/api/receive",
@@ -179,12 +146,12 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let (status, overview, _, _) = call(
+    let (status, overview, _) = call(
         &app,
         "GET",
         &format!("/api/sites/{site_id}/overview"),
         None,
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
@@ -192,53 +159,53 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
     assert_eq!(overview["pageviews"], 1, "bots are accepted and not stored");
     assert!(overview["series"].as_array().unwrap().len() > 1);
 
-    let (status, pages, _, _) = call(
+    let (status, pages, _) = call(
         &app,
         "GET",
         &format!("/api/sites/{site_id}/breakdown/path"),
         None,
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{pages}");
     assert_eq!(pages["rows"][0]["label"], "/docs", "{pages}");
 
-    let (status, domain, _, _) = call(
+    let (status, domain, _) = call(
         &app,
         "POST",
         "/api/domains",
         Some(json!({"hostname": "go.owlee.test", "enabled": true})),
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{domain}");
-    let (status, link, _, _) = call(
+    let (status, link, _) = call(
         &app,
         "POST",
         "/api/links",
         Some(json!({
+            "project_id": editor.project_id,
             "domain_id": domain["id"],
             "slug": "coolify",
             "destination": "https://coolify.io",
             "redirect_type": "temporary"
         })),
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{link}");
-    let (status, _, _, location) =
-        call(&app, "GET", "/go/coolify", None, None, Some(BROWSER)).await;
+    let (status, _, location) = call(&app, "GET", "/go/coolify", None, None, Some(BROWSER)).await;
     assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(location.as_deref(), Some("https://coolify.io"));
-    let (status, clicks, _, _) = call(
+    let (status, clicks, _) = call(
         &app,
         "GET",
         &format!("/api/links/{}/overview", link["id"].as_str().unwrap()),
         None,
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
@@ -248,19 +215,11 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
 
 #[tokio::test]
 async fn pageviews_filter_secrets_in_the_query_and_fragment() {
-    let (app, token) = app().await;
-    let cookie = owner(&app, token.as_deref().expect("setup token")).await;
-    let (_, site, _, _) = call(
-        &app,
-        "POST",
-        "/api/sites",
-        Some(json!({"name": "Docs", "domain": "coolify.io"})),
-        Some(&cookie),
-        Some(BROWSER),
-    )
-    .await;
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
     let site_id = site["id"].as_str().unwrap();
-    let (status, _, _, _) = call(
+    let (status, _, _) = call(
         &app,
         "POST",
         "/api/receive",
@@ -278,12 +237,12 @@ async fn pageviews_filter_secrets_in_the_query_and_fragment() {
         ("path", "/callback#access_token=[Filtered]&state=s"),
         ("query", "page=2&reset_token=[Filtered]"),
     ] {
-        let (status, rows, _, _) = call(
+        let (status, rows, _) = call(
             &app,
             "GET",
             &format!("/api/sites/{site_id}/breakdown/{dimension}"),
             None,
-            Some(&cookie),
+            Some(&editor),
             Some(BROWSER),
         )
         .await;
@@ -305,78 +264,271 @@ async fn postgres_collects_a_pageview_when_configured() {
     ));
     config.database_url = Some(url);
     let state = boot(config).await.expect("postgres boot");
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    let editor = match token {
-        Some(_) => None,
-        None => Some(editor_session(&state).await.unwrap()),
-    };
+    let editor = editor_session(&state).await.unwrap();
     let app = router(state);
-    let email = format!("insights-{}@coollabs.io", owlee_platform::Id::new());
-    let (status, _user, cookie, _) = if let Some(token) = token {
-        call(
-            &app,
-            "POST",
-            "/api/setup/complete",
-            Some(json!({
-                "token": token,
-                "email": email,
-                "password": "correct-horse-battery",
-                "display_name": "Postgres"
-            })),
-            None,
-            Some(BROWSER),
-        )
-        .await
-    } else {
-        let (status, user, _, location) = call(
-            &app,
-            "GET",
-            "/api/auth/me",
-            None,
-            editor.as_deref(),
-            Some(BROWSER),
-        )
-        .await;
-        (status, user, editor, location)
-    };
-    assert!(status.is_success(), "{status}");
-    let cookie = cookie.unwrap();
-    let (status, site, _, _) = call(
-        &app,
-        "POST",
-        "/api/sites",
-        Some(json!({"name": "PG", "domain": "postgres.owlee.test"})),
-        Some(&cookie),
-        Some(BROWSER),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{site}");
-    let (status, _, _, _) = call(
+    let domain = format!("pg-{}.owlee.test", owlee_platform::Id::new()).to_lowercase();
+    let site = create_site(&app, &editor, &domain).await;
+    let (status, _, _) = call(
         &app,
         "POST",
         "/api/receive",
         Some(json!({
             "site": site["public_id"],
             "type": "pageview",
-            "url": "https://postgres.owlee.test/ready"
+            "url": format!("https://{domain}/ready")
         })),
         None,
         Some(BROWSER),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    let (status, overview, _, _) = call(
+    let (status, overview, _) = call(
         &app,
         "GET",
         &format!("/api/sites/{}/overview", site["id"].as_str().unwrap()),
         None,
-        Some(&cookie),
+        Some(&editor),
         Some(BROWSER),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{overview}");
     assert_eq!(overview["pageviews"], 1);
+}
+
+#[tokio::test]
+async fn another_workspace_cannot_reach_insights_by_id() {
+    let (app, state) = app().await;
+    let owner = editor_session(&state).await.unwrap();
+    let outsider = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &owner, "coolify.io").await;
+    let site_id = site["id"].as_str().unwrap();
+    assert_eq!(site["project_id"], owner.project_id.to_string());
+    let (status, domain, _) = call(
+        &app,
+        "POST",
+        "/api/domains",
+        Some(json!({"hostname": "go.owlee.test", "site_id": site_id})),
+        Some(&owner),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{domain}");
+    let domain_id = domain["id"].as_str().unwrap();
+    let link_body = json!({
+        "project_id": owner.project_id,
+        "domain_id": domain_id,
+        "slug": "coolify",
+        "destination": "https://coolify.io"
+    });
+    let (status, link, _) = call(
+        &app,
+        "POST",
+        "/api/links",
+        Some(link_body.clone()),
+        Some(&owner),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    assert_eq!(link["project_id"], owner.project_id.to_string());
+    let link_id = link["id"].as_str().unwrap();
+
+    let site_body = json!({"name": "Stolen", "domain": "evil.test"});
+    for (method, uri, body) in [
+        ("GET", format!("/api/sites/{site_id}"), None),
+        ("GET", format!("/api/sites/{site_id}/overview"), None),
+        ("GET", format!("/api/sites/{site_id}/visitors"), None),
+        (
+            "GET",
+            format!("/api/sites/{site_id}/events/signup/properties"),
+            None,
+        ),
+        ("DELETE", format!("/api/sites/{site_id}/analytics"), None),
+        ("PUT", format!("/api/sites/{site_id}"), Some(site_body)),
+        ("DELETE", format!("/api/sites/{site_id}"), None),
+        ("GET", format!("/api/links/{link_id}/overview"), None),
+        (
+            "PUT",
+            format!("/api/links/{link_id}"),
+            Some(link_body.clone()),
+        ),
+        ("DELETE", format!("/api/links/{link_id}"), None),
+        ("DELETE", format!("/api/domains/{domain_id}"), None),
+    ] {
+        let (status, body, _) =
+            call(&app, method, &uri, body, Some(&outsider), Some(BROWSER)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {body}");
+    }
+
+    for (uri, body) in [
+        (
+            "/api/links",
+            json!({
+                "project_id": outsider.project_id,
+                "domain_id": domain_id,
+                "slug": "borrowed",
+                "destination": "https://coolify.io"
+            }),
+        ),
+        (
+            "/api/domains",
+            json!({"hostname": "go.evil.test", "site_id": site_id}),
+        ),
+        (
+            "/api/sites",
+            json!({"project_id": owner.project_id, "name": "Docs", "domain": "evil.test"}),
+        ),
+    ] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            uri,
+            Some(body),
+            Some(&outsider),
+            Some(BROWSER),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "cross-workspace POST {uri}: {body}"
+        );
+    }
+
+    for uri in ["/api/sites", "/api/links", "/api/domains"] {
+        let (status, rows, _) = call(&app, "GET", uri, None, Some(&outsider), Some(BROWSER)).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(rows, json!([]), "{uri} lists only the caller's workspace");
+    }
+    let (status, site, _) = call(
+        &app,
+        "GET",
+        &format!("/api/sites/{site_id}"),
+        None,
+        Some(&owner),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{site}");
+    assert_eq!(site["name"], "Docs", "the outsider's update did not land");
+}
+
+#[tokio::test]
+async fn project_filter_narrows_the_site_list() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let (status, project, _) = call(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(json!({"name": "Blog", "color": "#10b981"})),
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let blog = project["id"].as_str().unwrap();
+    let docs = create_site(&app, &editor, "coolify.io").await;
+    let (status, blog_site, _) = call(
+        &app,
+        "POST",
+        "/api/sites",
+        Some(json!({"project_id": blog, "name": "Blog", "domain": "blog.coolify.io"})),
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{blog_site}");
+
+    let ids = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let (_, all, _) = call(
+        &app,
+        "GET",
+        "/api/sites",
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(
+        ids(&all),
+        [
+            docs["id"].as_str().unwrap(),
+            blog_site["id"].as_str().unwrap()
+        ]
+    );
+    let (status, only_blog, _) = call(
+        &app,
+        "GET",
+        &format!("/api/sites?project={blog}"),
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{only_blog}");
+    assert_eq!(ids(&only_blog), [blog_site["id"].as_str().unwrap()]);
+
+    let outsider = editor_session(&state).await.unwrap();
+    let (status, _, _) = call(
+        &app,
+        "GET",
+        &format!("/api/sites?project={}", outsider.project_id),
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a foreign project filter is 404"
+    );
+}
+
+#[tokio::test]
+async fn another_workspace_cannot_take_a_go_slug() {
+    let (app, state) = app().await;
+    let owner = editor_session(&state).await.unwrap();
+    let outsider = editor_session(&state).await.unwrap();
+    let mut links = Vec::new();
+    for (session, hostname) in [(&owner, "go.owner.test"), (&outsider, "go.outsider.test")] {
+        let (status, domain, _) = call(
+            &app,
+            "POST",
+            "/api/domains",
+            Some(json!({"hostname": hostname})),
+            Some(session),
+            Some(BROWSER),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{domain}");
+        let (status, link, _) = call(
+            &app,
+            "POST",
+            "/api/links",
+            Some(json!({
+                "project_id": session.project_id,
+                "domain_id": domain["id"],
+                "slug": "launch",
+                "destination": format!("https://{hostname}/launch")
+            })),
+            Some(session),
+            Some(BROWSER),
+        )
+        .await;
+        links.push((status, link));
+    }
+    assert_eq!(links[0].0, StatusCode::CREATED, "{}", links[0].1);
+    assert_eq!(links[1].0, StatusCode::CONFLICT, "{}", links[1].1);
+
+    let (status, _, location) = call(&app, "GET", "/go/launch", None, None, Some(BROWSER)).await;
+    assert!(status.is_redirection(), "{status}");
+    assert_eq!(location.as_deref(), Some("https://go.owner.test/launch"));
 }

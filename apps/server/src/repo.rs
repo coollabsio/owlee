@@ -12,16 +12,39 @@ use serde::de::DeserializeOwned;
 use sqlx::{Any, Row, Transaction};
 
 const MONITOR_COLUMNS: &str = "\
-id, name, description, job_type, url, method, headers_json, body, timeout_ms, interval_seconds, \
-degraded_after_ms, expected_status, assertions_json, follow_redirects, failure_threshold, active, \
-state, consecutive_failures, last_checked_at, next_check_at, created_at, updated_at, agent_id, check_type";
+m.id, m.project_id, m.name, m.description, m.job_type, m.url, m.method, m.headers_json, m.body, \
+m.timeout_ms, m.interval_seconds, m.degraded_after_ms, m.expected_status, m.assertions_json, \
+m.follow_redirects, m.failure_threshold, m.active, m.state, m.consecutive_failures, m.last_checked_at, \
+m.next_check_at, m.created_at, m.updated_at, m.agent_id, m.check_type";
+
+/// `column` names a project inside the workspace bound at `$n`, and the project
+/// bound at `$n + 1` when `project` is set. Bind them with `bind_scope`.
+fn in_scope(column: &str, n: usize, project: Option<Id>) -> String {
+    let mut sql = format!("{column} IN (SELECT id FROM projects WHERE workspace_id = ${n})");
+    if project.is_some() {
+        sql.push_str(&format!(" AND {column} = ${}", n + 1));
+    }
+    sql
+}
+
+fn bind_scope<'q>(
+    query: sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>>,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> sqlx::query::Query<'q, Any, sqlx::any::AnyArguments<'q>> {
+    let query = query.bind(workspace_id.to_string());
+    match project {
+        Some(project_id) => query.bind(project_id.to_string()),
+        None => query,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct User {
     pub id: Id,
     pub email: String,
     pub display_name: String,
-    pub role: String,
+    pub installation_admin: bool,
     pub password_hash: String,
     #[allow(dead_code)]
     pub created_at: TimestampMillis,
@@ -30,6 +53,7 @@ pub struct User {
 #[derive(Clone, Debug)]
 pub struct Monitor {
     pub id: Id,
+    pub project_id: Id,
     pub name: String,
     pub description: String,
     pub job_type: JobType,
@@ -60,6 +84,7 @@ pub struct Monitor {
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub id: Id,
+    pub project_id: Id,
     pub name: String,
     pub last_seen_at: Option<TimestampMillis>,
     pub created_at: TimestampMillis,
@@ -105,6 +130,7 @@ pub struct StatusCount {
 #[derive(Clone, Debug)]
 pub struct Page {
     pub id: Id,
+    pub project_id: Id,
     pub title: String,
     pub description: String,
     pub slug: String,
@@ -128,6 +154,7 @@ pub struct Component {
 #[derive(Clone, Debug)]
 pub struct Incident {
     pub id: Id,
+    pub project_id: Id,
     pub page_id: Option<Id>,
     pub monitor_id: Option<Id>,
     pub title: String,
@@ -152,6 +179,7 @@ pub struct IncidentUpdate {
 #[derive(Clone, Debug)]
 pub struct Maintenance {
     pub id: Id,
+    pub project_id: Id,
     pub page_id: Option<Id>,
     pub title: String,
     pub message: String,
@@ -164,6 +192,7 @@ pub struct Maintenance {
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub id: Id,
+    pub workspace_id: Id,
     pub name: String,
     pub provider: String,
     pub config_json: String,
@@ -202,7 +231,7 @@ pub async fn count_users(db: &Database) -> Result<i64, sqlx::Error> {
 
 pub async fn user_by_email(db: &Database, email: &str) -> Result<Option<User>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, email, display_name, role, password_hash, created_at FROM users WHERE normalized_email = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE normalized_email = $1",
     )
     .bind(email)
     .fetch_optional(db.pool())
@@ -215,38 +244,40 @@ pub struct Account {
     pub id: Id,
     pub email: String,
     pub display_name: String,
-    pub role: String,
+    pub installation_admin: bool,
 }
 
 pub async fn list_accounts(db: &Database) -> Result<Vec<Account>, sqlx::Error> {
-    let rows =
-        sqlx::query("SELECT id, email, display_name, role FROM users ORDER BY created_at, id")
-            .fetch_all(db.pool())
-            .await?;
+    let rows = sqlx::query(
+        "SELECT id, email, display_name, installation_admin FROM users ORDER BY created_at, id",
+    )
+    .fetch_all(db.pool())
+    .await?;
     rows.iter()
         .map(|row| {
             Ok(Account {
                 id: parse_id(row, "id")?,
                 email: row.try_get("email")?,
                 display_name: row.try_get("display_name")?,
-                role: row.try_get("role")?,
+                installation_admin: row.try_get::<i64, _>("installation_admin")? != 0,
             })
         })
         .collect()
 }
 
-pub async fn set_user_role(
+pub async fn set_installation_admin(
     db: &Database,
     id: Id,
-    role: &str,
+    admin: bool,
     now: TimestampMillis,
 ) -> Result<bool, sqlx::Error> {
-    let updated = sqlx::query("UPDATE users SET role = $1, updated_at = $2 WHERE id = $3")
-        .bind(role)
-        .bind(now.as_millis())
-        .bind(id.to_string())
-        .execute(db.pool())
-        .await?;
+    let updated =
+        sqlx::query("UPDATE users SET installation_admin = $1, updated_at = $2 WHERE id = $3")
+            .bind(i64::from(admin))
+            .bind(now.as_millis())
+            .bind(id.to_string())
+            .execute(db.pool())
+            .await?;
     Ok(updated.rows_affected() == 1)
 }
 
@@ -257,19 +288,17 @@ pub async fn insert_user(
     normalized: &str,
     display_name: &str,
     password_hash: &str,
-    role: &str,
     now: TimestampMillis,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, role, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
+        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $6)",
     )
     .bind(id.to_string())
     .bind(email)
     .bind(normalized)
     .bind(display_name)
     .bind(password_hash)
-    .bind(role)
     .bind(now.as_millis())
     .execute(db.pool())
     .await?;
@@ -335,7 +364,7 @@ pub async fn authenticate(
         .await?;
     }
     let user = sqlx::query(
-        "SELECT id, email, display_name, role, password_hash, created_at FROM users WHERE id = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE id = $1",
     )
     .bind(&user_id)
     .fetch_optional(db.pool())
@@ -358,7 +387,7 @@ pub async fn revoke_token(
 
 pub async fn user_by_id(db: &Database, id: Id) -> Result<Option<User>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, email, display_name, role, password_hash, created_at FROM users WHERE id = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE id = $1",
     )
     .bind(id.to_string())
     .fetch_optional(db.pool())
@@ -510,22 +539,46 @@ pub async fn consume_email_token(
     }))
 }
 
-pub async fn list_monitors(db: &Database) -> Result<Vec<Monitor>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
-        "SELECT {MONITOR_COLUMNS} FROM monitors ORDER BY lower(name), id"
-    ))
-    .fetch_all(db.pool())
-    .await?;
+pub async fn list_monitors(
+    db: &Database,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> Result<Vec<Monitor>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {MONITOR_COLUMNS} FROM monitors m WHERE {} ORDER BY lower(m.name), m.id",
+        in_scope("m.project_id", 1, project)
+    );
+    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
+        .fetch_all(db.pool())
+        .await?;
     rows.iter().map(map_monitor).collect()
 }
 
+/// Any monitor by id. Handlers use `workspace_monitor` instead.
 pub async fn get_monitor(db: &Database, id: Id) -> Result<Option<Monitor>, sqlx::Error> {
     let row = sqlx::query(&format!(
-        "SELECT {MONITOR_COLUMNS} FROM monitors WHERE id = $1"
+        "SELECT {MONITOR_COLUMNS} FROM monitors m WHERE m.id = $1"
     ))
     .bind(id.to_string())
     .fetch_optional(db.pool())
     .await?;
+    row.as_ref().map(map_monitor).transpose()
+}
+
+pub async fn workspace_monitor(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Monitor>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {MONITOR_COLUMNS} FROM monitors m WHERE m.id = $1 AND {}",
+        in_scope("m.project_id", 2, None)
+    );
+    let row = sqlx::query(&sql)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
     row.as_ref().map(map_monitor).transpose()
 }
 
@@ -535,9 +588,10 @@ pub async fn insert_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
         "INSERT INTO monitors (\
             id, name, description, job_type, url, method, headers_json, body, timeout_ms, interval_seconds, \
             degraded_after_ms, expected_status, assertions_json, follow_redirects, failure_threshold, active, \
-            state, consecutive_failures, last_checked_at, next_check_at, created_at, updated_at, agent_id, check_type\
+            state, consecutive_failures, last_checked_at, next_check_at, created_at, updated_at, agent_id, check_type, \
+            project_id\
          ) VALUES (\
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24\
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25\
          )",
     )
     .bind(monitor.id.to_string())
@@ -564,6 +618,7 @@ pub async fn insert_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
     .bind(monitor.updated_at.as_millis())
     .bind(monitor.agent_id.map(|id| id.to_string()))
     .bind(monitor.check_type.map(CheckType::as_str))
+    .bind(monitor.project_id.to_string())
     .execute(db.pool())
     .await?;
     Ok(())
@@ -618,9 +673,14 @@ pub async fn set_active(
     Ok(())
 }
 
-pub async fn delete_monitor(db: &Database, id: Id) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM monitors WHERE id = $1")
+pub async fn delete_monitor(db: &Database, workspace_id: Id, id: Id) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "DELETE FROM monitors WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let result = sqlx::query(&sql)
         .bind(id.to_string())
+        .bind(workspace_id.to_string())
         .execute(db.pool())
         .await?;
     Ok(result.rows_affected() > 0)
@@ -632,9 +692,9 @@ pub async fn due_monitors(
     limit: i64,
 ) -> Result<Vec<Monitor>, sqlx::Error> {
     let rows = sqlx::query(&format!(
-        "SELECT {MONITOR_COLUMNS} FROM monitors \
-         WHERE active = 1 AND agent_id IS NULL AND next_check_at <= $1 \
-         ORDER BY next_check_at LIMIT $2"
+        "SELECT {MONITOR_COLUMNS} FROM monitors m \
+         WHERE m.active = 1 AND m.agent_id IS NULL AND m.next_check_at <= $1 \
+         ORDER BY m.next_check_at LIMIT $2"
     ))
     .bind(now)
     .bind(limit)
@@ -662,52 +722,73 @@ pub async fn claim_monitor(
 }
 
 const AGENT_COLUMNS: &str = "\
-a.id, a.name, a.last_seen_at, a.created_at, \
+a.id, a.project_id, a.name, a.last_seen_at, a.created_at, \
 (SELECT COUNT(*) FROM monitors m WHERE m.agent_id = a.id) AS monitor_count";
 
-pub async fn list_agents(db: &Database) -> Result<Vec<Agent>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
-        "SELECT {AGENT_COLUMNS} FROM agents a ORDER BY lower(a.name), a.id"
-    ))
-    .fetch_all(db.pool())
-    .await?;
+pub async fn list_agents(
+    db: &Database,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> Result<Vec<Agent>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {AGENT_COLUMNS} FROM agents a WHERE {} ORDER BY lower(a.name), a.id",
+        in_scope("a.project_id", 1, project)
+    );
+    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
+        .fetch_all(db.pool())
+        .await?;
     rows.iter().map(map_agent).collect()
 }
 
-pub async fn get_agent(db: &Database, id: Id) -> Result<Option<Agent>, sqlx::Error> {
-    let row = sqlx::query(&format!(
-        "SELECT {AGENT_COLUMNS} FROM agents a WHERE a.id = $1"
-    ))
-    .bind(id.to_string())
-    .fetch_optional(db.pool())
-    .await?;
+pub async fn workspace_agent(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Agent>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {AGENT_COLUMNS} FROM agents a WHERE a.id = $1 AND {}",
+        in_scope("a.project_id", 2, None)
+    );
+    let row = sqlx::query(&sql)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
     row.as_ref().map(map_agent).transpose()
 }
 
-pub async fn agent_by_name(db: &Database, name: &str) -> Result<Option<Agent>, sqlx::Error> {
-    let row = sqlx::query(&format!(
-        "SELECT {AGENT_COLUMNS} FROM agents a WHERE lower(a.name) = lower($1)"
-    ))
-    .bind(name)
-    .fetch_optional(db.pool())
-    .await?;
-    row.as_ref().map(map_agent).transpose()
+pub async fn agent_name_taken(
+    db: &Database,
+    project_id: Id,
+    name: &str,
+) -> Result<bool, sqlx::Error> {
+    let row =
+        sqlx::query("SELECT id FROM agents WHERE project_id = $1 AND lower(name) = lower($2)")
+            .bind(project_id.to_string())
+            .bind(name)
+            .fetch_optional(db.pool())
+            .await?;
+    Ok(row.is_some())
 }
 
 pub async fn insert_agent(
     db: &Database,
     id: Id,
+    project_id: Id,
     name: &str,
     token_hash: &str,
     now: TimestampMillis,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO agents (id, name, token_hash, created_at) VALUES ($1, $2, $3, $4)")
-        .bind(id.to_string())
-        .bind(name)
-        .bind(token_hash)
-        .bind(now.as_millis())
-        .execute(db.pool())
-        .await?;
+    sqlx::query(
+        "INSERT INTO agents (id, project_id, name, token_hash, created_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id.to_string())
+    .bind(project_id.to_string())
+    .bind(name)
+    .bind(token_hash)
+    .bind(now.as_millis())
+    .execute(db.pool())
+    .await?;
     Ok(())
 }
 
@@ -726,14 +807,14 @@ pub struct AgentCheck {
 /// active, and the agent's other monitors are paused so their history stays.
 pub async fn sync_agent_checks(
     db: &Database,
-    agent_id: Id,
+    agent: &Agent,
     checks: &[AgentCheck],
     now: TimestampMillis,
 ) -> Result<Vec<(String, Id)>, sqlx::Error> {
     let existing = sqlx::query(&format!(
-        "SELECT {MONITOR_COLUMNS} FROM monitors WHERE agent_id = $1"
+        "SELECT {MONITOR_COLUMNS} FROM monitors m WHERE m.agent_id = $1"
     ))
-    .bind(agent_id.to_string())
+    .bind(agent.id.to_string())
     .fetch_all(db.pool())
     .await?
     .iter()
@@ -744,6 +825,7 @@ pub async fn sync_agent_checks(
         let previous = existing.iter().find(|monitor| monitor.name == check.name);
         let monitor = Monitor {
             id: previous.map_or_else(Id::new, |monitor| monitor.id),
+            project_id: agent.project_id,
             name: check.name.clone(),
             description: String::new(),
             job_type: check.check_type.job_type(),
@@ -765,7 +847,7 @@ pub async fn sync_agent_checks(
             next_check_at: now,
             created_at: previous.map_or(now, |monitor| monitor.created_at),
             updated_at: now,
-            agent_id: Some(agent_id),
+            agent_id: Some(agent.id),
             check_type: Some(check.check_type),
         };
         if previous.is_some() {
@@ -1004,32 +1086,46 @@ pub async fn prune(db: &Database, older_than: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-pub async fn list_pages(db: &Database) -> Result<Vec<Page>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, title, description, slug, published, homepage_url, created_at, updated_at \
-         FROM status_pages ORDER BY lower(title)",
-    )
-    .fetch_all(db.pool())
-    .await?;
+const PAGE_COLUMNS: &str =
+    "id, project_id, title, description, slug, published, homepage_url, created_at, updated_at";
+
+pub async fn list_pages(
+    db: &Database,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> Result<Vec<Page>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {PAGE_COLUMNS} FROM status_pages WHERE {} ORDER BY lower(title)",
+        in_scope("project_id", 1, project)
+    );
+    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
+        .fetch_all(db.pool())
+        .await?;
     rows.iter().map(map_page).collect()
 }
 
-pub async fn get_page(db: &Database, id: Id) -> Result<Option<Page>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT id, title, description, slug, published, homepage_url, created_at, updated_at \
-         FROM status_pages WHERE id = $1",
-    )
-    .bind(id.to_string())
-    .fetch_optional(db.pool())
-    .await?;
+pub async fn workspace_page(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Page>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {PAGE_COLUMNS} FROM status_pages WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let row = sqlx::query(&sql)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
     row.as_ref().map(map_page).transpose()
 }
 
+/// Slugs are global because they route public traffic.
 pub async fn page_by_slug(db: &Database, slug: &str) -> Result<Option<Page>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT id, title, description, slug, published, homepage_url, created_at, updated_at \
-         FROM status_pages WHERE slug = $1",
-    )
+    let row = sqlx::query(&format!(
+        "SELECT {PAGE_COLUMNS} FROM status_pages WHERE slug = $1"
+    ))
     .bind(slug)
     .fetch_optional(db.pool())
     .await?;
@@ -1038,10 +1134,11 @@ pub async fn page_by_slug(db: &Database, slug: &str) -> Result<Option<Page>, sql
 
 pub async fn insert_page(db: &Database, page: &Page) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO status_pages (id, title, description, slug, published, homepage_url, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO status_pages (id, project_id, title, description, slug, published, homepage_url, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(page.id.to_string())
+    .bind(page.project_id.to_string())
     .bind(&page.title)
     .bind(&page.description)
     .bind(&page.slug)
@@ -1071,9 +1168,14 @@ pub async fn update_page(db: &Database, page: &Page) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
-pub async fn delete_page(db: &Database, id: Id) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM status_pages WHERE id = $1")
+pub async fn delete_page(db: &Database, workspace_id: Id, id: Id) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "DELETE FROM status_pages WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let result = sqlx::query(&sql)
         .bind(id.to_string())
+        .bind(workspace_id.to_string())
         .execute(db.pool())
         .await?;
     Ok(result.rows_affected() > 0)
@@ -1130,24 +1232,48 @@ pub async fn replace_components(
     Ok(())
 }
 
-pub async fn list_incidents(db: &Database) -> Result<Vec<Incident>, sqlx::Error> {
-    let rows = sqlx::query(&incident_select("1 = 1"))
+pub async fn list_incidents(
+    db: &Database,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> Result<Vec<Incident>, sqlx::Error> {
+    let sql = incident_select(&in_scope("project_id", 1, project));
+    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
         .fetch_all(db.pool())
         .await?;
     rows.iter().map(map_incident).collect()
 }
 
-pub async fn get_incident(db: &Database, id: Id) -> Result<Option<Incident>, sqlx::Error> {
-    let row = sqlx::query(&incident_select("id = $1"))
+pub async fn workspace_incident(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Incident>, sqlx::Error> {
+    let sql = incident_select(&format!("id = $1 AND {}", in_scope("project_id", 2, None)));
+    let row = sqlx::query(&sql)
         .bind(id.to_string())
+        .bind(workspace_id.to_string())
         .fetch_optional(db.pool())
         .await?;
     row.as_ref().map(map_incident).transpose()
 }
 
+pub async fn delete_incident(db: &Database, workspace_id: Id, id: Id) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "DELETE FROM incidents WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let result = sqlx::query(&sql)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn incidents_for_page(db: &Database, page_id: Id) -> Result<Vec<Incident>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
+        "SELECT id, project_id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
          FROM incidents WHERE page_id = $1 OR monitor_id IN \
          (SELECT monitor_id FROM page_components WHERE page_id = $1) \
          ORDER BY started_at DESC LIMIT 40",
@@ -1197,10 +1323,11 @@ pub async fn insert_incident(
     update: &IncidentUpdate,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO incidents (id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO incidents (id, project_id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(incident.id.to_string())
+    .bind(incident.project_id.to_string())
     .bind(incident.page_id.map(|id| id.to_string()))
     .bind(incident.monitor_id.map(|id| id.to_string()))
     .bind(&incident.title)
@@ -1252,12 +1379,19 @@ pub async fn apply_incident_status(
     Ok(())
 }
 
-pub async fn list_maintenances(db: &Database) -> Result<Vec<Maintenance>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, page_id, title, message, starts_at, ends_at, created_at FROM maintenances ORDER BY starts_at DESC",
-    )
-    .fetch_all(db.pool())
-    .await?;
+pub async fn list_maintenances(
+    db: &Database,
+    workspace_id: Id,
+    project: Option<Id>,
+) -> Result<Vec<Maintenance>, sqlx::Error> {
+    let sql = format!(
+        "SELECT id, project_id, page_id, title, message, starts_at, ends_at, created_at FROM maintenances \
+         WHERE {} ORDER BY starts_at DESC",
+        in_scope("project_id", 1, project)
+    );
+    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
+        .fetch_all(db.pool())
+        .await?;
     let mut maintenances = Vec::new();
     for row in &rows {
         maintenances.push(map_maintenance(db, row).await?);
@@ -1270,7 +1404,7 @@ pub async fn maintenances_for_page(
     page_id: Id,
 ) -> Result<Vec<Maintenance>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, page_id, title, message, starts_at, ends_at, created_at FROM maintenances \
+        "SELECT id, project_id, page_id, title, message, starts_at, ends_at, created_at FROM maintenances \
          WHERE page_id = $1 ORDER BY starts_at DESC LIMIT 20",
     )
     .bind(page_id.to_string())
@@ -1289,10 +1423,11 @@ pub async fn insert_maintenance(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query(
-        "INSERT INTO maintenances (id, page_id, title, message, starts_at, ends_at, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
+        "INSERT INTO maintenances (id, project_id, page_id, title, message, starts_at, ends_at, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
     )
     .bind(maintenance.id.to_string())
+    .bind(maintenance.project_id.to_string())
     .bind(maintenance.page_id.map(|id| id.to_string()))
     .bind(&maintenance.title)
     .bind(&maintenance.message)
@@ -1314,9 +1449,18 @@ pub async fn insert_maintenance(
     Ok(())
 }
 
-pub async fn delete_maintenance(db: &Database, id: Id) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM maintenances WHERE id = $1")
+pub async fn delete_maintenance(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "DELETE FROM maintenances WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let result = sqlx::query(&sql)
         .bind(id.to_string())
+        .bind(workspace_id.to_string())
         .execute(db.pool())
         .await?;
     Ok(result.rows_affected() > 0)
@@ -1342,20 +1486,29 @@ pub async fn in_maintenance(db: &Database, monitor_id: Id, now: i64) -> Result<b
     Ok(count > 0)
 }
 
-pub async fn list_channels(db: &Database) -> Result<Vec<Channel>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, name, provider, config_json, enabled, created_at FROM notifications ORDER BY lower(name)",
-    )
+const CHANNEL_COLUMNS: &str =
+    "n.id, n.workspace_id, n.name, n.provider, n.config_json, n.enabled, n.created_at";
+
+pub async fn list_channels(db: &Database, workspace_id: Id) -> Result<Vec<Channel>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT {CHANNEL_COLUMNS} FROM notifications n WHERE n.workspace_id = $1 ORDER BY lower(n.name)"
+    ))
+    .bind(workspace_id.to_string())
     .fetch_all(db.pool())
     .await?;
     rows.iter().map(map_channel).collect()
 }
 
-pub async fn get_channel(db: &Database, id: Id) -> Result<Option<Channel>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT id, name, provider, config_json, enabled, created_at FROM notifications WHERE id = $1",
-    )
+pub async fn workspace_channel(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Channel>, sqlx::Error> {
+    let row = sqlx::query(&format!(
+        "SELECT {CHANNEL_COLUMNS} FROM notifications n WHERE n.id = $1 AND n.workspace_id = $2"
+    ))
     .bind(id.to_string())
+    .bind(workspace_id.to_string())
     .fetch_optional(db.pool())
     .await?;
     row.as_ref().map(map_channel).transpose()
@@ -1377,10 +1530,11 @@ pub async fn insert_channel(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query(
-        "INSERT INTO notifications (id, name, provider, config_json, enabled, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $6)",
+        "INSERT INTO notifications (id, workspace_id, name, provider, config_json, enabled, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
     )
     .bind(channel.id.to_string())
+    .bind(channel.workspace_id.to_string())
     .bind(&channel.name)
     .bind(&channel.provider)
     .bind(&channel.config_json)
@@ -1420,41 +1574,36 @@ pub async fn update_channel(
     Ok(())
 }
 
-pub async fn delete_channel(db: &Database, id: Id) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM notifications WHERE id = $1")
+pub async fn delete_channel(db: &Database, workspace_id: Id, id: Id) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM notifications WHERE id = $1 AND workspace_id = $2")
         .bind(id.to_string())
+        .bind(workspace_id.to_string())
         .execute(db.pool())
         .await?;
     Ok(result.rows_affected() > 0)
 }
 
+/// The enabled channels of the project's workspace that want events about
+/// `monitor_id`: those linked to it, and those linked to no monitor.
 pub async fn channels_for_monitor(
     db: &Database,
+    project_id: Id,
     monitor_id: Option<Id>,
 ) -> Result<Vec<Channel>, sqlx::Error> {
-    let rows = match monitor_id {
-        Some(monitor_id) => {
-            sqlx::query(
-                "SELECT id, name, provider, config_json, enabled, created_at FROM notifications n \
-                 WHERE enabled = 1 AND ( \
-                    NOT EXISTS (SELECT 1 FROM notification_monitors nm WHERE nm.notification_id = n.id) \
-                    OR EXISTS (SELECT 1 FROM notification_monitors nm WHERE nm.notification_id = n.id AND nm.monitor_id = $1) \
-                 )",
-            )
-            .bind(monitor_id.to_string())
-            .fetch_all(db.pool())
-            .await?
-        }
-        None => {
-            sqlx::query(
-                "SELECT id, name, provider, config_json, enabled, created_at FROM notifications n \
-                 WHERE enabled = 1 AND NOT EXISTS \
-                 (SELECT 1 FROM notification_monitors nm WHERE nm.notification_id = n.id)",
-            )
-            .fetch_all(db.pool())
-            .await?
-        }
-    };
+    let sql = format!(
+        "SELECT {CHANNEL_COLUMNS} FROM notifications n \
+         WHERE n.enabled = 1 \
+         AND n.workspace_id = (SELECT workspace_id FROM projects WHERE id = $1) \
+         AND ( \
+            NOT EXISTS (SELECT 1 FROM notification_monitors nm WHERE nm.notification_id = n.id) \
+            OR EXISTS (SELECT 1 FROM notification_monitors nm WHERE nm.notification_id = n.id AND nm.monitor_id = $2) \
+         )"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(project_id.to_string())
+        .bind(monitor_id.map(|id| id.to_string()).unwrap_or_default())
+        .fetch_all(db.pool())
+        .await?;
     rows.iter().map(map_channel).collect()
 }
 
@@ -1535,11 +1684,16 @@ pub async fn insert_audit(
     Ok(())
 }
 
-pub async fn recent_audit(db: &Database, limit: i64) -> Result<Vec<Audit>, sqlx::Error> {
+pub async fn recent_audit(
+    db: &Database,
+    workspace_id: Id,
+    limit: i64,
+) -> Result<Vec<Audit>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, actor_id, action, resource_type, resource_id, occurred_at FROM audit_events \
-         ORDER BY occurred_at DESC LIMIT $1",
+         WHERE workspace_id = $1 ORDER BY occurred_at DESC LIMIT $2",
     )
+    .bind(workspace_id.to_string())
     .bind(limit)
     .fetch_all(db.pool())
     .await?;
@@ -1592,7 +1746,7 @@ async fn link_channel_monitors(
 
 fn incident_select(filter: &str) -> String {
     format!(
-        "SELECT id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
+        "SELECT id, project_id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
          FROM incidents WHERE {filter} ORDER BY started_at DESC LIMIT 100"
     )
 }
@@ -1613,6 +1767,7 @@ async fn map_maintenance(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Maintenance {
         id,
+        project_id: parse_id(row, "project_id")?,
         page_id: optional_id(row, "page_id")?,
         title: row.try_get("title")?,
         message: row.try_get("message")?,
@@ -1628,7 +1783,7 @@ fn map_user(row: &sqlx::any::AnyRow) -> Result<User, sqlx::Error> {
         id: parse_id(row, "id")?,
         email: row.try_get("email")?,
         display_name: row.try_get("display_name")?,
-        role: row.try_get("role")?,
+        installation_admin: row.try_get::<i64, _>("installation_admin")? != 0,
         password_hash: row.try_get("password_hash")?,
         created_at: millis(row, "created_at")?,
     })
@@ -1639,6 +1794,7 @@ fn map_monitor(row: &sqlx::any::AnyRow) -> Result<Monitor, sqlx::Error> {
     let state = row.try_get::<String, _>("state")?;
     Ok(Monitor {
         id: parse_id(row, "id")?,
+        project_id: parse_id(row, "project_id")?,
         name: row.try_get("name")?,
         description: row.try_get("description")?,
         job_type: JobType::parse(&job_type)
@@ -1675,6 +1831,7 @@ fn map_monitor(row: &sqlx::any::AnyRow) -> Result<Monitor, sqlx::Error> {
 fn map_agent(row: &sqlx::any::AnyRow) -> Result<Agent, sqlx::Error> {
     Ok(Agent {
         id: parse_id(row, "id")?,
+        project_id: parse_id(row, "project_id")?,
         name: row.try_get("name")?,
         last_seen_at: optional_millis(row, "last_seen_at")?,
         created_at: millis(row, "created_at")?,
@@ -1685,6 +1842,7 @@ fn map_agent(row: &sqlx::any::AnyRow) -> Result<Agent, sqlx::Error> {
 fn map_page(row: &sqlx::any::AnyRow) -> Result<Page, sqlx::Error> {
     Ok(Page {
         id: parse_id(row, "id")?,
+        project_id: parse_id(row, "project_id")?,
         title: row.try_get("title")?,
         description: row.try_get("description")?,
         slug: row.try_get("slug")?,
@@ -1700,6 +1858,7 @@ fn map_incident(row: &sqlx::any::AnyRow) -> Result<Incident, sqlx::Error> {
     let impact = row.try_get::<String, _>("impact")?;
     Ok(Incident {
         id: parse_id(row, "id")?,
+        project_id: parse_id(row, "project_id")?,
         page_id: optional_id(row, "page_id")?,
         monitor_id: optional_id(row, "monitor_id")?,
         title: row.try_get("title")?,
@@ -1717,6 +1876,7 @@ fn map_incident(row: &sqlx::any::AnyRow) -> Result<Incident, sqlx::Error> {
 fn map_channel(row: &sqlx::any::AnyRow) -> Result<Channel, sqlx::Error> {
     Ok(Channel {
         id: parse_id(row, "id")?,
+        workspace_id: parse_id(row, "workspace_id")?,
         name: row.try_get("name")?,
         provider: row.try_get("provider")?,
         config_json: row.try_get("config_json")?,
@@ -1733,7 +1893,7 @@ fn parse_incident_status(value: &str) -> Result<IncidentStatus, sqlx::Error> {
     IncidentStatus::parse(value).ok_or_else(|| corrupt(format!("incident status {value}")))
 }
 
-fn parse_id(row: &sqlx::any::AnyRow, name: &str) -> Result<Id, sqlx::Error> {
+pub(crate) fn parse_id(row: &sqlx::any::AnyRow, name: &str) -> Result<Id, sqlx::Error> {
     let value: String = row.try_get(name)?;
     value
         .parse()
@@ -1751,7 +1911,7 @@ fn optional_id(row: &sqlx::any::AnyRow, name: &str) -> Result<Option<Id>, sqlx::
         .transpose()
 }
 
-fn millis(row: &sqlx::any::AnyRow, name: &str) -> Result<TimestampMillis, sqlx::Error> {
+pub(crate) fn millis(row: &sqlx::any::AnyRow, name: &str) -> Result<TimestampMillis, sqlx::Error> {
     Ok(TimestampMillis::from_millis(row.try_get(name)?))
 }
 

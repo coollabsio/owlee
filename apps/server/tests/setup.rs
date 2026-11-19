@@ -1,11 +1,11 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
 use owlee_platform::TimestampMillis;
 use owlee_server::{
     SetupError, boot, initialize_setup_token, rotate_setup_token, router, testing_config,
 };
-use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -122,7 +122,9 @@ async fn setup_succeeds_once_and_public_signup_stays_closed() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{user}");
-    assert_eq!(user["role"], "owner");
+    assert!(user.get("role").is_none(), "{user}");
+    assert_eq!(user["workspaces"][0]["name"], "My workspace");
+    assert_eq!(user["workspaces"][0]["role"], "owner");
     assert_eq!(user["root"], true);
     assert_eq!(user["installation_admin"], true);
     assert_eq!(user["email"], "owner@coollabs.io");
@@ -251,7 +253,7 @@ async fn rotate_issues_a_new_unused_token_and_refuses_after_setup() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{user}");
     assert!(cookie.is_some());
-    assert_eq!(user["role"], "owner");
+    assert_eq!(user["root"], true);
 
     let error = rotate_setup_token(&db, now).await.unwrap_err();
     assert!(matches!(error, SetupError::AlreadyComplete));

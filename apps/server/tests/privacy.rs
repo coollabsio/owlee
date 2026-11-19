@@ -6,7 +6,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use owlee_platform::Config;
-use owlee_server::{AppState, boot, editor_session, member_session, router, testing_config};
+use owlee_server::{
+    AppState, TestSession, boot, editor_session, member_session, router, testing_config,
+};
 use serde_json::{Value, json};
 use sqlx::Row;
 use tower::ServiceExt;
@@ -28,7 +30,7 @@ async fn send(
     method: &str,
     uri: &str,
     body: Value,
-    cookie: Option<&str>,
+    session: Option<&TestSession>,
     extra: &[(&str, &str)],
 ) -> (StatusCode, Value) {
     let proxy = std::net::SocketAddr::from(([10, 0, 0, 2], 40000));
@@ -37,8 +39,10 @@ async fn send(
         .uri(uri)
         .header("content-type", "application/json")
         .extension(axum::extract::ConnectInfo(proxy));
-    if let Some(cookie) = cookie {
-        request = request.header("cookie", cookie);
+    if let Some(session) = session {
+        request = request
+            .header("cookie", &session.cookie)
+            .header("x-owlee-workspace", session.workspace_id.to_string());
     }
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -93,6 +97,23 @@ async fn store_event(app: &Router, project: &str, key: &str, event: Value) {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+async fn create_app(app: &Router, session: &TestSession, name: &str) -> (String, String) {
+    let (status, created) = send(
+        app,
+        "POST",
+        "/api/error-apps",
+        json!({"name": name, "platform": "javascript", "project_id": session.project_id}),
+        Some(session),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    (
+        created["id"].as_str().unwrap().to_owned(),
+        created["publicKey"].as_str().unwrap().to_owned(),
+    )
+}
+
 async fn stored(state: &AppState, id: &str) -> (String, Value) {
     let row = sqlx::query("SELECT user_key, payload FROM events WHERE id = $1")
         .bind(id)
@@ -112,19 +133,9 @@ async fn error_events_are_scrubbed_hashed_exported_and_erased() {
     let state = boot(config.clone()).await.unwrap();
     let app = router(state.clone());
     let admin = editor_session(&state).await.unwrap();
-    let member = member_session(&state).await.unwrap();
-    let (status, project) = send(
-        &app,
-        "POST",
-        "/api/error-projects",
-        json!({"name": "Shop", "platform": "javascript"}),
-        Some(&admin),
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{project}");
-    let project_id = project["id"].as_str().unwrap();
-    let key = project["publicKey"].as_str().unwrap();
+    let member = member_session(&state, admin.workspace_id).await.unwrap();
+    let (app_id, key) = create_app(&app, &admin, "Shop").await;
+    let (project_id, key) = (app_id.as_str(), key.as_str());
 
     let ada = "a".repeat(32);
     let anonymous = "b".repeat(32);
@@ -183,8 +194,8 @@ async fn error_events_are_scrubbed_hashed_exported_and_erased() {
     let events = body["events"].as_array().unwrap();
     assert_eq!(events.len(), 1, "{body}");
     assert_eq!(events[0]["id"], ada.as_str());
-    assert_eq!(events[0]["projectId"], project_id);
-    assert_eq!(events[0]["projectName"], "Shop");
+    assert_eq!(events[0]["appId"], project_id);
+    assert_eq!(events[0]["appName"], "Shop");
     assert_eq!(events[0]["title"], "Error: card declined");
     assert_eq!(events[0]["payload"]["user"]["email"], "ada@example.com");
 
@@ -218,7 +229,15 @@ async fn error_events_are_scrubbed_hashed_exported_and_erased() {
     assert_eq!(body["events"][0]["id"], carol.as_str(), "{body}");
     let (_, body) = send(&app, "DELETE", by_email, Value::Null, Some(&admin), &[]).await;
     assert_eq!(body, json!({"deleted": 1}));
-    let (_, body) = send(&app, "GET", "/api/privacy/errors?user=7", Value::Null, Some(&admin), &[]).await;
+    let (_, body) = send(
+        &app,
+        "GET",
+        "/api/privacy/errors?user=7",
+        Value::Null,
+        Some(&admin),
+        &[],
+    )
+    .await;
     assert_eq!(body["events"], json!([]));
 
     // A row from before the privacy migration: plain key cleared, raw payload.
@@ -269,7 +288,7 @@ async fn analytics_salt_rotates_monthly_and_drops_older_salts() {
         &app,
         "POST",
         "/api/sites",
-        json!({"name": "Docs", "domain": host}),
+        json!({"name": "Docs", "domain": host, "project_id": admin.project_id}),
         Some(&admin),
         &[],
     )
@@ -314,4 +333,47 @@ async fn analytics_salt_rotates_monthly_and_drops_older_salts() {
         session,
         owlee_insights::session_id(&salt, site_id, "10.0.0.2", BROWSER, timestamp)
     );
+}
+
+/// A request in one workspace finds and erases only that workspace's events,
+/// even when the same person appears in another.
+#[tokio::test]
+async fn privacy_requests_stay_inside_the_workspace() {
+    let state = boot(config()).await.unwrap();
+    let app = router(state.clone());
+    let first = editor_session(&state).await.unwrap();
+    let second = editor_session(&state).await.unwrap();
+    let (first_app, first_key) = create_app(&app, &first, "Shop").await;
+    let (second_app, second_key) = create_app(&app, &second, "Blog").await;
+    let in_first = "d".repeat(32);
+    let in_second = "e".repeat(32);
+    let ada = json!({"email": "ada@example.com"});
+    store_event(
+        &app,
+        &first_app,
+        &first_key,
+        failure(&in_first, ada.clone()),
+    )
+    .await;
+    store_event(&app, &second_app, &second_key, failure(&in_second, ada)).await;
+
+    let export = "/api/privacy/errors?user=ada%40example.com";
+    let (status, body) = send(&app, "GET", export, Value::Null, Some(&second), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [in_second.as_str()]);
+    assert_eq!(body["events"][0]["appName"], "Blog");
+
+    let (status, body) = send(&app, "DELETE", export, Value::Null, Some(&second), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"deleted": 1}));
+    assert_eq!(stored(&state, &in_first).await.0, ADA_KEY);
+    let (_, body) = send(&app, "GET", export, Value::Null, Some(&first), &[]).await;
+    assert_eq!(body["events"][0]["id"], in_first.as_str(), "{body}");
+    assert_eq!(body["events"].as_array().unwrap().len(), 1);
 }

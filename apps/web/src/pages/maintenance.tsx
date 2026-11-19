@@ -1,16 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, Textarea } from "@/components/ui";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Maintenance, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { formatTime, fromLocalInput, toLocalInput } from "@/lib/utils";
 
 export function MaintenancePage() {
   const client = useQueryClient();
   const canEdit = useCanEdit();
-  const query = useQuery({ queryKey: ["maintenances"], queryFn: () => api<Maintenance[]>("/api/maintenances") });
-  const pages = useQuery({ queryKey: ["pages"], queryFn: () => api<StatusPage[]>("/api/pages") });
-  const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => api<Monitor[]>("/api/monitors") });
+  const scope = useListScope();
+  const workspaceWide = useListScope({ allProjects: true });
+  const query = useQuery({ queryKey: scope.key("maintenances"), queryFn: () => api<Maintenance[]>(scope.path("/api/maintenances")) });
+  const pages = useQuery({ queryKey: workspaceWide.key("pages"), queryFn: () => api<StatusPage[]>(workspaceWide.path("/api/pages")) });
+  const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
+  const [projectId, setProjectId] = useProjectChoice();
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
   const [pageId, setPageId] = useState("");
@@ -29,6 +34,7 @@ export function MaintenancePage() {
           monitor_ids: monitorId ? [monitorId] : [],
           starts_at: fromLocalInput(starts),
           ends_at: fromLocalInput(ends),
+          project_id: projectId,
         }),
       }),
     onSuccess: async () => {
@@ -75,7 +81,7 @@ export function MaintenancePage() {
                   {windows.map((item) => (
                     <tr key={item.id}>
                       <td className="max-w-[24rem]">
-                        <div className="font-medium text-[var(--ui-fg)]">{item.title}</div>
+                        <div className="font-medium text-[var(--ui-fg)]">{item.title}<ProjectTag id={item.project_id} /></div>
                         <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{item.message || "-"}</div>
                         <div className="text-[11px] text-[var(--ui-fg-faint)] md:hidden">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</div>
                       </td>
@@ -99,6 +105,7 @@ export function MaintenancePage() {
           <form className="space-y-3" onSubmit={submit}>
             <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
             <Field label="Message" error={fields.message}><Textarea value={message} onChange={(event) => setMessage(event.target.value)} required /></Field>
+            <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
             <Field label="Status page" error={fields.page_id}>
               <Select
                 value={pageId}

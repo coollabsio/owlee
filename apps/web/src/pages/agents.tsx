@@ -1,20 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, Empty, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
-import { ApiError, createAgent, type CreatedAgent, deleteAgent, listAgents } from "@/lib/api";
+import { ProjectField, ProjectTag } from "@/components/project";
+import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { timeAgo } from "@/lib/utils";
 
 export function AgentsPage() {
   const client = useQueryClient();
   const canEdit = useCanEdit();
-  const query = useQuery({ queryKey: ["agents"], queryFn: listAgents, refetchInterval: 10_000 });
+  const scope = useListScope();
+  const query = useQuery({ queryKey: scope.key("agents"), queryFn: () => api<Agent[]>(scope.path("/api/agents")), refetchInterval: 10_000 });
   const [name, setName] = useState("");
+  const [projectId, setProjectId] = useProjectChoice();
   const [fields, setFields] = useState<Record<string, string>>({});
   const [created, setCreated] = useState<CreatedAgent | null>(null);
   const [search, setSearch] = useState("");
   const save = useMutation({
-    mutationFn: () => createAgent(name),
+    mutationFn: () => createAgent({ name, project_id: projectId }),
     onSuccess: async (agent) => {
       setName("");
       setCreated(agent);
@@ -42,7 +46,7 @@ export function AgentsPage() {
         {query.isLoading ? (
           <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading agents…</p>
         ) : (query.data?.length ?? 0) === 0 ? (
-          <Empty title="No agents" body="Add one, list the checks in its config file, and run it next to the services you want to check. Its checks show up under Monitors." />
+          <Empty title="No agents" body="Add one, list the checks in its config file, and run it next to the services you want to check. Its checks show up under Monitors, in the agent's project." />
         ) : (
           <LayerCard title="All agents" flush>
             <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
@@ -62,7 +66,7 @@ export function AgentsPage() {
                 <tbody>
                   {agents.map((agent) => (
                     <tr key={agent.id}>
-                      <td className="font-medium text-[var(--ui-fg)]">{agent.name}</td>
+                      <td className="font-medium text-[var(--ui-fg)]">{agent.name}<ProjectTag id={agent.project_id} /></td>
                       <td><StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge></td>
                       <td className="hidden sm:table-cell">{agent.monitor_count}</td>
                       <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
@@ -92,6 +96,7 @@ export function AgentsPage() {
               <Field label="Name" error={fields.name}>
                 <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="office-vpc" required />
               </Field>
+              <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
               <ErrorText error={fields.name ? null : save.error} />
               <div className="flex justify-end">
                 <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? "Saving…" : "Add agent"}</Button>

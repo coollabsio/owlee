@@ -7,7 +7,6 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::http::{Method, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
-use axum_extra::extract::cookie::CookieJar;
 use http_body_util::BodyExt;
 use isbot::Bots;
 use owlee_insights::{
@@ -26,8 +25,8 @@ use super::record;
 use crate::error::AppError;
 use crate::peer::Client;
 use crate::quota;
-use crate::routes::{require_editor, require_user};
 use crate::state::AppState;
+use crate::workspaces::{Member, ProjectFilter, require_project};
 
 const SCRIPT: &str = include_str!("tracker.js");
 
@@ -490,6 +489,14 @@ struct SiteBody {
     color: Option<String>,
 }
 
+/// Create bodies add the immutable owning project to the update body.
+#[derive(Deserialize)]
+struct Create<T> {
+    project_id: String,
+    #[serde(flatten)]
+    body: T,
+}
+
 #[derive(Deserialize)]
 struct DomainBody {
     hostname: String,
@@ -523,16 +530,26 @@ struct RangeQuery {
 
 async fn list_sites(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    let rows = sqlx::query(
-        "SELECT id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, created_at, \
-         verified, verify_token, verified_at, daily_quota \
-         FROM insight_sites ORDER BY created_at",
-    )
-    .fetch_all(state.db.pool())
-    .await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let sql = format!(
+        "SELECT s.id, s.project_id, s.public_id, s.name, s.domain, s.color, s.public_slug, s.public_enabled, \
+         s.public_threshold, s.public_sections, s.created_at, s.verified, s.verify_token, s.verified_at, s.daily_quota \
+         FROM insight_sites s JOIN projects p ON p.id = s.project_id \
+         WHERE p.workspace_id = $1{} ORDER BY s.created_at",
+        if project.is_some() {
+            " AND s.project_id = $2"
+        } else {
+            ""
+        },
+    );
+    let mut query = sqlx::query(&sql).bind(member.workspace_id.to_string());
+    if let Some(project) = project {
+        query = query.bind(project.to_string());
+    }
+    let rows = query.fetch_all(state.db.pool()).await?;
     let mut sites = Vec::with_capacity(rows.len());
     for row in &rows {
         sites.push(site_json(&state, row).await?);
@@ -542,10 +559,11 @@ async fn list_sites(
 
 async fn create_site(
     State(state): State<AppState>,
-    jar: CookieJar,
-    Json(body): Json<SiteBody>,
+    member: Member,
+    Json(Create { project_id, body }): Json<Create<SiteBody>>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = owning_project(&state.db, &member, &project_id).await?;
     let id = Id::new().to_string();
     let public_id = public_token();
     let name = field("name", clean_name(&body.name))?;
@@ -559,10 +577,11 @@ async fn create_site(
         .unwrap_or_else(|_| format!("site-{}", &id[id.len().saturating_sub(6)..]));
     let verify_token = generate_token();
     sqlx::query(
-        "INSERT INTO insight_sites (id, public_id, name, domain, color, public_slug, public_sections, created_at, verify_token) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO insight_sites (id, project_id, public_id, name, domain, color, public_slug, public_sections, created_at, verify_token) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(&id)
+    .bind(project_id.to_string())
     .bind(&public_id)
     .bind(&name)
     .bind(&domain)
@@ -579,20 +598,21 @@ async fn create_site(
 
 async fn get_site(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     Ok(Json(fetch_site(&state, &id).await?))
 }
 
 async fn update_site(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<SiteBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let name = field("name", clean_name(&body.name))?;
     let domain = field("domain", clean_host(&body.domain))?;
     let color = match body.color {
@@ -621,10 +641,11 @@ async fn update_site(
 
 async fn delete_site(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let changed = sqlx::query("DELETE FROM insight_sites WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -638,11 +659,11 @@ async fn delete_site(
 
 async fn reset_site(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     for sql in [
         "DELETE FROM insight_events WHERE site_id = $1",
         "DELETE FROM insight_visits WHERE site_id = $1",
@@ -657,11 +678,12 @@ async fn reset_site(
 
 async fn update_site_public(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<PublicBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     save_public(
         &state.db,
         "UPDATE insight_sites SET public_enabled = $1, public_slug = $2, public_threshold = $3, public_sections = $4 WHERE id = $5",
@@ -675,23 +697,21 @@ async fn update_site_public(
 
 async fn site_overview(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     Ok(Json(site_totals(&state.db, &id, range).await?))
 }
 
 async fn site_breakdown(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path((id, dimension)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     Ok(Json(
         json!({ "rows": breakdown(&state.db, "site_id", &id, &dimension, range, "pageview").await? }),
     ))
@@ -699,11 +719,10 @@ async fn site_breakdown(
 
 async fn site_realtime(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let now = now_secs();
     let current: i64 = scalar(
         &state.db,
@@ -757,12 +776,11 @@ async fn site_realtime(
 
 async fn site_vitals(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let bounds = Bounds::resolve(range.from, range.to, now_secs());
     let rows = sqlx::query(
         "SELECT device, lcp, inp, cls, fcp, ttfb FROM insight_events \
@@ -805,12 +823,11 @@ async fn site_vitals(
 
 async fn site_events(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_site(&state, &id).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let bounds = Bounds::resolve(range.from, range.to, now_secs());
     let rows = sqlx::query(
         "SELECT event_type AS name, CAST(COUNT(*) AS BIGINT) AS count, \
@@ -841,11 +858,11 @@ async fn site_events(
 
 async fn event_properties(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path((id, name)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let bounds = Bounds::resolve(range.from, range.to, now_secs());
     let rows = sqlx::query(
         "SELECT key, string_value, CAST(COUNT(*) AS BIGINT) AS count FROM insight_event_data \
@@ -878,11 +895,11 @@ async fn event_properties(
 
 async fn site_visitors(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let bounds = Bounds::resolve(range.from, range.to, now_secs());
     let rows = sqlx::query(
         "SELECT session_id AS id, CAST(MIN(timestamp) AS BIGINT) AS first_seen, CAST(MAX(timestamp) AS BIGINT) AS last_seen, \
@@ -911,10 +928,10 @@ async fn site_visitors(
 
 async fn visitor_detail(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path((id, visitor_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let rows = sqlx::query(
         "SELECT timestamp, event_type, pathname, title, metadata, country, region, city, browser, os, device, screen, language \
          FROM insight_events WHERE site_id = $1 AND session_id = $2 ORDER BY timestamp",
@@ -959,12 +976,13 @@ async fn visitor_detail(
 
 async fn list_domains(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
     let rows = sqlx::query(
-        "SELECT id, site_id, hostname, note, enabled, created_at FROM insight_domains ORDER BY hostname",
+        "SELECT id, site_id, hostname, note, enabled, created_at FROM insight_domains \
+         WHERE workspace_id = $1 ORDER BY hostname",
     )
+    .bind(member.workspace_id.to_string())
     .fetch_all(state.db.pool())
     .await?;
     let mut output = Vec::new();
@@ -976,20 +994,25 @@ async fn list_domains(
 
 async fn create_domain(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<DomainBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
     let id = Id::new().to_string();
     let hostname = field("hostname", clean_host(&body.hostname))?;
     let note = body.note.unwrap_or_default();
     if note.chars().count() > 200 {
         return Err(AppError::field("note", "Use at most 200 characters."));
     }
+    if let Some(site_id) = &body.site_id {
+        require_site(&state.db, member.workspace_id, site_id).await?;
+    }
     sqlx::query(
-        "INSERT INTO insight_domains (id, site_id, hostname, note, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&id)
+    .bind(member.workspace_id.to_string())
     .bind(&body.site_id)
     .bind(&hostname)
     .bind(&note)
@@ -1006,12 +1029,16 @@ async fn create_domain(
 
 async fn update_domain(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<DomainBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_domain(&state.db, member.workspace_id, &id).await?;
     let hostname = field("hostname", clean_host(&body.hostname))?;
+    if let Some(site_id) = &body.site_id {
+        require_site(&state.db, member.workspace_id, site_id).await?;
+    }
     let changed = sqlx::query(
         "UPDATE insight_domains SET hostname = $1, note = $2, enabled = $3, site_id = $4 WHERE id = $5",
     )
@@ -1032,10 +1059,11 @@ async fn update_domain(
 
 async fn delete_domain(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_domain(&state.db, member.workspace_id, &id).await?;
     let changed = sqlx::query("DELETE FROM insight_domains WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -1049,41 +1077,62 @@ async fn delete_domain(
 
 async fn list_links(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    Ok(Json(Value::Array(link_rows(&state.db, None).await?)))
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let sql = format!(
+        "{LINK_SELECT} JOIN projects p ON p.id = l.project_id \
+         WHERE p.workspace_id = $1{} GROUP BY l.id, d.hostname ORDER BY l.created_at DESC",
+        if project.is_some() {
+            " AND l.project_id = $2"
+        } else {
+            ""
+        },
+    );
+    let mut query = sqlx::query(&sql).bind(member.workspace_id.to_string());
+    if let Some(project) = project {
+        query = query.bind(project.to_string());
+    }
+    let rows = query.fetch_all(state.db.pool()).await?;
+    Ok(Json(Value::Array(
+        rows.iter().map(link_json).collect::<Result<_, _>>()?,
+    )))
 }
 
 async fn create_link(
     State(state): State<AppState>,
-    jar: CookieJar,
-    Json(body): Json<LinkBody>,
+    member: Member,
+    Json(Create { project_id, body }): Json<Create<LinkBody>>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    require_editor(&state, &jar).await?;
-    let id = insert_link(&state.db, &body).await?;
+    member.require_editor()?;
+    let project_id = owning_project(&state.db, &member, &project_id).await?;
+    require_domain(&state.db, member.workspace_id, &body.domain_id).await?;
+    let id = insert_link(&state.db, project_id, &body).await?;
     Ok((StatusCode::CREATED, Json(fetch_link(&state.db, &id).await?)))
 }
 
 async fn get_link(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     Ok(Json(fetch_link(&state.db, &id).await?))
 }
 
 async fn update_link(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<LinkBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     let slug = field("slug", clean_slug(&body.slug))?;
     let destination = field("destination", clean_destination(&body.destination))?;
     let redirect_type = redirect_type(body.redirect_type.as_deref())?;
+    require_domain(&state.db, member.workspace_id, &body.domain_id).await?;
     let changed = sqlx::query(
         "UPDATE insight_links SET domain_id = $1, slug = $2, destination = $3, redirect_type = $4, enabled = $5 WHERE id = $6",
     )
@@ -1105,10 +1154,11 @@ async fn update_link(
 
 async fn delete_link(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     let changed = sqlx::query("DELETE FROM insight_links WHERE id = $1")
         .bind(id)
         .execute(state.db.pool())
@@ -1122,11 +1172,12 @@ async fn delete_link(
 
 async fn update_link_public(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<PublicBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     save_public(
         &state.db,
         "UPDATE insight_links SET public_enabled = $1, public_slug = $2, public_threshold = $3, public_sections = $4 WHERE id = $5",
@@ -1140,23 +1191,21 @@ async fn update_link_public(
 
 async fn link_overview(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_link(&state.db, &id).await?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     Ok(Json(link_totals(&state.db, &id, range, true).await?))
 }
 
 async fn link_breakdown(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path((id, dimension)): Path<(String, String)>,
     Query(range): Query<RangeQuery>,
 ) -> Result<Json<Value>, AppError> {
-    require_user(&state, &jar).await?;
-    fetch_link(&state.db, &id).await?;
+    require_link(&state.db, member.workspace_id, &id).await?;
     Ok(Json(
         json!({ "rows": breakdown(&state.db, "link_id", &id, &dimension, range, "click").await? }),
     ))
@@ -1602,17 +1651,18 @@ async fn save_public(
     Ok(())
 }
 
-async fn insert_link(db: &Database, body: &LinkBody) -> Result<String, AppError> {
+async fn insert_link(db: &Database, project_id: Id, body: &LinkBody) -> Result<String, AppError> {
     let id = Id::new().to_string();
     let slug = field("slug", clean_slug(&body.slug))?;
     let destination = field("destination", clean_destination(&body.destination))?;
     let redirect_type = redirect_type(body.redirect_type.as_deref())?;
     let public_slug = format!("link-{}", &id[id.len().saturating_sub(8)..]);
     sqlx::query(
-        "INSERT INTO insight_links (id, domain_id, slug, destination, redirect_type, enabled, public_slug, public_sections, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO insight_links (id, project_id, domain_id, slug, destination, redirect_type, enabled, public_slug, public_sections, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(&id)
+    .bind(project_id.to_string())
     .bind(&body.domain_id)
     .bind(slug)
     .bind(destination)
@@ -1640,8 +1690,8 @@ fn redirect_type(value: Option<&str>) -> Result<&'static str, AppError> {
 
 async fn fetch_site(state: &AppState, id: &str) -> Result<Value, AppError> {
     let row = sqlx::query(
-        "SELECT id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, created_at, \
-         verified, verify_token, verified_at, daily_quota \
+        "SELECT id, project_id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, \
+         created_at, verified, verify_token, verified_at, daily_quota \
          FROM insight_sites WHERE id = $1",
     )
     .bind(id)
@@ -1676,6 +1726,7 @@ async fn site_json(state: &AppState, row: &sqlx::any::AnyRow) -> Result<Value, A
     let verified_at: Option<i64> = row.try_get("verified_at")?;
     Ok(json!({
         "id": id,
+        "project_id": row.try_get::<String, _>("project_id")?,
         "public_id": row.try_get::<String, _>("public_id")?,
         "name": row.try_get::<String, _>("name")?,
         "domain": domain,
@@ -1705,11 +1756,12 @@ struct QuotaBody {
 
 async fn set_site_quota(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
     Json(body): Json<QuotaBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     if let Some(quota) = body.daily_quota {
         if !(1..=100_000_000).contains(&quota) {
             return Err(AppError::field(
@@ -1732,10 +1784,11 @@ async fn set_site_quota(
 
 async fn verify_site(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    require_site(&state.db, member.workspace_id, &id).await?;
     let ok = crate::verify::verify_site(&state, &id).await?;
     let site = fetch_site(&state, &id).await?;
     if ok {
@@ -1769,45 +1822,27 @@ fn domain_json(row: &sqlx::any::AnyRow) -> Result<Value, AppError> {
     }))
 }
 
-async fn link_rows(db: &Database, id: Option<&str>) -> Result<Vec<Value>, AppError> {
-    let rows = if let Some(id) = id {
-        sqlx::query(
-            "SELECT l.id, l.domain_id, d.hostname, l.slug, l.destination, l.redirect_type, l.enabled, \
-             l.public_slug, l.public_enabled, l.public_threshold, l.public_sections, l.created_at, \
-             CAST(COALESCE(SUM(s.clicks), 0) AS BIGINT) AS total_clicks \
-             FROM insight_links l JOIN insight_domains d ON d.id = l.domain_id \
-             LEFT JOIN insight_link_daily s ON s.link_id = l.id \
-             WHERE l.id = $1 GROUP BY l.id, d.hostname",
-        )
-        .bind(id)
-        .fetch_all(db.pool())
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT l.id, l.domain_id, d.hostname, l.slug, l.destination, l.redirect_type, l.enabled, \
-             l.public_slug, l.public_enabled, l.public_threshold, l.public_sections, l.created_at, \
-             CAST(COALESCE(SUM(s.clicks), 0) AS BIGINT) AS total_clicks \
-             FROM insight_links l JOIN insight_domains d ON d.id = l.domain_id \
-             LEFT JOIN insight_link_daily s ON s.link_id = l.id \
-             GROUP BY l.id, d.hostname ORDER BY l.created_at DESC",
-        )
-        .fetch_all(db.pool())
-        .await?
-    };
-    rows.iter().map(link_json).collect()
-}
+const LINK_SELECT: &str = "SELECT l.id, l.project_id, l.domain_id, d.hostname, l.slug, l.destination, l.redirect_type, l.enabled, \
+     l.public_slug, l.public_enabled, l.public_threshold, l.public_sections, l.created_at, \
+     CAST(COALESCE(SUM(s.clicks), 0) AS BIGINT) AS total_clicks \
+     FROM insight_links l JOIN insight_domains d ON d.id = l.domain_id \
+     LEFT JOIN insight_link_daily s ON s.link_id = l.id";
 
 async fn fetch_link(db: &Database, id: &str) -> Result<Value, AppError> {
-    link_rows(db, Some(id))
-        .await?
-        .into_iter()
-        .next()
-        .ok_or(AppError::NotFound)
+    let row = sqlx::query(&format!(
+        "{LINK_SELECT} WHERE l.id = $1 GROUP BY l.id, d.hostname"
+    ))
+    .bind(id)
+    .fetch_optional(db.pool())
+    .await?
+    .ok_or(AppError::NotFound)?;
+    link_json(&row)
 }
 
 fn link_json(row: &sqlx::any::AnyRow) -> Result<Value, AppError> {
     Ok(json!({
         "id": row.try_get::<String, _>("id")?,
+        "project_id": row.try_get::<String, _>("project_id")?,
         "domain_id": row.try_get::<String, _>("domain_id")?,
         "hostname": row.try_get::<String, _>("hostname")?,
         "slug": row.try_get::<String, _>("slug")?,
@@ -1848,6 +1883,55 @@ fn map_db(error: sqlx::Error) -> AppError {
     } else {
         AppError::from(error)
     }
+}
+
+async fn require_site(db: &Database, workspace_id: Id, id: &str) -> Result<(), AppError> {
+    require_row(
+        db,
+        "SELECT s.id FROM insight_sites s JOIN projects p ON p.id = s.project_id \
+         WHERE s.id = $1 AND p.workspace_id = $2",
+        workspace_id,
+        id,
+    )
+    .await
+}
+
+async fn require_link(db: &Database, workspace_id: Id, id: &str) -> Result<(), AppError> {
+    require_row(
+        db,
+        "SELECT l.id FROM insight_links l JOIN projects p ON p.id = l.project_id \
+         WHERE l.id = $1 AND p.workspace_id = $2",
+        workspace_id,
+        id,
+    )
+    .await
+}
+
+async fn require_domain(db: &Database, workspace_id: Id, id: &str) -> Result<(), AppError> {
+    require_row(
+        db,
+        "SELECT id FROM insight_domains WHERE id = $1 AND workspace_id = $2",
+        workspace_id,
+        id,
+    )
+    .await
+}
+
+async fn require_row(db: &Database, sql: &str, workspace_id: Id, id: &str) -> Result<(), AppError> {
+    sqlx::query(sql)
+        .bind(id)
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?
+        .map(|_| ())
+        .ok_or(AppError::NotFound)
+}
+
+/// The `project_id` of a create body, which must name a project in the workspace.
+async fn owning_project(db: &Database, member: &Member, raw: &str) -> Result<Id, AppError> {
+    let project_id = raw.parse::<Id>().map_err(|_| AppError::NotFound)?;
+    require_project(db, member.workspace_id, project_id).await?;
+    Ok(project_id)
 }
 
 fn field(name: &str, result: Result<String, &'static str>) -> Result<String, AppError> {
@@ -1969,4 +2053,3 @@ fn scrub_path(path: &str) -> String {
         None => path.to_owned(),
     }
 }
-

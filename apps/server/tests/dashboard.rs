@@ -2,39 +2,37 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use owlee_platform::TimestampMillis;
-use owlee_server::{boot, editor_session, initialize_setup_token, router, testing_config};
+use owlee_server::{AppState, TestSession, boot, editor_session, router, testing_config};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const BROWSER: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36";
 
-async fn app() -> (Router, Option<String>) {
+async fn app() -> (Router, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owlee.sqlite");
     let _keep = Box::leak(Box::new(dir));
     let state = boot(testing_config(path)).await.unwrap();
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    (router(state), token)
+    (router(state.clone()), state)
 }
 
+/// Sends `session`'s cookie and workspace header when given.
 async fn call(
     app: &Router,
     method: &str,
     uri: &str,
     body: Option<Value>,
-    cookie: Option<&str>,
+    session: Option<&TestSession>,
     extra: &[(&str, &str)],
 ) -> (StatusCode, Value, Option<String>, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri);
     if body.is_some() {
         request = request.header("content-type", "application/json");
     }
-    if let Some(cookie) = cookie {
-        request = request.header("cookie", cookie);
+    if let Some(session) = session {
+        request = request
+            .header("cookie", &session.cookie)
+            .header("x-owlee-workspace", session.workspace_id.to_string());
     }
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -81,36 +79,57 @@ fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn owner(app: &Router, token: &str) -> String {
-    let (status, body, cookie, _) = call(
-        app,
-        "POST",
-        "/api/setup/complete",
-        Some(json!({
-            "token": token,
-            "email": "ada@coollabs.io",
-            "password": "correct-horse-battery",
-            "display_name": "Ada"
-        })),
-        None,
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    cookie.unwrap()
-}
-
 fn hex_id() -> String {
     owlee_platform::Id::new().to_string().replace('-', "")
 }
 
+/// An error app in `project_id` with one stored event.
+async fn error_app_with_event(app: &Router, session: &TestSession, project_id: &str, name: &str) {
+    let (status, created, _, _) = call(
+        app,
+        "POST",
+        "/api/error-apps",
+        Some(json!({"name": name, "platform": "php", "project_id": project_id})),
+        Some(session),
+        &[],
+    )
+    .await;
+    assert!(status.is_success(), "{status} {created}");
+    let app_id = created["id"].as_str().unwrap();
+    let key = created["publicKey"].as_str().unwrap();
+    let (status, stored, _, _) = call(
+        app,
+        "POST",
+        &format!("/api/{app_id}/store/"),
+        Some(json!({
+            "event_id": hex_id(),
+            "level": "error",
+            "platform": "php",
+            "exception": {
+                "values": [{
+                    "type": "RuntimeException",
+                    "value": format!("disk full in {name}")
+                }]
+            }
+        })),
+        None,
+        &[(
+            "authorization",
+            &format!("Sentry sentry_key={key}, sentry_version=7"),
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+}
+
 #[tokio::test]
 async fn dashboard_aggregates_monitors_errors_and_traffic() {
-    let (app, token) = app().await;
+    let (app, state) = app().await;
     let (status, _, _, _) = call(&app, "GET", "/api/dashboard", None, None, &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let cookie = owner(&app, token.as_deref().expect("setup token")).await;
+    let cookie = editor_session(&state).await.unwrap();
+    let project_id = cookie.project_id.to_string();
     let (status, empty, _, _) = call(&app, "GET", "/api/dashboard", None, Some(&cookie), &[]).await;
     assert_eq!(status, StatusCode::OK, "{empty}");
     assert_eq!(empty["monitors"]["up"], 0);
@@ -122,7 +141,7 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
     assert!(empty["monitors"]["failing"].as_array().unwrap().is_empty());
     assert_eq!(empty["incidents"]["open"], 0);
     assert!(empty["pages"].as_array().unwrap().is_empty());
-    assert_eq!(empty["errors"]["projects"], 0);
+    assert_eq!(empty["errors"]["apps"], 0);
     assert_eq!(empty["errors"]["unresolved"], 0);
     assert_eq!(empty["errors"]["new_24h"], 0);
     assert_eq!(empty["errors"]["events_24h"].as_array().unwrap().len(), 24);
@@ -163,7 +182,8 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             "url": format!("http://{address}/health"),
             "interval_seconds": 30,
             "timeout_ms": 3000,
-            "failure_threshold": 1
+            "failure_threshold": 1,
+            "project_id": project_id
         })),
         Some(&cookie),
         &[],
@@ -193,7 +213,8 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             "url": "http://127.0.0.1:9/health",
             "timeout_ms": 1000,
             "interval_seconds": 30,
-            "failure_threshold": 1
+            "failure_threshold": 1,
+            "project_id": project_id
         })),
         Some(&cookie),
         &[],
@@ -221,7 +242,8 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             "title": "coolLabs",
             "slug": "coollabs",
             "published": true,
-            "monitor_ids": [api_id, worker_id]
+            "monitor_ids": [api_id, worker_id],
+            "project_id": project_id
         })),
         Some(&cookie),
         &[],
@@ -229,48 +251,13 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{page}");
 
-    let (status, project, _, _) = call(
-        &app,
-        "POST",
-        "/api/error-projects",
-        Some(json!({"name": "Checkout", "platform": "php"})),
-        Some(&cookie),
-        &[],
-    )
-    .await;
-    assert!(status.is_success(), "{status} {project}");
-    let project_id = project["id"].as_str().unwrap();
-    let key = project["publicKey"].as_str().unwrap();
-    let event_id = hex_id();
-    let (status, stored, _, _) = call(
-        &app,
-        "POST",
-        &format!("/api/{project_id}/store/"),
-        Some(json!({
-            "event_id": event_id,
-            "level": "error",
-            "platform": "php",
-            "exception": {
-                "values": [{
-                    "type": "RuntimeException",
-                    "value": "disk full on volume 3"
-                }]
-            }
-        })),
-        None,
-        &[(
-            "authorization",
-            &format!("Sentry sentry_key={key}, sentry_version=7"),
-        )],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{stored}");
+    error_app_with_event(&app, &cookie, &project_id, "Checkout").await;
 
     let (status, site, _, _) = call(
         &app,
         "POST",
         "/api/sites",
-        Some(json!({"name": "Docs", "domain": "coolify.io"})),
+        Some(json!({"name": "Docs", "domain": "coolify.io", "project_id": project_id})),
         Some(&cookie),
         &[],
     )
@@ -310,7 +297,8 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             "domain_id": domain["id"],
             "slug": "coolify",
             "destination": "https://coolify.io",
-            "redirect_type": "temporary"
+            "redirect_type": "temporary",
+            "project_id": project_id
         })),
         Some(&cookie),
         &[],
@@ -352,7 +340,7 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
     assert_eq!(body["pages"][0]["title"], "coolLabs");
     assert_eq!(body["pages"][0]["banner"], "partial_outage");
     assert_eq!(body["pages"][0]["published"], true);
-    assert_eq!(body["errors"]["projects"], 1);
+    assert_eq!(body["errors"]["apps"], 1);
     assert!(body["errors"]["unresolved"].as_i64().unwrap() >= 1);
     assert!(body["errors"]["new_24h"].as_i64().unwrap() >= 1);
     assert_eq!(body["errors"]["events_24h"].as_array().unwrap().len(), 24);
@@ -370,6 +358,7 @@ async fn dashboard_aggregates_monitors_errors_and_traffic() {
             .unwrap()
             .contains("disk full")
     );
+    assert_eq!(body["errors"]["issues"][0]["app_name"], "Checkout");
     assert_eq!(body["analytics"]["sites"], 1);
     assert_eq!(body["analytics"]["links"], 1);
     assert!(body["analytics"]["pageviews"].as_i64().unwrap() >= 1);
@@ -399,42 +388,122 @@ async fn postgres_dashboard_query_runs_when_configured() {
     ));
     config.database_url = Some(url);
     let state = boot(config).await.expect("postgres boot");
-    let token = initialize_setup_token(&state.db, TimestampMillis::now())
-        .await
-        .unwrap()
-        .map(|issued| issued.token);
-    let editor = match token {
-        Some(_) => None,
-        None => Some(editor_session(&state).await.unwrap()),
-    };
+    let session = editor_session(&state).await.unwrap();
     let app = router(state);
-    let email = format!("dash-{}@coollabs.io", owlee_platform::Id::new());
-    let (status, user, cookie, _) = if let Some(token) = token {
-        call(
-            &app,
-            "POST",
-            "/api/setup/complete",
-            Some(json!({
-                "token": token,
-                "email": email,
-                "password": "correct-horse-battery",
-                "display_name": "Postgres"
-            })),
-            None,
-            &[],
-        )
-        .await
-    } else {
-        let (status, user, _, location) =
-            call(&app, "GET", "/api/auth/me", None, editor.as_deref(), &[]).await;
-        (status, user, editor, location)
-    };
-    assert!(status.is_success(), "{status} {user}");
-    let (status, body, _, _) =
-        call(&app, "GET", "/api/dashboard", None, cookie.as_deref(), &[]).await;
+    let (status, body, _, _) = call(&app, "GET", "/api/dashboard", None, Some(&session), &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["analytics"]["days"], 7);
     assert_eq!(body["errors"]["events_24h"].as_array().unwrap().len(), 24);
     assert!(body["monitors"]["failing"].is_array());
     assert!(body["pages"].is_array());
+}
+
+/// `?project=` narrows every section. Another workspace sees none of it.
+#[tokio::test]
+async fn dashboard_is_scoped_to_workspace_and_project() {
+    let (app, state) = app().await;
+    let owner = editor_session(&state).await.unwrap();
+    let default_project = owner.project_id.to_string();
+    let (status, mobile, _, _) = call(
+        &app,
+        "POST",
+        "/api/projects",
+        Some(json!({"name": "Mobile"})),
+        Some(&owner),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{mobile}");
+    let mobile_project = mobile["id"].as_str().unwrap().to_owned();
+    error_app_with_event(&app, &owner, &default_project, "Web").await;
+    error_app_with_event(&app, &owner, &mobile_project, "iOS").await;
+    let (status, monitor, _, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "name": "Paused API",
+            "job_type": "http",
+            "url": "http://127.0.0.1:9/health",
+            "interval_seconds": 30,
+            "timeout_ms": 1000,
+            "active": false,
+            "project_id": default_project
+        })),
+        Some(&owner),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{monitor}");
+
+    let dashboard = |query: String, session: TestSession| {
+        let app = app.clone();
+        async move {
+            let (status, body, _, _) = call(
+                &app,
+                "GET",
+                &format!("/api/dashboard{query}"),
+                None,
+                Some(&session),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    };
+    let clone = |session: &TestSession| TestSession {
+        cookie: session.cookie.clone(),
+        user_id: session.user_id,
+        workspace_id: session.workspace_id,
+        project_id: session.project_id,
+    };
+    let monitor_total = |body: &Value| -> i64 {
+        ["up", "down", "degraded", "pending", "paused"]
+            .iter()
+            .map(|key| body["monitors"][key].as_i64().unwrap())
+            .sum()
+    };
+
+    let all = dashboard(String::new(), clone(&owner)).await;
+    assert_eq!(all["errors"]["apps"], 2);
+    assert_eq!(all["errors"]["unresolved"], 2);
+    assert_eq!(monitor_total(&all), 1, "{all}");
+
+    let narrowed = dashboard(format!("?project={mobile_project}"), clone(&owner)).await;
+    assert_eq!(narrowed["errors"]["apps"], 1);
+    assert_eq!(narrowed["errors"]["unresolved"], 1);
+    assert_eq!(narrowed["errors"]["new_24h"], 1);
+    let events: i64 = narrowed["errors"]["events_24h"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_i64().unwrap())
+        .sum();
+    assert_eq!(events, 1);
+    let names: Vec<&str> = narrowed["errors"]["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|issue| issue["app_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["iOS"]);
+    assert_eq!(monitor_total(&narrowed), 0, "{narrowed}");
+
+    let outsider = editor_session(&state).await.unwrap();
+    let theirs = dashboard(String::new(), clone(&outsider)).await;
+    assert_eq!(theirs["errors"]["apps"], 0);
+    assert_eq!(theirs["errors"]["unresolved"], 0);
+    assert_eq!(theirs["errors"]["issues"], json!([]));
+    assert_eq!(monitor_total(&theirs), 0);
+    let (status, _, _, _) = call(
+        &app,
+        "GET",
+        &format!("/api/dashboard?project={mobile_project}"),
+        None,
+        Some(&outsider),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

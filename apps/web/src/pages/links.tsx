@@ -3,14 +3,18 @@ import { type FormEvent, useState } from "react";
 import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge } from "@/components/ui";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function LinksPage() {
   const client = useQueryClient();
   const canEdit = useCanEdit();
   const domains = useQuery({ queryKey: ["domains"], queryFn: () => api<InsightDomain[]>("/api/domains") });
-  const links = useQuery({ queryKey: ["links"], queryFn: () => api<InsightLink[]>("/api/links") });
+  const scope = useListScope();
+  const links = useQuery({ queryKey: scope.key("links"), queryFn: () => api<InsightLink[]>(scope.path("/api/links")) });
+  const [projectId, setProjectId] = useProjectChoice();
   const [openDomain, setOpenDomain] = useState(false);
   const [openLink, setOpenLink] = useState(false);
   const [hostname, setHostname] = useState("");
@@ -29,7 +33,7 @@ export function LinksPage() {
     mutationFn: () =>
       api<InsightLink>("/api/links", {
         method: "POST",
-        body: JSON.stringify({ domain_id: domainId || domains.data?.[0]?.id, slug, destination, redirect_type: "temporary", enabled: true }),
+        body: JSON.stringify({ domain_id: domainId || domains.data?.[0]?.id, slug, destination, redirect_type: "temporary", enabled: true, project_id: projectId }),
       }),
     onSuccess: async () => {
       setOpenLink(false);
@@ -70,6 +74,7 @@ export function LinksPage() {
                   <tr key={link.id} className="clickable-row">
                     <td className="cell-link">
                       <Link className="row-link" to={to}>/{link.slug}</Link>
+                      <ProjectTag id={link.project_id} />
                       {rowCover(to)}
                       <div className="font-mono text-[11px] text-[var(--ui-fg-faint)]">/go/{link.slug}</div>
                     </td>
@@ -126,6 +131,7 @@ export function LinksPage() {
               onChange={(value) => setDomainId(value)}
             />
           </Field>
+          <ProjectField value={projectId} onChange={setProjectId} />
           <Field label="Slug"><Input required value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="coolify" /></Field>
           <Field label="Destination"><Input required value={destination} onChange={(event) => setDestination(event.target.value)} /></Field>
           <ErrorText error={createLink.error} />

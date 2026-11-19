@@ -3,28 +3,32 @@ import { type ReactNode, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
+import { ProjectField, ProjectTag } from "@/components/project";
 import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, useCopy } from "@/components/ui";
-import { api, type Project } from "@/lib/api";
+import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
 import { cn, fullTime, timeAgo } from "@/lib/utils";
+import { useListScope, useProjectChoice } from "@/lib/workspace";
 
-export function ErrorProjectsPage() {
+export function ErrorAppsPage() {
   const navigate = useNavigate();
   const canEdit = useCanEdit();
   const client = useQueryClient();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<Project[]>("/api/error-projects") });
+  const scope = useListScope();
+  const apps = useQuery({ queryKey: scope.key("apps"), queryFn: () => api<ErrorApp[]>(scope.path("/api/error-apps")) });
   const [name, setName] = useState("");
   const [platform, setPlatform] = useState<PlatformId>("php");
+  const [projectId, setProjectId] = useProjectChoice();
   const [error, setError] = useState("");
   const create = useMutation({
     mutationFn: () =>
-      api<Project>("/api/error-projects", { method: "POST", body: JSON.stringify({ name, platform }) }),
-    onSuccess: async (project) => {
+      api<ErrorApp>("/api/error-apps", { method: "POST", body: JSON.stringify({ name, platform, project_id: projectId }) }),
+    onSuccess: async (app) => {
       setName("");
-      client.setQueryData(["project", project.id], project);
-      await client.invalidateQueries({ queryKey: ["projects"] });
-      navigate(`/error-projects/${project.id}`);
+      client.setQueryData(["app", app.id], app);
+      await client.invalidateQueries({ queryKey: ["apps"] });
+      navigate(`/errors/apps/${app.id}`);
     },
     onError: (reason: Error) => setError(reason.message),
   });
@@ -32,11 +36,11 @@ export function ErrorProjectsPage() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
-        title="Projects"
-        description="Each project has a Sentry DSN. Paste it into an official SDK and errors land in Issues."
+        title="Apps"
+        description="Each app has a Sentry DSN. Paste it into an official SDK and errors land in Issues."
       />
       {canEdit ? (
-        <LayerCard title="New project" description="Pick the platform you will install the SDK on. The setup guide follows it.">
+        <LayerCard title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it.">
           <form
             className="flex flex-col gap-4"
             onSubmit={(event) => {
@@ -69,7 +73,7 @@ export function ErrorProjectsPage() {
               <div className="flex-1">
                 <Field label="Name">
                   <Input
-                    id="new-project-name"
+                    id="new-app-name"
                     value={name}
                     required
                     placeholder={`${platformGuides[platform].label} app`}
@@ -77,32 +81,35 @@ export function ErrorProjectsPage() {
                   />
                 </Field>
               </div>
+              <div className="md:w-56">
+                <ProjectField value={projectId} onChange={setProjectId} />
+              </div>
               <Button variant="highlighted" type="submit" disabled={create.isPending}>
-                {create.isPending ? "Creating…" : "Create project"}
+                {create.isPending ? "Creating…" : "Create app"}
               </Button>
             </div>
           </form>
           {error ? <p className="field-error">{error}</p> : null}
         </LayerCard>
       ) : null}
-      <LayerCard title="All projects" flush>
-        {projects.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading projects...</p> : null}
-        {projects.data && projects.data.length === 0 ? (
+      <LayerCard title="All apps" flush>
+        {apps.isLoading ? <p className="p-4 text-[13px] text-[var(--ui-fg-faint)]">Loading apps...</p> : null}
+        {apps.data && apps.data.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10 text-center">
-            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No projects yet</h2>
+            <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">No apps yet</h2>
             <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
               {canEdit
-                ? "A project gives you a DSN and a setup guide. Most SDKs send their first error within a few minutes."
-                : "An editor has to create a project before errors can be collected."}
+                ? "An app gives you a DSN and a setup guide. Most SDKs send their first error within a few minutes."
+                : "An editor has to create an app before errors can be collected."}
             </p>
             {canEdit ? (
-              <Button className="mt-4" variant="highlighted" onClick={() => document.getElementById("new-project-name")?.focus()}>
-                Create your first project
+              <Button className="mt-4" variant="highlighted" onClick={() => document.getElementById("new-app-name")?.focus()}>
+                Create your first app
               </Button>
             ) : null}
           </div>
         ) : null}
-        {projects.data && projects.data.length > 0 ? (
+        {apps.data && apps.data.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="cool-table">
               <thead>
@@ -114,27 +121,28 @@ export function ErrorProjectsPage() {
                 </tr>
               </thead>
               <tbody>
-                {projects.data.map((project) => (
-                  <tr key={project.id} className="clickable-row" onClick={() => navigate(`/error-projects/${project.id}`)}>
+                {apps.data.map((app) => (
+                  <tr key={app.id} className="clickable-row" onClick={() => navigate(`/errors/apps/${app.id}`)}>
                     <td>
-                      <Link className="row-link" to={`/error-projects/${project.id}`} onClick={(event) => event.stopPropagation()}>
-                        {project.name}
+                      <Link className="row-link" to={`/errors/apps/${app.id}`} onClick={(event) => event.stopPropagation()}>
+                        {app.name}
                       </Link>
-                      {project.quotaExceeded ? (
-                        <StatusBadge tone="error">Daily quota reached ({project.usedToday}/{project.dailyQuota})</StatusBadge>
+                      <ProjectTag id={app.projectId} />
+                      {app.quotaExceeded ? (
+                        <StatusBadge tone="error">Daily quota reached ({app.usedToday}/{app.dailyQuota})</StatusBadge>
                       ) : null}
                     </td>
                     <td>
-                      <Badge>{guideFor(project.platform).label}</Badge>
+                      <Badge>{guideFor(app.platform).label}</Badge>
                     </td>
-                    <td className="whitespace-nowrap" title={project.lastEventAt ? fullTime(project.lastEventAt) : undefined}>
-                      {project.lastEventAt ? (
-                        <StatusBadge tone="success">Last event {timeAgo(project.lastEventAt)}</StatusBadge>
+                    <td className="whitespace-nowrap" title={app.lastEventAt ? fullTime(app.lastEventAt) : undefined}>
+                      {app.lastEventAt ? (
+                        <StatusBadge tone="success">Last event {timeAgo(app.lastEventAt)}</StatusBadge>
                       ) : (
                         <StatusBadge>Waiting for events</StatusBadge>
                       )}
                     </td>
-                    <td className="text-right tabular-nums">{project.issueCount.toLocaleString()}</td>
+                    <td className="text-right tabular-nums">{app.issueCount.toLocaleString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -146,14 +154,14 @@ export function ErrorProjectsPage() {
   );
 }
 
-export function ProjectDetailPage() {
+export function ErrorAppDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const canEdit = useCanEdit();
   const client = useQueryClient();
-  const project = useQuery({
-    queryKey: ["project", id],
-    queryFn: () => api<Project>(`/api/error-projects/${id}`),
+  const app = useQuery({
+    queryKey: ["app", id],
+    queryFn: () => api<ErrorApp>(`/api/error-apps/${id}`),
     refetchInterval: (query) => (query.state.data && !query.state.data.lastEventAt ? 3000 : false),
   });
   // Remembers that this visit started before any event, so the page can celebrate the first one.
@@ -161,18 +169,18 @@ export function ProjectDetailPage() {
   const [showGuide, setShowGuide] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const remove = useMutation({
-    mutationFn: () => api(`/api/error-projects/${id}`, { method: "DELETE" }),
+    mutationFn: () => api(`/api/error-apps/${id}`, { method: "DELETE" }),
     onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["projects"] });
-      navigate("/error-projects");
+      await client.invalidateQueries({ queryKey: ["apps"] });
+      navigate("/errors/apps");
     },
   });
 
-  if (project.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading project...</p>;
-  if (project.isError || !project.data) {
-    return <p className="text-[13px] text-[var(--ui-error)]">{(project.error as Error)?.message || "Project not found"}</p>;
+  if (app.isLoading) return <p className="text-[13px] text-[var(--ui-fg-faint)]">Loading app...</p>;
+  if (app.isError || !app.data) {
+    return <p className="text-[13px] text-[var(--ui-error)]">{(app.error as Error)?.message || "App not found"}</p>;
   }
-  const data = project.data;
+  const data = app.data;
   const receiving = data.lastEventAt != null;
   if (!receiving && !sawWaiting) setSawWaiting(true);
 
@@ -180,18 +188,18 @@ export function ProjectDetailPage() {
     <div className="flex flex-col gap-6">
       <div>
         <nav className="mb-2 flex items-center gap-2 text-[13px] text-[var(--ui-fg-faint)]">
-          <Link to="/error-projects">Projects</Link>
+          <Link to="/errors/apps">Apps</Link>
           <span>/</span>
           <span className="text-[var(--ui-fg-dim)]">{data.name}</span>
         </nav>
         <PageHeader
           title={data.name}
           keepTitle
-          description={`Project id ${data.id} · ${guideFor(data.platform).label}`}
+          description={`App id ${data.id} · ${guideFor(data.platform).label}`}
           actions={
             canEdit ? (
               <Button variant="danger" onClick={() => setConfirming(true)}>
-                Delete project
+                Delete app
               </Button>
             ) : null
           }
@@ -202,7 +210,7 @@ export function ProjectDetailPage() {
           title={sawWaiting ? "First event received" : "Activity"}
           description={sawWaiting ? "The SDK is connected. Errors from now on are grouped into issues." : undefined}
           actions={
-            <Link className="button button-highlighted" to={`/issues?project=${data.id}`}>
+            <Link className="button button-highlighted" to={`/errors?app=${data.id}`}>
               View issues
             </Link>
           }
@@ -233,14 +241,14 @@ export function ProjectDetailPage() {
           <Button onClick={() => setShowGuide(true)}>Show setup guide</Button>
         </div>
       ) : (
-        <SetupGuide project={data} onHide={receiving ? () => setShowGuide(false) : undefined} />
+        <SetupGuide app={data} onHide={receiving ? () => setShowGuide(false) : undefined} />
       )}
       <DsnCard dsn={data.dsn} />
-      <ProjectQuota key={String(data.quotaOverride ?? "inherit")} project={data} />
+      <AppQuota key={String(data.quotaOverride ?? "inherit")} app={data} />
       <Dialog
         open={confirming}
         title={`Delete ${data.name}?`}
-        description={`The project, its ${data.issueCount.toLocaleString()} issues, and every stored event are deleted. SDKs using this DSN are rejected. This cannot be undone.`}
+        description={`The app, its ${data.issueCount.toLocaleString()} issues, and every stored event are deleted. SDKs using this DSN are rejected. This cannot be undone.`}
         onClose={() => setConfirming(false)}
         footer={
           <>
@@ -248,7 +256,7 @@ export function ProjectDetailPage() {
               Cancel
             </Button>
             <Button type="button" variant="danger" disabled={remove.isPending} onClick={() => remove.mutate()}>
-              {remove.isPending ? "Deleting…" : "Delete project"}
+              {remove.isPending ? "Deleting…" : "Delete app"}
             </Button>
           </>
         }
@@ -259,8 +267,8 @@ export function ProjectDetailPage() {
   );
 }
 
-function SetupGuide({ project, onHide }: { project: Project; onHide?: () => void }) {
-  const [platform, setPlatform] = useState<PlatformId>(isPlatformId(project.platform) ? project.platform : "other");
+function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
+  const [platform, setPlatform] = useState<PlatformId>(isPlatformId(app.platform) ? app.platform : "other");
   const guide = guideFor(platform);
   return (
     <LayerCard
@@ -288,13 +296,13 @@ function SetupGuide({ project, onHide }: { project: Project; onHide?: () => void
           <CodeBlock {...guide.install} />
         </GuideStep>
         <GuideStep number={2} title="Configure it with your DSN">
-          {guide.configure(project.dsn).map((block) => (
+          {guide.configure(app.dsn).map((block) => (
             <CodeBlock key={block.code} {...block} />
           ))}
         </GuideStep>
         <GuideStep number={3} title="Send a test error">
           {guide.test ? <CodeBlock {...guide.test} /> : null}
-          <CodeBlock file={guide.test ? "No SDK at hand? Send one with curl" : "Send one with curl"} code={curlTest(project)} />
+          <CodeBlock file={guide.test ? "No SDK at hand? Send one with curl" : "Send one with curl"} code={curlTest(app)} />
         </GuideStep>
       </ol>
     </LayerCard>
@@ -341,7 +349,7 @@ function DsnCard({ dsn }: { dsn: string }) {
   return (
     <LayerCard
       title="Sentry DSN"
-      description="Use this with any official Sentry SDK. The public key identifies the project. It is not a secret, which is why browser SDKs can ship it."
+      description="Use this with any official Sentry SDK. The public key identifies the app. It is not a secret, which is why browser SDKs can ship it."
       actions={
         <Button
           variant="highlighted"
@@ -356,13 +364,13 @@ function DsnCard({ dsn }: { dsn: string }) {
   );
 }
 
-function curlTest(project: Project) {
-  const dsn = new URL(project.dsn);
+function curlTest(app: ErrorApp) {
+  const dsn = new URL(app.dsn);
   const base = `${dsn.protocol}//${dsn.host}${dsn.pathname.replace(/\/[^/]*$/, "")}`;
   return [
-    `curl -X POST '${base}/api/${project.id}/store/' \\`,
+    `curl -X POST '${base}/api/${app.id}/store/' \\`,
     `  -H 'Content-Type: application/json' \\`,
-    `  -H 'X-Sentry-Auth: Sentry sentry_key=${project.publicKey}, sentry_version=7' \\`,
+    `  -H 'X-Sentry-Auth: Sentry sentry_key=${app.publicKey}, sentry_version=7' \\`,
     `  -d '{"message":"Owlee test error","level":"error"}'`,
   ].join("\n");
 }
@@ -373,33 +381,33 @@ function resetWhen(iso: string) {
   return `${date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
 }
 
-function ProjectQuota({ project }: { project: Project }) {
+function AppQuota({ app }: { app: ErrorApp }) {
   const client = useQueryClient();
   const canEdit = useCanEdit();
-  const [value, setValue] = useState(project.quotaOverride == null ? "" : String(project.quotaOverride));
+  const [value, setValue] = useState(app.quotaOverride == null ? "" : String(app.quotaOverride));
   const save = useMutation({
     mutationFn: (daily: number | null) =>
-      api<Project>(`/api/error-projects/${project.id}/quota`, {
+      api<ErrorApp>(`/api/error-apps/${app.id}/quota`, {
         method: "PUT",
         body: JSON.stringify({ daily_quota: daily }),
       }),
     onSuccess: (data) => {
-      client.setQueryData(["project", project.id], data);
+      client.setQueryData(["app", app.id], data);
       setValue(data.quotaOverride == null ? "" : String(data.quotaOverride));
-      void client.invalidateQueries({ queryKey: ["projects"] });
+      void client.invalidateQueries({ queryKey: ["apps"] });
       void client.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
-  const inherited = project.quotaOverride == null;
+  const inherited = app.quotaOverride == null;
   return (
     <LayerCard
       title="Daily cap"
-      description={inherited ? "Empty inherits the number from Settings → Ingest quotas." : "This project uses its own cap instead of the instance default."}
-      actions={project.quotaExceeded ? <StatusBadge tone="error">Cap reached</StatusBadge> : null}
+      description={inherited ? "Empty inherits the number from Settings → Ingest quotas." : "This app uses its own cap instead of the instance default."}
+      actions={app.quotaExceeded ? <StatusBadge tone="error">Cap reached</StatusBadge> : null}
     >
       <p className="mb-3 text-[13px] text-[var(--ui-fg-faint)]">
-        {project.usedToday.toLocaleString()} of {project.dailyQuota.toLocaleString()} errors accepted today.
-        {project.quotaExceeded ? " Further events are rejected until the counter resets." : ""} Resets {resetWhen(project.resetsAt)}.
+        {app.usedToday.toLocaleString()} of {app.dailyQuota.toLocaleString()} errors accepted today.
+        {app.quotaExceeded ? " Further events are rejected until the counter resets." : ""} Resets {resetWhen(app.resetsAt)}.
       </p>
       {canEdit ? <form
         className="flex flex-col gap-3 sm:flex-row sm:items-end"
@@ -415,7 +423,7 @@ function ProjectQuota({ project }: { project: Project }) {
           </Field>
         </div>
         <Button variant="highlighted" type="submit" disabled={save.isPending}>Save cap</Button>
-        {project.quotaOverride != null ? (
+        {app.quotaOverride != null ? (
           <Button type="button" disabled={save.isPending} onClick={() => save.mutate(null)}>Inherit</Button>
         ) : null}
       </form> : null}

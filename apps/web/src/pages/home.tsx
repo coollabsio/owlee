@@ -5,6 +5,7 @@ import { Sparkline } from "@/components/error-charts";
 import { ErrorText, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
 import { api, type Dashboard, type DashboardIncident, type DashboardPageRow } from "@/lib/api";
 import { duration, percent, stateLabel, timeAgo } from "@/lib/utils";
+import { useListScope } from "@/lib/workspace";
 
 function tone(state: string): "success" | "warning" | "error" | "neutral" | "info" {
   if (state === "up" || state === "operational" || state === "resolved") return "success";
@@ -16,13 +17,14 @@ function tone(state: string): "success" | "warning" | "error" | "neutral" | "inf
 
 function isFresh(data: Dashboard) {
   const count = data.monitors.up + data.monitors.down + data.monitors.degraded + data.monitors.pending + data.monitors.paused;
-  return count === 0 && data.pages.length === 0 && data.incidents.open === 0 && data.errors.projects === 0 && data.analytics.sites === 0 && data.analytics.links === 0;
+  return count === 0 && data.pages.length === 0 && data.incidents.open === 0 && data.errors.apps === 0 && data.analytics.sites === 0 && data.analytics.links === 0;
 }
 
 export function HomePage() {
+  const scope = useListScope();
   const home = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: () => api<Dashboard>("/api/dashboard"),
+    queryKey: scope.key("dashboard"),
+    queryFn: () => api<Dashboard>(scope.path("/api/dashboard")),
     refetchInterval: 15_000,
   });
   const data = home.data;
@@ -44,12 +46,12 @@ export function HomePage() {
           <div className="flex min-h-48 flex-col items-center justify-center px-2 py-8 text-center">
             <h2 className="text-[14px] font-medium text-[var(--ui-fg)]">Nothing to report yet</h2>
             <p className="mx-auto mt-1 max-w-[28rem] text-[13px] text-[var(--ui-fg-faint)]">
-              Create a monitor, a site, or an error project. This page fills in as soon as one of them has data.
+              Create a monitor, a site, or an error app. This page fills in as soon as one of them has data.
             </p>
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
               <Link className="button button-highlighted" to="/monitors">Create a monitor</Link>
               <Link className="button" to="/analytics">Add a site</Link>
-              <Link className="button" to="/error-projects">Create a project</Link>
+              <Link className="button" to="/errors/apps">Create an app</Link>
             </div>
           </div>
         </LayerCard>
@@ -84,10 +86,10 @@ function resetWhen(iso: string) {
 function QuotaNotice({ hits }: { hits: Dashboard["quota_hits"] }) {
   if (hits.length === 0) return null;
   return (
-    <LayerCard title="Ingest stopped" description="A project or site reached its daily cap. New events are rejected until the counter resets.">
+    <LayerCard title="Ingest stopped" description="An app or site reached its daily cap. New events are rejected until the counter resets.">
       <ul className="space-y-2">
         {hits.map((hit) => {
-          const to = hit.kind === "error" ? `/error-projects/${hit.id}` : `/analytics/${hit.id}`;
+          const to = hit.kind === "error" ? `/errors/apps/${hit.id}` : `/analytics/${hit.id}`;
           const noun = hit.kind === "error" ? "errors" : "events";
           return (
             <li key={`${hit.kind}-${hit.id}`} className="flex flex-wrap items-baseline gap-x-2 text-[13px]">
@@ -285,8 +287,8 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
   const events = errors.events_24h.reduce((sum, value) => sum + value, 0);
   return (
     <LayerCard title="Errors" description="Last 24 hours" actions={viewAll("/errors")} flush>
-      {errors.projects === 0 ? (
-        <Note>No error projects. <Link className="auth-text-link" to="/error-projects">Create a project</Link></Note>
+      {errors.apps === 0 ? (
+        <Note>No error apps. <Link className="auth-text-link" to="/errors/apps">Create an app</Link></Note>
       ) : (
         <>
           <div className="flex items-end justify-between gap-4 border-b border-[var(--ui-divider)] px-4 py-4">
@@ -311,7 +313,7 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
                       <td className="cell-link max-w-[18rem]">
                         <Link className="row-link" to={to}>{issue.title}</Link>
                         {rowCover(to)}
-                        <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.project_name}</div>
+                        <div className="truncate text-[11px] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
                       </td>
                       <td className="cell-link whitespace-nowrap text-right">
                         {rowCover(to)}

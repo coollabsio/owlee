@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, ORIGIN};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -34,6 +34,7 @@ use crate::repo::{
 use crate::seed::{DEMO_EMAIL, DEMO_PASSWORD};
 use crate::setup::{self, NewOwner};
 use crate::state::{self, AppState};
+use crate::workspaces::{self, Member, ProjectFilter, audit, require_project};
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -60,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/settings/smtp", put(save_smtp).delete(delete_smtp))
         .route("/admin/users", get(admin_users))
         .route("/admin/users/{id}/admin", put(set_installation_admin))
+        .merge(workspaces::routes())
+        .merge(crate::invitations::routes())
         .route("/overview", get(overview))
         .route("/dashboard", get(crate::dashboard::show))
         .route("/monitors", get(list_monitors).post(create_monitor))
@@ -284,7 +287,6 @@ async fn register_complete(
         &account.normalized,
         &account.display_name,
         &hash,
-        "member",
         now,
     )
     .await?;
@@ -490,7 +492,7 @@ async fn revoke_session(
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
-fn request_email(email: &str) -> Result<String, AppError> {
+pub(crate) fn request_email(email: &str) -> Result<String, AppError> {
     let normalized = normalize_email(email);
     if valid_email(&normalized) {
         Ok(normalized)
@@ -513,7 +515,7 @@ async fn ensure_signup_open(state: &AppState) -> Result<(), AppError> {
 
 /// A few account mails per address an hour. Over that, the route still
 /// answers 202 and sends nothing.
-fn mail_allowed(state: &AppState, normalized_email: &str) -> bool {
+pub(crate) fn mail_allowed(state: &AppState, normalized_email: &str) -> bool {
     state
         .mail_address_limit
         .check(&hash_token(normalized_email))
@@ -781,7 +783,7 @@ async fn admin_users(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Json<Value>, AppError> {
-    require_editor(&state, &jar).await?;
+    require_installation_admin(&state, &jar).await?;
     let root_id = instance_settings::root_user_id(&state.db).await?;
     let accounts = repo::list_accounts(&state.db).await?;
     let users = accounts
@@ -810,8 +812,7 @@ async fn set_installation_admin(
         ));
     }
     let now = TimestampMillis::now();
-    let role = if body.admin { "admin" } else { "member" };
-    let updated = repo::set_user_role(&state.db, id, role, now).await?;
+    let updated = repo::set_installation_admin(&state.db, id, body.admin, now).await?;
     if !updated {
         return Err(AppError::NotFound);
     }
@@ -927,9 +928,8 @@ fn account_body(account: &repo::Account, root_id: Option<Id>) -> Value {
         "id": account.id,
         "email": account.email,
         "display_name": account.display_name,
-        "role": account.role,
         "root": root,
-        "installation_admin": root || account.role == "owner" || account.role == "admin",
+        "installation_admin": root || account.installation_admin,
     })
 }
 
@@ -986,22 +986,31 @@ fn smtp_input(body: &SmtpBody, key: &owlee_platform::AppKey) -> Result<SmtpInput
     })
 }
 
-async fn overview(State(state): State<AppState>, jar: CookieJar) -> Result<Json<Value>, AppError> {
-    let user = require_user(&state, &jar).await?;
-    let editor = is_editor(&state, &user).await?;
+async fn overview(
+    State(state): State<AppState>,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
+) -> Result<Json<Value>, AppError> {
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
     let stats = load_stats(&state).await?;
-    let monitors = repo::list_monitors(&state.db).await?;
+    let monitors = repo::list_monitors(&state.db, member.workspace_id, project).await?;
     let monitors = monitors
         .iter()
         .map(|monitor| {
             monitor_view(
-                editor,
+                member.is_editor(),
                 present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
             )
         })
         .collect::<Vec<_>>();
-    let incidents = open_incident_views(&state).await?;
-    let activity = repo::recent_audit(&state.db, 12).await?;
+    let incidents = repo::list_incidents(&state.db, member.workspace_id, project)
+        .await?
+        .into_iter()
+        .filter(|incident| incident.status != IncidentStatus::Resolved)
+        .take(8)
+        .collect::<Vec<_>>();
+    let incidents = incident_views(&state, incidents).await?;
+    let activity = repo::recent_audit(&state.db, member.workspace_id, 12).await?;
     Ok(Json(json!({
         "monitors": monitors,
         "incidents": incidents,
@@ -1011,6 +1020,8 @@ async fn overview(State(state): State<AppState>, jar: CookieJar) -> Result<Json<
 
 #[derive(Deserialize)]
 struct MonitorBody {
+    /// Read on create only. A monitor never moves to another project.
+    project_id: Option<Id>,
     name: String,
     description: Option<String>,
     job_type: JobType,
@@ -1030,18 +1041,18 @@ struct MonitorBody {
 
 async fn list_monitors(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::MonitorResponse>>, AppError> {
-    let user = require_user(&state, &jar).await?;
-    let editor = is_editor(&state, &user).await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
     let stats = load_stats(&state).await?;
-    let monitors = repo::list_monitors(&state.db).await?;
+    let monitors = repo::list_monitors(&state.db, member.workspace_id, project).await?;
     Ok(Json(
         monitors
             .iter()
             .map(|monitor| {
                 monitor_view(
-                    editor,
+                    member.is_editor(),
                     present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
                 )
             })
@@ -1051,21 +1062,22 @@ async fn list_monitors(
 
 async fn create_monitor(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<MonitorBody>,
 ) -> Result<(StatusCode, Json<present::MonitorResponse>), AppError> {
-    let user = require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
     let input = monitor_input(body);
     validate_monitor(&input).map_err(AppError::Validation)?;
     let now = TimestampMillis::now();
-    let monitor = materialize(Id::new(), &input, now, None);
+    let monitor = materialize(Id::new(), project_id, &input, now, None);
     repo::insert_monitor(&state.db, &monitor).await?;
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "monitor.created",
         "monitor",
-        Some(&monitor.id.to_string()),
+        Some(monitor.id),
         now,
     )
     .await;
@@ -1083,60 +1095,59 @@ async fn create_monitor(
 
 async fn get_monitor(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    let user = require_user(&state, &jar).await?;
-    let editor = is_editor(&state, &user).await?;
-    Ok(Json(monitor_view(editor, detail(&state, id).await?)))
+    Ok(Json(monitor_view(
+        member.is_editor(),
+        detail(&state, &member, id).await?,
+    )))
 }
 
 async fn update_monitor(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
     Json(body): Json<MonitorBody>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    let user = require_editor(&state, &jar).await?;
-    let existing = repo::get_monitor(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    member.require_editor()?;
+    let existing = workspace_monitor(&state, &member, id).await?;
     reject_agent_monitor(&existing, "Edit this check in the agent config.")?;
     let input = monitor_input(body);
     validate_monitor(&input).map_err(AppError::Validation)?;
     let now = TimestampMillis::now();
-    let mut monitor = materialize(id, &input, now, Some(&existing));
+    let mut monitor = materialize(id, existing.project_id, &input, now, Some(&existing));
     if monitor.active && !existing.active {
         monitor.next_check_at = now;
     }
     repo::update_monitor(&state.db, &monitor).await?;
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "monitor.updated",
         "monitor",
-        Some(&id.to_string()),
+        Some(id),
         now,
     )
     .await;
-    Ok(Json(detail(&state, id).await?))
+    Ok(Json(detail(&state, &member, id).await?))
 }
 
 async fn delete_monitor(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    let user = require_editor(&state, &jar).await?;
-    if !repo::delete_monitor(&state.db, id).await? {
+    member.require_editor()?;
+    if !repo::delete_monitor(&state.db, member.workspace_id, id).await? {
         return Err(AppError::NotFound);
     }
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "monitor.deleted",
         "monitor",
-        Some(&id.to_string()),
+        Some(id),
         TimestampMillis::now(),
     )
     .await;
@@ -1145,24 +1156,23 @@ async fn delete_monitor(
 
 async fn run_check(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    require_editor(&state, &jar).await?;
-    let monitor = repo::get_monitor(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    member.require_editor()?;
+    let monitor = workspace_monitor(&state, &member, id).await?;
     reject_agent_monitor(&monitor, "The agent runs this check on its own schedule.")?;
     engine::execute(&state, id).await?;
-    Ok(Json(detail(&state, id).await?))
+    Ok(Json(detail(&state, &member, id).await?))
 }
 
 async fn list_agents(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::AgentResponse>>, AppError> {
-    require_user(&state, &jar).await?;
-    let agents = repo::list_agents(&state.db).await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let agents = repo::list_agents(&state.db, member.workspace_id, project).await?;
     Ok(Json(
         agents.iter().map(present::AgentResponse::from).collect(),
     ))
@@ -1170,39 +1180,33 @@ async fn list_agents(
 
 #[derive(Deserialize)]
 struct AgentBody {
+    project_id: Option<Id>,
     name: String,
 }
 
 async fn create_agent(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<AgentBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let user = require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
     let name = body.name.trim();
     if name.is_empty() || name.chars().count() > 60 {
         return Err(AppError::field("name", "Use 1 to 60 characters."));
     }
-    if repo::agent_by_name(&state.db, name).await?.is_some() {
+    if repo::agent_name_taken(&state.db, project_id, name).await? {
         return Err(AppError::field(
             "name",
-            "An agent with this name already exists.",
+            "An agent with this name already exists in this project.",
         ));
     }
     let id = Id::new();
     let token = generate_token();
     let now = TimestampMillis::now();
-    repo::insert_agent(&state.db, id, name, &hash_token(&token), now).await?;
-    let _ = repo::insert_audit(
-        &state.db,
-        Some(user.id),
-        "agent.created",
-        "agent",
-        Some(&id.to_string()),
-        now,
-    )
-    .await;
-    let agent = repo::get_agent(&state.db, id)
+    repo::insert_agent(&state.db, id, project_id, name, &hash_token(&token), now).await?;
+    audit(&state.db, &member, "agent.created", "agent", Some(id), now).await;
+    let agent = repo::workspace_agent(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::Internal)?;
     let mut response = json!(present::AgentResponse::from(&agent));
@@ -1212,11 +1216,11 @@ async fn create_agent(
 
 async fn delete_agent(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    let user = require_editor(&state, &jar).await?;
-    let agent = repo::get_agent(&state.db, id)
+    member.require_editor()?;
+    let agent = repo::workspace_agent(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     if !repo::delete_agent(&state.db, id).await? {
@@ -1225,12 +1229,12 @@ async fn delete_agent(
             agent.name, agent.monitor_count
         )));
     }
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "agent.deleted",
         "agent",
-        Some(&id.to_string()),
+        Some(id),
         TimestampMillis::now(),
     )
     .await;
@@ -1305,7 +1309,7 @@ async fn agent_checks(
             failure_threshold: input.failure_threshold,
         });
     }
-    let ids = repo::sync_agent_checks(&state.db, agent.id, &checks, TimestampMillis::now()).await?;
+    let ids = repo::sync_agent_checks(&state.db, &agent, &checks, TimestampMillis::now()).await?;
     Ok(Json(json!({
         "checks": ids
             .iter()
@@ -1354,14 +1358,12 @@ struct ActiveBody {
 
 async fn set_active(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
     Json(body): Json<ActiveBody>,
 ) -> Result<Json<present::MonitorResponse>, AppError> {
-    require_editor(&state, &jar).await?;
-    let monitor = repo::get_monitor(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    member.require_editor()?;
+    let monitor = workspace_monitor(&state, &member, id).await?;
     let now = TimestampMillis::now();
     let next = if body.active {
         now.as_millis()
@@ -1369,11 +1371,13 @@ async fn set_active(
         monitor.next_check_at.as_millis()
     };
     repo::set_active(&state.db, id, body.active, next, now.as_millis()).await?;
-    Ok(Json(detail(&state, id).await?))
+    Ok(Json(detail(&state, &member, id).await?))
 }
 
 #[derive(Deserialize)]
 struct PageBody {
+    /// Read on create only.
+    project_id: Option<Id>,
     title: String,
     description: Option<String>,
     slug: String,
@@ -1384,10 +1388,11 @@ struct PageBody {
 
 async fn list_pages(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::PageResponse>>, AppError> {
-    require_user(&state, &jar).await?;
-    let pages = repo::list_pages(&state.db).await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let pages = repo::list_pages(&state.db, member.workspace_id, project).await?;
     let mut response = Vec::new();
     for page in pages {
         let components = repo::components(&state.db, page.id).await?;
@@ -1398,20 +1403,22 @@ async fn list_pages(
 
 async fn create_page(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<PageBody>,
 ) -> Result<(StatusCode, Json<present::PageResponse>), AppError> {
-    let user = require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
     let (title, description, slug, homepage) = validate_page(&body)?;
     if repo::page_by_slug(&state.db, &slug).await?.is_some() {
         return Err(AppError::Conflict(
             "That status page slug is already in use.".into(),
         ));
     }
-    let names = component_names(&state, &body.monitor_ids).await?;
+    let names = component_names(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let page = Page {
         id: Id::new(),
+        project_id,
         title,
         description,
         slug,
@@ -1422,12 +1429,12 @@ async fn create_page(
     };
     repo::insert_page(&state.db, &page).await?;
     repo::replace_components(&state.db, page.id, &names, now).await?;
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "page.created",
         "page",
-        Some(&page.id.to_string()),
+        Some(page.id),
         now,
     )
     .await;
@@ -1440,11 +1447,10 @@ async fn create_page(
 
 async fn get_page(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<Json<present::PageResponse>, AppError> {
-    require_user(&state, &jar).await?;
-    let page = repo::get_page(&state.db, id)
+    let page = repo::workspace_page(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let components = repo::components(&state.db, id).await?;
@@ -1453,12 +1459,12 @@ async fn get_page(
 
 async fn update_page(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
     Json(body): Json<PageBody>,
 ) -> Result<Json<present::PageResponse>, AppError> {
-    require_editor(&state, &jar).await?;
-    let existing = repo::get_page(&state.db, id)
+    member.require_editor()?;
+    let existing = repo::workspace_page(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let (title, description, slug, homepage) = validate_page(&body)?;
@@ -1469,10 +1475,11 @@ async fn update_page(
             ));
         }
     }
-    let names = component_names(&state, &body.monitor_ids).await?;
+    let names = component_names(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let page = Page {
         id,
+        project_id: existing.project_id,
         title,
         description,
         slug,
@@ -1483,24 +1490,35 @@ async fn update_page(
     };
     repo::update_page(&state.db, &page).await?;
     repo::replace_components(&state.db, id, &names, now).await?;
+    audit(&state.db, &member, "page.updated", "page", Some(id), now).await;
     let components = repo::components(&state.db, id).await?;
     Ok(Json(present::page_response(&page, &components)))
 }
 
 async fn delete_page(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
-    if !repo::delete_page(&state.db, id).await? {
+    member.require_editor()?;
+    if !repo::delete_page(&state.db, member.workspace_id, id).await? {
         return Err(AppError::NotFound);
     }
+    audit(
+        &state.db,
+        &member,
+        "page.deleted",
+        "page",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
 struct IncidentBody {
+    project_id: Option<Id>,
     title: String,
     status: IncidentStatus,
     impact: IncidentImpact,
@@ -1517,26 +1535,28 @@ struct UpdateBody {
 
 async fn list_incidents(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::IncidentResponse>>, AppError> {
-    require_user(&state, &jar).await?;
-    Ok(Json(
-        incident_views(&state, repo::list_incidents(&state.db).await?).await?,
-    ))
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let incidents = repo::list_incidents(&state.db, member.workspace_id, project).await?;
+    Ok(Json(incident_views(&state, incidents).await?))
 }
 
 async fn create_incident(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<IncidentBody>,
 ) -> Result<(StatusCode, Json<present::IncidentResponse>), AppError> {
-    let user = require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
     let (title, message) = validate_incident(&body.title, &body.message)?;
-    ensure_links(&state, body.page_id, body.monitor_id).await?;
+    ensure_links(&state, &member, body.page_id, body.monitor_id).await?;
     let now = TimestampMillis::now();
     let id = Id::new();
     let incident = Incident {
         id,
+        project_id,
         page_id: body.page_id,
         monitor_id: body.monitor_id,
         title,
@@ -1559,12 +1579,12 @@ async fn create_incident(
     let mut tx = state.db.begin().await?;
     repo::insert_incident(&mut tx, &incident, &update).await?;
     tx.commit().await?;
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "incident.created",
         "incident",
-        Some(&id.to_string()),
+        Some(id),
         now,
     )
     .await;
@@ -1577,11 +1597,10 @@ async fn create_incident(
 
 async fn get_incident(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<Json<present::IncidentResponse>, AppError> {
-    require_user(&state, &jar).await?;
-    let incident = repo::get_incident(&state.db, id)
+    let incident = repo::workspace_incident(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let updates = repo::updates_for(&state.db, &[id]).await?;
@@ -1590,12 +1609,12 @@ async fn get_incident(
 
 async fn add_update(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<present::IncidentResponse>, AppError> {
-    let user = require_editor(&state, &jar).await?;
-    let incident = repo::get_incident(&state.db, id)
+    member.require_editor()?;
+    let incident = repo::workspace_incident(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let message = body.message.trim().to_owned();
@@ -1622,16 +1641,16 @@ async fn add_update(
     repo::apply_incident_status(&mut tx, id, body.status, resolved, now.as_millis()).await?;
     repo::insert_update(&mut tx, &update).await?;
     tx.commit().await?;
-    let _ = repo::insert_audit(
+    audit(
         &state.db,
-        Some(user.id),
+        &member,
         "incident.updated",
         "incident",
-        Some(&id.to_string()),
+        Some(id),
         now,
     )
     .await;
-    let updated = repo::get_incident(&state.db, id)
+    let updated = repo::workspace_incident(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::Internal)?;
     notify_incident(&state, &updated, &message).await;
@@ -1641,22 +1660,28 @@ async fn add_update(
 
 async fn delete_incident(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
-    let result = sqlx::query("DELETE FROM incidents WHERE id = $1")
-        .bind(id.to_string())
-        .execute(state.db.pool())
-        .await?;
-    if result.rows_affected() == 0 {
+    member.require_editor()?;
+    if !repo::delete_incident(&state.db, member.workspace_id, id).await? {
         return Err(AppError::NotFound);
     }
+    audit(
+        &state.db,
+        &member,
+        "incident.deleted",
+        "incident",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
 struct MaintenanceBody {
+    project_id: Option<Id>,
     title: String,
     message: String,
     page_id: Id,
@@ -1667,11 +1692,12 @@ struct MaintenanceBody {
 
 async fn list_maintenances(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::MaintenanceResponse>>, AppError> {
-    require_user(&state, &jar).await?;
+    let project = filter.resolve(&state.db, member.workspace_id).await?;
     let now = TimestampMillis::now();
-    let rows = repo::list_maintenances(&state.db).await?;
+    let rows = repo::list_maintenances(&state.db, member.workspace_id, project).await?;
     Ok(Json(
         rows.iter()
             .map(|row| present::maintenance_response(row, now))
@@ -1681,10 +1707,11 @@ async fn list_maintenances(
 
 async fn create_maintenance(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<MaintenanceBody>,
 ) -> Result<(StatusCode, Json<present::MaintenanceResponse>), AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
     let title = body.title.trim().to_owned();
     let message = body.message.trim().to_owned();
     let mut fields = BTreeMap::new();
@@ -1706,20 +1733,12 @@ async fn create_maintenance(
     if !fields.is_empty() {
         return Err(AppError::Validation(fields));
     }
-    if repo::get_page(&state.db, body.page_id).await?.is_none() {
-        return Err(AppError::field("page_id", "Choose a status page."));
-    }
-    for monitor_id in &body.monitor_ids {
-        if repo::get_monitor(&state.db, *monitor_id).await?.is_none() {
-            return Err(AppError::field(
-                "monitor_ids",
-                "One of the monitors does not exist.",
-            ));
-        }
-    }
+    ensure_links(&state, &member, Some(body.page_id), None).await?;
+    ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let maintenance = Maintenance {
         id: Id::new(),
+        project_id,
         page_id: Some(body.page_id),
         title,
         message,
@@ -1729,6 +1748,15 @@ async fn create_maintenance(
         created_at: now,
     };
     repo::insert_maintenance(&state.db, &maintenance).await?;
+    audit(
+        &state.db,
+        &member,
+        "maintenance.created",
+        "maintenance",
+        Some(maintenance.id),
+        now,
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(present::maintenance_response(&maintenance, now)),
@@ -1737,13 +1765,22 @@ async fn create_maintenance(
 
 async fn delete_maintenance(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
-    if !repo::delete_maintenance(&state.db, id).await? {
+    member.require_editor()?;
+    if !repo::delete_maintenance(&state.db, member.workspace_id, id).await? {
         return Err(AppError::NotFound);
     }
+    audit(
+        &state.db,
+        &member,
+        "maintenance.deleted",
+        "maintenance",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1756,12 +1793,13 @@ struct ChannelBody {
     monitor_ids: Vec<Id>,
 }
 
+/// Editors only: channel configs hold webhook secrets and URLs with tokens.
 async fn list_channels(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
 ) -> Result<Json<Vec<present::ChannelResponse>>, AppError> {
-    require_editor(&state, &jar).await?;
-    let channels = repo::list_channels(&state.db).await?;
+    member.require_editor()?;
+    let channels = repo::list_channels(&state.db, member.workspace_id).await?;
     let mut response = Vec::new();
     for channel in channels {
         response.push(channel_view(&state, channel).await?);
@@ -1771,15 +1809,16 @@ async fn list_channels(
 
 async fn create_channel(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Json(body): Json<ChannelBody>,
 ) -> Result<(StatusCode, Json<present::ChannelResponse>), AppError> {
-    require_editor(&state, &jar).await?;
+    member.require_editor()?;
     let (name, provider, config) = validate_channel(&body)?;
-    ensure_monitors(&state, &body.monitor_ids).await?;
+    ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let channel = Channel {
         id: Id::new(),
+        workspace_id: member.workspace_id,
         name,
         provider,
         config_json: config,
@@ -1787,6 +1826,15 @@ async fn create_channel(
         created_at: now,
     };
     repo::insert_channel(&state.db, &channel, &body.monitor_ids).await?;
+    audit(
+        &state.db,
+        &member,
+        "notification.created",
+        "notification",
+        Some(channel.id),
+        now,
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(channel_view(&state, channel).await?),
@@ -1795,18 +1843,19 @@ async fn create_channel(
 
 async fn update_channel(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
     Json(body): Json<ChannelBody>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
-    require_editor(&state, &jar).await?;
-    let existing = repo::get_channel(&state.db, id)
+    member.require_editor()?;
+    let existing = repo::workspace_channel(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let (name, provider, config) = validate_channel(&body)?;
-    ensure_monitors(&state, &body.monitor_ids).await?;
+    ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let channel = Channel {
         id,
+        workspace_id: existing.workspace_id,
         name,
         provider,
         config_json: config,
@@ -1825,23 +1874,32 @@ async fn update_channel(
 
 async fn delete_channel(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<StatusCode, AppError> {
-    require_editor(&state, &jar).await?;
-    if !repo::delete_channel(&state.db, id).await? {
+    member.require_editor()?;
+    if !repo::delete_channel(&state.db, member.workspace_id, id).await? {
         return Err(AppError::NotFound);
     }
+    audit(
+        &state.db,
+        &member,
+        "notification.deleted",
+        "notification",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn test_channel(
     State(state): State<AppState>,
-    jar: CookieJar,
+    member: Member,
     Path(id): Path<Id>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
-    require_editor(&state, &jar).await?;
-    let channel = repo::get_channel(&state.db, id)
+    member.require_editor()?;
+    let channel = repo::workspace_channel(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     let payload = NotificationPayload {
@@ -1868,18 +1926,14 @@ async fn public_page(
     }
     let components = repo::components(&state.db, page.id).await?;
     let stats = load_stats(&state).await?;
-    let monitors = repo::list_monitors(&state.db).await?;
     let mut public_components = Vec::new();
     let mut states = Vec::new();
     for component in &components {
-        let Some(monitor) = monitors
-            .iter()
-            .find(|monitor| monitor.id == component.monitor_id)
-        else {
+        let Some(monitor) = repo::get_monitor(&state.db, component.monitor_id).await? else {
             continue;
         };
         states.push(monitor.state);
-        let response = present::monitor_response(monitor, stats_view(&stats), 90, Vec::new());
+        let response = present::monitor_response(&monitor, stats_view(&stats), 90, Vec::new());
         public_components.push(present::PublicComponent {
             id: component.id,
             name: component.name.clone(),
@@ -1942,10 +1996,12 @@ async fn load_stats(state: &AppState) -> Result<LoadedStats, AppError> {
     })
 }
 
-async fn detail(state: &AppState, id: Id) -> Result<present::MonitorResponse, AppError> {
-    let monitor = repo::get_monitor(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+async fn detail(
+    state: &AppState,
+    member: &Member,
+    id: Id,
+) -> Result<present::MonitorResponse, AppError> {
+    let monitor = workspace_monitor(state, member, id).await?;
     let stats = load_stats(state).await?;
     let recent = repo::recent_checks(&state.db, id, 60).await?;
     Ok(present::monitor_response(
@@ -1954,16 +2010,6 @@ async fn detail(state: &AppState, id: Id) -> Result<present::MonitorResponse, Ap
         90,
         recent,
     ))
-}
-
-async fn open_incident_views(state: &AppState) -> Result<Vec<present::IncidentResponse>, AppError> {
-    let incidents = repo::list_incidents(&state.db)
-        .await?
-        .into_iter()
-        .filter(|incident| incident.status != IncidentStatus::Resolved)
-        .take(8)
-        .collect::<Vec<_>>();
-    incident_views(state, incidents).await
 }
 
 async fn incident_views(
@@ -2004,7 +2050,14 @@ async fn notify_incident(state: &AppState, incident: &Incident, message: &str) {
         }),
         message: Some(message.to_owned()),
     };
-    notify::fanout(state, &payload, incident.monitor_id, Some(incident.id)).await;
+    notify::fanout(
+        state,
+        &payload,
+        incident.project_id,
+        incident.monitor_id,
+        Some(incident.id),
+    )
+    .await;
 }
 
 fn monitor_input(body: MonitorBody) -> MonitorInput {
@@ -2029,12 +2082,14 @@ fn monitor_input(body: MonitorBody) -> MonitorInput {
 
 fn materialize(
     id: Id,
+    project_id: Id,
     input: &MonitorInput,
     now: TimestampMillis,
     previous: Option<&Monitor>,
 ) -> Monitor {
     Monitor {
         id,
+        project_id,
         name: input.name.trim().to_owned(),
         description: input.description.trim().to_owned(),
         job_type: input.job_type,
@@ -2181,10 +2236,35 @@ fn require_http_url(value: Option<&Value>) -> Result<String, AppError> {
     }
 }
 
-async fn component_names(state: &AppState, ids: &[Id]) -> Result<Vec<(Id, String)>, AppError> {
+/// The `project_id` of a create body. Missing is a field error, and a project
+/// outside the member's workspace is 404.
+async fn body_project(
+    state: &AppState,
+    member: &Member,
+    project_id: Option<Id>,
+) -> Result<Id, AppError> {
+    let project_id =
+        project_id.ok_or_else(|| AppError::field("project_id", "Choose a project."))?;
+    require_project(&state.db, member.workspace_id, project_id).await?;
+    Ok(project_id)
+}
+
+async fn workspace_monitor(state: &AppState, member: &Member, id: Id) -> Result<Monitor, AppError> {
+    repo::workspace_monitor(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+/// Linked monitors must sit in the member's workspace. Any other id reads as
+/// missing, so a foreign id is indistinguishable from an unknown one.
+async fn component_names(
+    state: &AppState,
+    member: &Member,
+    ids: &[Id],
+) -> Result<Vec<(Id, String)>, AppError> {
     let mut names = Vec::new();
     for id in ids {
-        let monitor = repo::get_monitor(&state.db, *id)
+        let monitor = repo::workspace_monitor(&state.db, member.workspace_id, *id)
             .await?
             .ok_or_else(|| AppError::field("monitor_ids", "One of the monitors does not exist."))?;
         names.push((monitor.id, monitor.name));
@@ -2194,32 +2274,29 @@ async fn component_names(state: &AppState, ids: &[Id]) -> Result<Vec<(Id, String
 
 async fn ensure_links(
     state: &AppState,
+    member: &Member,
     page_id: Option<Id>,
     monitor_id: Option<Id>,
 ) -> Result<(), AppError> {
-    if let Some(page_id) = page_id {
-        if repo::get_page(&state.db, page_id).await?.is_none() {
-            return Err(AppError::field("page_id", "Choose a status page."));
-        }
+    if let Some(page_id) = page_id
+        && repo::workspace_page(&state.db, member.workspace_id, page_id)
+            .await?
+            .is_none()
+    {
+        return Err(AppError::field("page_id", "Choose a status page."));
     }
-    if let Some(monitor_id) = monitor_id {
-        if repo::get_monitor(&state.db, monitor_id).await?.is_none() {
-            return Err(AppError::field("monitor_id", "Choose a monitor."));
-        }
+    if let Some(monitor_id) = monitor_id
+        && repo::workspace_monitor(&state.db, member.workspace_id, monitor_id)
+            .await?
+            .is_none()
+    {
+        return Err(AppError::field("monitor_id", "Choose a monitor."));
     }
     Ok(())
 }
 
-async fn ensure_monitors(state: &AppState, ids: &[Id]) -> Result<(), AppError> {
-    for id in ids {
-        if repo::get_monitor(&state.db, *id).await?.is_none() {
-            return Err(AppError::field(
-                "monitor_ids",
-                "One of the monitors does not exist.",
-            ));
-        }
-    }
-    Ok(())
+async fn ensure_monitors(state: &AppState, member: &Member, ids: &[Id]) -> Result<(), AppError> {
+    component_names(state, member, ids).await.map(|_| ())
 }
 
 async fn channel_view(
@@ -2251,7 +2328,10 @@ async fn require_agent(state: &AppState, headers: &HeaderMap) -> Result<Agent, A
 
 async fn user_response(state: &AppState, user: &User) -> Result<present::UserResponse, AppError> {
     let root_id = instance_settings::root_user_id(&state.db).await?;
-    Ok(present::UserResponse::with_access(user, root_id))
+    let workspaces = workspaces::access_for_user(&state.db, user.id).await?;
+    Ok(present::UserResponse::with_access(
+        user, root_id, workspaces,
+    ))
 }
 
 async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
@@ -2265,9 +2345,8 @@ async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppErro
     Ok(user)
 }
 
-/// Members only read. Every other cookie route that changes data, or shows a
-/// secret, goes through here.
-pub(crate) async fn require_editor(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
+/// Root, or an account the root user promoted. Guards `/admin/*`.
+async fn require_installation_admin(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
     let user = require_user(state, jar).await?;
     if !is_editor(state, &user).await? {
         return Err(AppError::Forbidden("Only an admin can change this."));
@@ -2277,7 +2356,7 @@ pub(crate) async fn require_editor(state: &AppState, jar: &CookieJar) -> Result<
 
 async fn is_editor(state: &AppState, user: &User) -> Result<bool, AppError> {
     let root_id = instance_settings::root_user_id(&state.db).await?;
-    Ok(present::UserResponse::with_access(user, root_id).installation_admin)
+    Ok(user.installation_admin || root_id == Some(user.id))
 }
 
 /// Request headers, bodies, URL credentials, and query strings often carry API
