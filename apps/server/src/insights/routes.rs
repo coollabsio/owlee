@@ -280,7 +280,14 @@ async fn accept_event(
         .map(Value::to_string)
         .filter(|value| value.len() <= 4096);
     let now = now_secs();
-    let place = geo::locate(state.geo.as_deref(), headers, client.hops, &client.ip);
+    let salt = state.insights_salt.for_time(&state.db, now).await?;
+    let place = geo::locate(
+        state.geo.as_deref(),
+        headers,
+        client.hops,
+        &client.ip,
+        state.config.ingest.analytics_geo,
+    );
     let (browser, os, device) = parse_user_agent(ua);
     record::record(
         &state.db,
@@ -288,15 +295,12 @@ async fn accept_event(
             site_id: Some(site_id.clone()),
             timestamp: now,
             event_type: payload.kind,
-            session_id: Some(session_id(
-                &state.insights_secret,
-                &site_id,
-                &client.ip,
-                ua,
-                now,
-            )),
-            pathname: page.as_ref().map(|page| page.path.clone()),
-            url_query: page.as_ref().and_then(|page| page.query.clone()),
+            session_id: Some(session_id(&salt, &site_id, &client.ip, ua, now)),
+            pathname: page.as_ref().map(|page| scrub_path(&page.path)),
+            url_query: page
+                .as_ref()
+                .and_then(|page| page.query.as_deref())
+                .map(owlee_errors::scrub_query),
             title: payload
                 .title
                 .map(|title| clip(title.trim(), 500))
@@ -425,25 +429,35 @@ async fn resolve_slug(
         let ip = client.ip.clone();
         let (browser, os, device) = parse_user_agent(ua);
         let now = now_secs();
-        let place = geo::locate(state.geo.as_deref(), headers, client.hops, &ip);
-        let click = Incoming {
-            link_id: Some(id.clone()),
-            timestamp: now,
-            event_type: "click".into(),
-            session_id: Some(session_id(&state.insights_secret, &id, &ip, ua, now)),
-            referrer_domain: headers
-                .get(header::REFERER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(referrer_domain),
-            country: place.country,
-            region: place.region,
-            city: place.city,
-            browser,
-            os,
-            device,
-            ..Incoming::default()
+        let place = geo::locate(
+            state.geo.as_deref(),
+            headers,
+            client.hops,
+            &ip,
+            state.config.ingest.analytics_geo,
+        );
+        let recorded = async {
+            let salt = state.insights_salt.for_time(&state.db, now).await?;
+            let click = Incoming {
+                link_id: Some(id.clone()),
+                timestamp: now,
+                event_type: "click".into(),
+                session_id: Some(session_id(&salt, &id, &ip, ua, now)),
+                referrer_domain: headers
+                    .get(header::REFERER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(referrer_domain),
+                country: place.country,
+                region: place.region,
+                city: place.city,
+                browser,
+                os,
+                device,
+                ..Incoming::default()
+            };
+            record::record(&state.db, click).await
         };
-        if let Err(error) = record::record(&state.db, click).await {
+        if let Err(error) = recorded.await {
             tracing::warn!(%error, "click was not recorded");
         }
     }
@@ -1947,3 +1961,12 @@ fn with_cors(mut response: Response<Body>) -> Response<Body> {
     );
     response
 }
+
+/// The parsed path keeps the URL fragment, where OAuth puts `access_token=`.
+fn scrub_path(path: &str) -> String {
+    match path.split_once('#') {
+        Some((path, fragment)) => format!("{path}#{}", owlee_errors::scrub_query(fragment)),
+        None => path.to_owned(),
+    }
+}
+

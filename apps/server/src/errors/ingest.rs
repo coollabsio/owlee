@@ -214,6 +214,7 @@ async fn accept_event(
     let quota = quota::effective(global, project.daily_quota);
     let ingested = store::ingest_event(
         &state.db,
+        &state.config.app_key,
         project,
         event,
         quota,

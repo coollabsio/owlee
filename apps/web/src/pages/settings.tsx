@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Button, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge, Switch } from "@/components/ui";
+import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, StatusBadge, Switch } from "@/components/ui";
 import {
   ApiError,
   api,
   type AdminUser,
   type AuthSession,
   changePassword,
+  deleteUserErrors,
+  exportUserErrors,
   type InstanceSettings,
   listSessions,
   type Meta,
@@ -63,6 +65,7 @@ export function SettingsPage() {
       {root ? <EmailCard settings={settings.data} /> : null}
       {root ? <QuotaCard settings={settings.data} /> : null}
       {installationAdmin ? <UsersCard users={users.data} error={users.error} canChange={root} /> : null}
+      {installationAdmin ? <PrivacyCard /> : null}
     </div>
   );
 }
@@ -399,6 +402,75 @@ function UsersCard({
           </li>
         ))}
       </ul>
+    </LayerCard>
+  );
+}
+
+function PrivacyCard() {
+  const [user, setUser] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const exported = useMutation({
+    mutationFn: () => exportUserErrors(user.trim()),
+    onSuccess: (data) => {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "owlee-error-events.json";
+      link.click();
+      URL.revokeObjectURL(url);
+    },
+  });
+  const removed = useMutation({
+    mutationFn: () => deleteUserErrors(user.trim()),
+    onSuccess: () => setConfirming(false),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    exported.mutate();
+  }
+  return (
+    <LayerCard
+      title="Privacy requests"
+      description="Export or erase the error events stored for one person. Analytics data cannot be tied to a person, so it needs no request."
+    >
+      <form className="flex flex-col gap-3" onSubmit={submit}>
+        <Field label="User" hint="Id, email, username, or IP address">
+          <Input required value={user} onChange={(event) => setUser(event.target.value)} />
+        </Field>
+        <div className="flex gap-2">
+          <Button type="submit" disabled={!user.trim() || exported.isPending}>
+            {exported.isPending ? "Exporting…" : "Export JSON"}
+          </Button>
+          <Button type="button" variant="danger" disabled={!user.trim()} onClick={() => setConfirming(true)}>
+            Delete events
+          </Button>
+        </div>
+        {exported.isSuccess ? (
+          <p className="text-xs text-[var(--ui-fg-faint)]">Exported {exported.data.events.length} events.</p>
+        ) : null}
+        {removed.isSuccess ? (
+          <p className="text-xs text-[var(--ui-fg-faint)]">Deleted {removed.data.deleted} events.</p>
+        ) : null}
+        <ErrorText error={exported.error} />
+      </form>
+      <Dialog
+        open={confirming}
+        title="Delete error events?"
+        description={`Every stored error event for ${user.trim()} is deleted. This cannot be undone.`}
+        onClose={() => setConfirming(false)}
+        footer={
+          <>
+            <Button type="button" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" disabled={removed.isPending} onClick={() => removed.mutate()}>
+              {removed.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </>
+        }
+      >
+        <ErrorText error={removed.error} />
+      </Dialog>
     </LayerCard>
   );
 }

@@ -21,7 +21,7 @@ pub struct AppState {
     pub scheduler_id: String,
     pub inflight: Inflight,
     pub connectivity: Connectivity,
-    pub insights_secret: String,
+    pub insights_salt: Arc<crate::insights::Salt>,
     pub public_limit: Arc<crate::insights::RateLimiter>,
     pub error_project_limit: Arc<TokenBucket>,
     pub error_ip_limit: Arc<TokenBucket>,
@@ -101,10 +101,11 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
     .await?;
     let applied = migrations::runner().run(&database).await?;
     tracing::info!(applied, backend = config.backend_name(), "database ready");
-    let passwords = PasswordService::new(config.argon_memory_kib)?;
-    let insights = crate::insights::prepare(&database, &config)
+    crate::errors::privatize_events(&database, &config.app_key)
         .await
         .map_err(|error| BootError::Config(error.to_string()))?;
+    let passwords = PasswordService::new(config.argon_memory_kib)?;
+    let insights = crate::insights::prepare(&config);
     crate::instance_settings::apply_quota_env(&database, &config.ingest, &config.app_key)
         .await
         .map_err(|error| BootError::Config(error.to_string()))?;
@@ -116,7 +117,7 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         inflight: Inflight::default(),
         connectivity: Connectivity::new(config.connectivity_targets.clone()),
         passwords,
-        insights_secret: insights.secret,
+        insights_salt: Arc::default(),
         public_limit: insights.public_limit,
         error_project_limit: Arc::new(TokenBucket::per_minute(
             ingest.error_rate_project_per_min,
@@ -197,13 +198,22 @@ pub fn testing_config(path: PathBuf) -> Config {
 /// Signs in a new admin without mail, for tests on a reused database where
 /// setup already ran. Returns the `name=value` cookie pair.
 pub async fn editor_session(state: &AppState) -> Result<String, sqlx::Error> {
+    session_with_role(state, "admin").await
+}
+
+/// Like `editor_session`, for a read-only member.
+pub async fn member_session(state: &AppState) -> Result<String, sqlx::Error> {
+    session_with_role(state, "member").await
+}
+
+async fn session_with_role(state: &AppState, role: &str) -> Result<String, sqlx::Error> {
     use owlee_platform::{Id, TimestampMillis, generate_token, hash_token};
 
     let now = TimestampMillis::now();
     let id = Id::new();
-    let email = format!("editor-{id}@example.com");
+    let email = format!("{role}-{id}@example.com");
     crate::repo::insert_user(
-        &state.db, id, &email, &email, "Editor", "unusable", "admin", now,
+        &state.db, id, &email, &email, "Editor", "unusable", role, now,
     )
     .await?;
     let token = generate_token();

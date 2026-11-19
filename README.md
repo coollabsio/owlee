@@ -243,7 +243,7 @@ Events are accepted only when `Origin` (or `Referer`, if `Origin` is missing) ma
 
 The same site key and the same client IP each have a token bucket. A full bucket or a full daily quota answers `429` with `Retry-After`. The default is `OWLEE_ANALYTICS_DAILY_QUOTA` (1,000,000 per site). A million pageviews a day is a large site for this install; a site can set a lower or higher cap of its own. The counter resets at 00:00 UTC. `window.owleeEvent(name, data)` records a custom event.
 
-Raw `insight_events` rows, including link clicks, older than `OWLEE_ANALYTICS_RETENTION_DAYS` (90) are deleted in batches. Daily rollups (`insight_daily`, `insight_link_daily`, and the dimension tables) stay, and those are what the overview reads. `insight_events(timestamp)` is indexed for the delete.
+Raw `insight_events` rows, including link clicks, older than `OWLEE_ANALYTICS_RETENTION_DAYS` (90) are deleted in batches, with their visits and per-day visitor ids. Daily rollups (`insight_daily`, `insight_link_daily`, and the dimension tables) stay, and those are what the overview reads. `insight_events(timestamp)` is indexed for the delete.
 
 Visitor ids rotate monthly. A visit ends after 30 minutes of idle time. Set `OWLEE_PROXY_HOPS` when Owlee sits behind a reverse proxy (`1` for Traefik or Coolify, which is the default in `deploy/compose.yaml`; `2` when Cloudflare is also in front, which enables `cf-ipcountry` / `cf-region` / `cf-ipcity`). `0` ignores `X-Forwarded-For` and treats the proxy as the client, so every visitor shares one rate-limit bucket. `X-Forwarded-For` and the Cloudflare headers are read only when the TCP peer is in `OWLEE_TRUSTED_PROXIES` (comma-separated CIDRs; the default is loopback and private networks, `none` trusts no proxy, `0.0.0.0/0` is refused). A client that reaches the port directly cannot fake its address or location. Add the Cloudflare ranges only if Cloudflare connects to Owlee with no proxy between them. Point `OWLEE_GEOIP_PATH` at a MaxMind or DB-IP city `.mmdb` if you want country, region, and city without Cloudflare. DB-IP Lite data is published by [DB-IP](https://db-ip.com).
 
@@ -298,6 +298,10 @@ deploy          Docker Compose
 docs            README screenshots
 examples        PHP, JavaScript, and Rust programs that send errors
 ```
+
+## Privacy
+
+[PRIVACY.md](PRIVACY.md) lists what Owlee stores, how long it keeps it, and how to answer access and erasure requests.
 
 ## Attribution
 

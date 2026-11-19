@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use axum::http::HeaderMap;
 use owlee_insights::clip;
 use maxminddb::{Reader, geoip2};
+use owlee_platform::GeoPrecision;
 
 #[derive(Clone, Debug, Default)]
 pub struct Place {
@@ -16,14 +17,25 @@ pub fn locate(
     headers: &HeaderMap,
     proxy_hops: usize,
     ip: &str,
+    precision: GeoPrecision,
 ) -> Place {
+    if precision == GeoPrecision::Off {
+        return Place::default();
+    }
     let cloudflare = from_cloudflare(headers, proxy_hops);
     let database = from_database(reader, ip).unwrap_or_default();
-    Place {
+    let mut place = Place {
         country: cloudflare.country.or(database.country),
         region: cloudflare.region.or(database.region),
         city: cloudflare.city.or(database.city),
+    };
+    if precision != GeoPrecision::City {
+        place.city = None;
     }
+    if precision == GeoPrecision::Country {
+        place.region = None;
+    }
+    place
 }
 
 fn header(headers: &HeaderMap, name: &str, max: usize) -> Option<String> {
@@ -89,5 +101,41 @@ pub fn open_reader(path: &std::path::Path) -> Option<Reader<Vec<u8>>> {
             tracing::warn!(%error, path = %path.display(), "analytics geolocation database was not opened");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+    use owlee_platform::GeoPrecision;
+
+    use super::locate;
+
+    fn cloudflare() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-ipcountry", "nl".parse().unwrap());
+        headers.insert("cf-region", "North Holland".parse().unwrap());
+        headers.insert("cf-ipcity", "Amsterdam".parse().unwrap());
+        headers
+    }
+
+    fn fields(precision: GeoPrecision) -> [Option<String>; 3] {
+        let place = locate(None, &cloudflare(), 2, "203.0.113.7", precision);
+        [place.country, place.region, place.city]
+    }
+
+    #[test]
+    fn precision_drops_finer_fields() {
+        let some = |value: &str| Some(value.to_owned());
+        assert_eq!(
+            fields(GeoPrecision::City),
+            [some("NL"), some("North Holland"), some("Amsterdam")]
+        );
+        assert_eq!(
+            fields(GeoPrecision::Region),
+            [some("NL"), some("North Holland"), None]
+        );
+        assert_eq!(fields(GeoPrecision::Country), [some("NL"), None, None]);
+        assert_eq!(fields(GeoPrecision::Off), [None, None, None]);
     }
 }

@@ -12,6 +12,7 @@ use axum::routing::{get, post, put};
 use crate::state::AppState;
 
 pub use seed::seed_demo;
+pub use store::privatize_events;
 
 pub fn api_routes() -> Router<AppState> {
     Router::new()
@@ -34,6 +35,10 @@ pub fn api_routes() -> Router<AppState> {
             get(http::get_issue).patch(http::update_issue),
         )
         .route("/error-events/{id}", get(http::get_event))
+        .route(
+            "/privacy/errors",
+            get(http::export_user_events).delete(http::delete_user_events),
+        )
 }
 
 /// Sentry SDK paths. They take a DSN key, not the session cookie.

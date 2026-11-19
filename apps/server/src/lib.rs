@@ -42,5 +42,5 @@ pub use retention::prune_before;
 pub use routes::router;
 pub use seed::{DEMO_EMAIL, DEMO_PASSWORD};
 pub use setup::{SetupError, initialize_setup_token, is_complete, rotate_setup_token, setup_url};
-pub use state::{AppState, boot, editor_session, testing_config};
+pub use state::{AppState, boot, editor_session, member_session, testing_config};
 pub use verify::recheck_verified;

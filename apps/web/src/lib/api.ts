@@ -202,6 +202,17 @@ export const listSessions = () => api<AuthSession[]>("/api/auth/sessions");
 
 export const revokeSession = (id: string) => api<void>(`/api/auth/sessions/${id}`, { method: "DELETE" });
 
+export type PrivacyExport = {
+  user: string;
+  events: { id: string; projectId: string; projectName: string; timestamp: string; title: string; payload: unknown }[];
+};
+
+const privacyPath = (user: string) => `/api/privacy/errors?user=${encodeURIComponent(user)}`;
+
+export const exportUserErrors = (user: string) => api<PrivacyExport>(privacyPath(user));
+
+export const deleteUserErrors = (user: string) => api<{ deleted: number }>(privacyPath(user), { method: "DELETE" });
+
 export type InstanceSmtp = {
   host: string;
   port: number;

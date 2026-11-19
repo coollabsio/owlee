@@ -46,6 +46,7 @@ const LOGIN_BURST_IP: &str = "OWLEE_LOGIN_RATE_IP_BURST";
 const LOGIN_RATE_ACCOUNT: &str = "OWLEE_LOGIN_RATE_ACCOUNT_PER_MIN";
 const LOGIN_BURST_ACCOUNT: &str = "OWLEE_LOGIN_RATE_ACCOUNT_BURST";
 const APP_KEY: &str = "OWLEE_APP_KEY";
+const ANALYTICS_GEO: &str = "OWLEE_ANALYTICS_GEO";
 
 /// Limits for the public error and analytics ingest endpoints.
 #[derive(Clone, Debug)]
@@ -74,6 +75,31 @@ pub struct IngestConfig {
     pub login_rate_ip_burst: u32,
     pub login_rate_account_per_min: u32,
     pub login_rate_account_burst: u32,
+    pub analytics_geo: GeoPrecision,
+}
+
+/// The finest location saved for an analytics visit (`OWLEE_ANALYTICS_GEO`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GeoPrecision {
+    #[default]
+    City,
+    Region,
+    Country,
+    Off,
+}
+
+impl FromStr for GeoPrecision {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "city" => Ok(Self::City),
+            "region" => Ok(Self::Region),
+            "country" => Ok(Self::Country),
+            "off" => Ok(Self::Off),
+            _ => Err(()),
+        }
+    }
 }
 
 impl Default for IngestConfig {
@@ -101,6 +127,7 @@ impl Default for IngestConfig {
             login_rate_ip_burst: 10,
             login_rate_account_per_min: 10,
             login_rate_account_burst: 5,
+            analytics_geo: GeoPrecision::City,
         }
     }
 }
@@ -508,6 +535,12 @@ fn apply_ingest_env(config: &mut Config) -> Result<(), ConfigError> {
     if let Some(value) = optional(LOGIN_BURST_ACCOUNT) {
         ingest.login_rate_account_burst = parse_u32(LOGIN_BURST_ACCOUNT, &value)?;
     }
+    if let Some(value) = optional(ANALYTICS_GEO) {
+        ingest.analytics_geo = value.parse().map_err(|()| ConfigError::Invalid {
+            name: ANALYTICS_GEO,
+            value,
+        })?;
+    }
     Ok(())
 }
 
@@ -679,6 +712,33 @@ mod tests {
         unsafe {
             std::env::remove_var("OWLEE_APP_KEY");
             std::env::remove_var("OWLEE_ENV");
+        }
+    }
+
+    #[test]
+    fn analytics_geo_defaults_to_city_and_rejects_unknown_values() {
+        let _env = lock_process_env();
+        assert_eq!(
+            Config::from_env().unwrap().ingest.analytics_geo,
+            GeoPrecision::City
+        );
+        // SAFETY: the lock above is the only other writer of this variable.
+        unsafe {
+            std::env::set_var("OWLEE_ANALYTICS_GEO", "country");
+        }
+        assert_eq!(
+            Config::from_env().unwrap().ingest.analytics_geo,
+            GeoPrecision::Country
+        );
+        unsafe {
+            std::env::set_var("OWLEE_ANALYTICS_GEO", "street");
+        }
+        assert_eq!(
+            Config::from_env().unwrap_err().to_string(),
+            "OWLEE_ANALYTICS_GEO is invalid: street"
+        );
+        unsafe {
+            std::env::remove_var("OWLEE_ANALYTICS_GEO");
         }
     }
 

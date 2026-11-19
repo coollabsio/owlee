@@ -247,6 +247,52 @@ async fn sqlite_collects_pageviews_and_counts_short_link_clicks() {
 }
 
 #[tokio::test]
+async fn pageviews_filter_secrets_in_the_query_and_fragment() {
+    let (app, token) = app().await;
+    let cookie = owner(&app, token.as_deref().expect("setup token")).await;
+    let (_, site, _, _) = call(
+        &app,
+        "POST",
+        "/api/sites",
+        Some(json!({"name": "Docs", "domain": "coolify.io"})),
+        Some(&cookie),
+        Some(BROWSER),
+    )
+    .await;
+    let site_id = site["id"].as_str().unwrap();
+    let (status, _, _, _) = call(
+        &app,
+        "POST",
+        "/api/receive",
+        Some(json!({
+            "site": site["public_id"],
+            "type": "pageview",
+            "url": "https://coolify.io/callback?page=2&reset_token=abc#access_token=xyz&state=s"
+        })),
+        None,
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    for (dimension, expected) in [
+        ("path", "/callback#access_token=[Filtered]&state=s"),
+        ("query", "page=2&reset_token=[Filtered]"),
+    ] {
+        let (status, rows, _, _) = call(
+            &app,
+            "GET",
+            &format!("/api/sites/{site_id}/breakdown/{dimension}"),
+            None,
+            Some(&cookie),
+            Some(BROWSER),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(rows["rows"][0]["label"], expected, "{rows}");
+    }
+}
+
+#[tokio::test]
 async fn postgres_collects_a_pageview_when_configured() {
     let Some(url) = std::env::var("OWLEE_APP_POSTGRES_URL")
         .ok()

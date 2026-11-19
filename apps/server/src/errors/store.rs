@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use owlee_errors::NormalizedEvent;
-use owlee_platform::{Backend, Database};
+use owlee_platform::{AppKey, Backend, Database};
 use rand::RngCore;
 use serde::Serialize;
 use sqlx::Row;
@@ -378,6 +378,7 @@ pub struct Ingested {
 
 pub async fn ingest_event(
     db: &Database,
+    app_key: &AppKey,
     project: &Project,
     event: &NormalizedEvent,
     quota: i64,
@@ -467,7 +468,10 @@ pub async fn ingest_event(
         });
     let store_payload = stored_count < keep_first.max(1) || !window_open;
     if store_payload {
+        let hashes = user_hashes(app_key, event);
+        let insert_user = statement(db, INSERT_USER);
         let mut raw = event.raw.clone();
+        owlee_errors::scrub_raw_event(&mut raw);
         owlee_errors::limit_raw_event(&mut raw);
         let payload = serde_json::to_string(&raw).unwrap_or_else(|_| "{}".to_owned());
         let insert_event = statement(
@@ -485,10 +489,17 @@ pub async fn ingest_event(
             .bind(&event.title)
             .bind(&event.environment)
             .bind(&event.release)
-            .bind(user_key_of(event).unwrap_or_default())
+            .bind(hashes.first().cloned().unwrap_or_default())
             .bind(payload)
             .execute(&mut *tx)
             .await?;
+        for hash in &hashes {
+            sqlx::query(&insert_user)
+                .bind(hash)
+                .bind(&event.event_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         let next_stored = stored_count + 1;
         let next_window = if next_stored >= keep_first.max(1) {
             Some(now())
@@ -780,229 +791,99 @@ pub async fn issue_analytics(
     ))
 }
 
-pub async fn backfill_derived(db: &Database) -> Result<(), AppError> {
-    let missing = sqlx::query(
-        "SELECT i.id, i.project_id, p.slug FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.short_id IS NULL ORDER BY i.first_seen ASC",
-    )
-    .fetch_all(db.pool())
-    .await?;
-    for row in &missing {
-        let id: String = row.try_get("id")?;
-        let project_id: String = row.try_get("project_id")?;
-        let slug: String = row.try_get("slug")?;
-        let seq_sql = statement(
-            db,
-            "UPDATE projects SET next_issue = next_issue + 1 WHERE id = ? RETURNING next_issue",
-        );
-        let seq = sqlx::query(&seq_sql)
-            .bind(&project_id)
-            .fetch_one(db.pool())
-            .await?;
-        let next: i64 = seq.try_get("next_issue")?;
-        let short_id = format!("{}-{}", short_prefix(&slug), next - 1);
-        let update = statement(db, "UPDATE issues SET short_id = ? WHERE id = ?");
-        sqlx::query(&update)
-            .bind(short_id)
-            .bind(id)
-            .execute(db.pool())
-            .await?;
-    }
-    let keys = sqlx::query("SELECT id, payload FROM events WHERE user_key IS NULL")
-        .fetch_all(db.pool())
-        .await?;
-    for row in &keys {
-        let id: String = row.try_get("id")?;
-        let payload: String = row.try_get("payload")?;
-        let key = serde_json::from_str::<serde_json::Value>(&payload)
-            .ok()
-            .map(|raw| user_key_of(&owlee_errors::normalize_event(raw)))
-            .unwrap_or(None);
-        let update = statement(db, "UPDATE events SET user_key = ? WHERE id = ?");
-        sqlx::query(&update)
-            .bind(key.unwrap_or_default())
-            .bind(id)
-            .execute(db.pool())
-            .await?;
-    }
-    regroup_issues(db).await?;
-    Ok(())
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserEvent {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub timestamp: String,
+    pub title: String,
+    pub payload: serde_json::Value,
 }
 
-/// Recompute fingerprints from stored payloads and merge issues that now collide.
-/// SDK-internal frames used to split one Rust error into several issues.
-pub async fn regroup_issues(db: &Database) -> Result<(), AppError> {
-    let rows = sqlx::query(
-        "SELECT id, project_id, issue_id, timestamp, level, title, environment, release, payload FROM events",
-    )
-    .fetch_all(db.pool())
-    .await?;
-    if rows.is_empty() {
-        return Ok(());
-    }
-    struct EventGroup {
-        id: String,
-        project_id: String,
-        issue_id: String,
-        timestamp: String,
-        fingerprint: String,
-        title: String,
-        culprit: Option<String>,
-        level: String,
-        environment: Option<String>,
-        release: Option<String>,
-        unhandled: bool,
-    }
-    let mut events = Vec::new();
-    for row in &rows {
-        let payload: String = row.try_get("payload")?;
-        let raw = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
-        let normalized = owlee_errors::normalize_event(raw);
-        let unhandled = event_unhandled(&normalized);
-        events.push(EventGroup {
-            id: row.try_get("id")?,
-            project_id: row.try_get("project_id")?,
-            issue_id: row.try_get("issue_id")?,
-            timestamp: row.try_get("timestamp")?,
-            fingerprint: normalized.fingerprint,
-            title: normalized.title,
-            culprit: normalized.culprit,
-            level: normalized.level,
-            environment: normalized.environment,
-            release: normalized.release,
-            unhandled,
-        });
-    }
-    let issue_rows = sqlx::query("SELECT id, fingerprint, first_seen FROM issues")
+pub async fn events_for_user(db: &Database, user_key: &str) -> Result<Vec<UserEvent>, AppError> {
+    let sql = statement(
+        db,
+        "SELECT e.id, e.project_id, p.name AS project_name, e.timestamp, e.title, e.payload
+         FROM events e JOIN projects p ON p.id = e.project_id
+         WHERE e.id IN (SELECT event_id FROM event_users WHERE user_hash = ?)
+         ORDER BY e.timestamp",
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_key)
         .fetch_all(db.pool())
         .await?;
-    let mut issue_meta = std::collections::BTreeMap::new();
-    for row in &issue_rows {
-        let id: String = row.try_get("id")?;
-        issue_meta.insert(
-            id,
-            (
-                row.try_get::<String, _>("fingerprint")?,
-                row.try_get::<String, _>("first_seen")?,
-            ),
-        );
-    }
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for (index, event) in events.iter().enumerate() {
-        groups
-            .entry((event.project_id.clone(), event.fingerprint.clone()))
-            .or_default()
-            .push(index);
-    }
-    let mut tx = db.pool().begin().await?;
-    let mut survivors = Vec::new();
-    for ((_project_id, fingerprint), indexes) in groups {
-        let mut candidates: Vec<String> = indexes
-            .iter()
-            .map(|index| events[*index].issue_id.clone())
-            .collect();
-        candidates.sort();
-        candidates.dedup();
-        let survivor = candidates
-            .iter()
-            .filter(|id| {
-                issue_meta
-                    .get(*id)
-                    .map(|(current, _)| current == &fingerprint)
-                    .unwrap_or(false)
+    rows.iter()
+        .map(|row| {
+            let payload: String = row.try_get("payload")?;
+            Ok(UserEvent {
+                id: row.try_get("id")?,
+                project_id: row.try_get("project_id")?,
+                project_name: row.try_get("project_name")?,
+                timestamp: row.try_get("timestamp")?,
+                title: row.try_get("title")?,
+                payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
             })
-            .min_by_key(|id| {
-                issue_meta
-                    .get(*id)
-                    .map(|(_, seen)| seen.clone())
-                    .unwrap_or_default()
-            })
-            .cloned()
-            .or_else(|| {
-                candidates.into_iter().min_by_key(|id| {
-                    issue_meta
-                        .get(id)
-                        .map(|(_, seen)| seen.clone())
-                        .unwrap_or_default()
-                })
-            });
-        let Some(survivor) = survivor else {
-            continue;
-        };
-        for index in &indexes {
-            let event = &events[*index];
-            if event.issue_id == survivor {
-                continue;
+        })
+        .collect()
+}
+
+pub async fn delete_events_for_user(db: &Database, user_key: &str) -> Result<u64, AppError> {
+    let sql = statement(db, "DELETE FROM events WHERE id IN (SELECT event_id FROM event_users WHERE user_hash = ?)");
+    Ok(sqlx::query(&sql)
+        .bind(user_key)
+        .execute(db.pool())
+        .await?
+        .rows_affected())
+}
+
+/// Hashes `user_key` and scrubs `payload` on rows stored before either existed.
+/// The privacy migration clears `user_key`, so each row runs once.
+pub async fn privatize_events(db: &Database, app_key: &AppKey) -> Result<(), AppError> {
+    let update = statement(
+        db,
+        "UPDATE events SET user_key = ?, payload = ? WHERE id = ?",
+    );
+    let insert_user = statement(db, INSERT_USER);
+    loop {
+        let rows = sqlx::query("SELECT id, payload FROM events WHERE user_key IS NULL LIMIT 500")
+            .fetch_all(db.pool())
+            .await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        for row in &rows {
+            let id: String = row.try_get("id")?;
+            let payload: String = row.try_get("payload")?;
+            let (hashes, payload) = match serde_json::from_str::<serde_json::Value>(&payload) {
+                Ok(mut raw) => {
+                    let hashes =
+                        user_hashes(app_key, &owlee_errors::normalize_event(raw.clone()));
+                    owlee_errors::scrub_raw_event(&mut raw);
+                    (hashes, raw.to_string())
+                }
+                Err(_) => (Vec::new(), "{}".to_owned()),
+            };
+            for hash in &hashes {
+                sqlx::query(&insert_user)
+                    .bind(hash)
+                    .bind(&id)
+                    .execute(db.pool())
+                    .await?;
             }
-            let sql = statement(db, "UPDATE events SET issue_id = ? WHERE id = ?");
-            sqlx::query(&sql)
-                .bind(&survivor)
-                .bind(&event.id)
-                .execute(&mut *tx)
+            sqlx::query(&update)
+                .bind(hashes.first().cloned().unwrap_or_default())
+                .bind(payload)
+                .bind(id)
+                .execute(db.pool())
                 .await?;
         }
-        let mut members: Vec<&EventGroup> = indexes.iter().map(|index| &events[*index]).collect();
-        members.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
-        let first = members.first().unwrap();
-        let last = members.last().unwrap();
-        let unhandled = if members.iter().any(|event| event.unhandled) {
-            1
-        } else {
-            0
-        };
-        survivors.push((
-            survivor,
-            fingerprint,
-            last.title.clone(),
-            last.culprit.clone(),
-            last.level.clone(),
-            last.environment.clone(),
-            last.release.clone(),
-            first.timestamp.clone(),
-            last.timestamp.clone(),
-            members.len() as i64,
-            unhandled,
-        ));
     }
-    sqlx::query("DELETE FROM issues WHERE id NOT IN (SELECT DISTINCT issue_id FROM events)")
-        .execute(&mut *tx)
-        .await?;
-    for (
-        id,
-        fingerprint,
-        title,
-        culprit,
-        level,
-        environment,
-        release,
-        first_seen,
-        last_seen,
-        event_count,
-        unhandled,
-    ) in survivors
-    {
-        let sql = statement(
-            db,
-            "UPDATE issues SET fingerprint = ?, title = ?, culprit = ?, level = ?, environment = ?, release = ?, first_seen = ?, last_seen = ?, event_count = ?, unhandled = ? WHERE id = ?",
-        );
-        sqlx::query(&sql)
-            .bind(fingerprint)
-            .bind(title)
-            .bind(culprit)
-            .bind(level)
-            .bind(environment)
-            .bind(release)
-            .bind(first_seen)
-            .bind(last_seen)
-            .bind(event_count)
-            .bind(unhandled)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(())
 }
+
+const INSERT_USER: &str =
+    "INSERT INTO event_users (user_hash, event_id) VALUES (?, ?) ON CONFLICT DO NOTHING";
 
 async fn attach_feed_stats(
     db: &Database,
@@ -1166,14 +1047,35 @@ fn event_unhandled(event: &NormalizedEvent) -> bool {
         .any(|exception| exception.handled == Some(false))
 }
 
-fn user_key_of(event: &NormalizedEvent) -> Option<String> {
-    for key in ["id", "email", "username", "ip_address"] {
+const USER_FIELDS: [&str; 4] = ["id", "email", "username", "ip_address"];
+
+/// Hashes of every identity on the event, in `USER_FIELDS` order. The first one
+/// is the event's `user_key`, which counts distinct users.
+fn user_hashes(app_key: &AppKey, event: &NormalizedEvent) -> Vec<String> {
+    let mut hashes: Vec<String> = Vec::new();
+    for key in USER_FIELDS {
         if let Some(value) = event.user.get(key).and_then(|item| item.as_str()) {
             let value = value.trim();
             if !value.is_empty() && value != "{{auto}}" {
-                return Some(value.to_owned());
+                let hash = hash_user_key(app_key, value);
+                if !hashes.contains(&hash) {
+                    hashes.push(hash);
+                }
             }
         }
     }
-    None
+    hashes
+}
+
+/// Keyed so the stored value cannot be reversed with a list of emails or addresses.
+/// Lowercased so `Ada@Example.com` and `ada@example.com` match.
+pub fn hash_user_key(app_key: &AppKey, value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::new()
+        .chain_update(app_key.bytes())
+        .chain_update([0])
+        .chain_update(value.trim().to_lowercase())
+        .finalize();
+    hex::encode(&digest[..16])
 }

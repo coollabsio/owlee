@@ -285,3 +285,46 @@ fn normalized_payload(payload: &str) -> Value {
     let raw = serde_json::from_str(payload).unwrap_or(Value::Null);
     serde_json::to_value(normalize_event(raw)).unwrap_or(Value::Null)
 }
+
+#[derive(Deserialize)]
+pub struct PrivacyQuery {
+    #[serde(default)]
+    pub user: String,
+}
+
+/// Everything stored for one error-tracking user, found by the id, email,
+/// username, or IP address the SDK sent. Admins only: payloads hold personal data.
+pub async fn export_user_events(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<PrivacyQuery>,
+) -> Result<Json<Value>, AppError> {
+    require_editor(&state, &jar).await?;
+    let key = privacy_key(&state, &query)?;
+    let events = store::events_for_user(&state.db, &key).await?;
+    Ok(Json(
+        serde_json::json!({ "user": query.user.trim(), "events": events }),
+    ))
+}
+
+pub async fn delete_user_events(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<PrivacyQuery>,
+) -> Result<Json<Value>, AppError> {
+    require_editor(&state, &jar).await?;
+    let key = privacy_key(&state, &query)?;
+    let deleted = store::delete_events_for_user(&state.db, &key).await?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+fn privacy_key(state: &AppState, query: &PrivacyQuery) -> Result<String, AppError> {
+    let user = query.user.trim();
+    if user.is_empty() {
+        return Err(AppError::field(
+            "user",
+            "Enter a user id, email, username, or IP address.",
+        ));
+    }
+    Ok(store::hash_user_key(&state.config.app_key, user))
+}

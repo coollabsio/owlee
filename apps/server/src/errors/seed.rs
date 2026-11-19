@@ -19,6 +19,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
         event["exception"]["values"][0]["value"] = json!(message);
         store::ingest_event(
             &state.db,
+            &state.config.app_key,
             &project,
             &normalize_event(event),
             1_000_000,
@@ -56,6 +57,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
     let rust_project = store::create_project(&state.db, "API", "rust").await?;
     store::ingest_event(
         &state.db,
+        &state.config.app_key,
         &rust_project,
         &normalize_event(rust),
         1_000_000,

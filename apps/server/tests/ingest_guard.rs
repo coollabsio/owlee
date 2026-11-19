@@ -471,17 +471,55 @@ async fn retention_keeps_rollups(config: Config) {
     )
     .await;
     assert_eq!(viewed.status, StatusCode::ACCEPTED, "{}", viewed.body);
+    let signup = send(
+        &app,
+        "POST",
+        "/api/receive",
+        json!({"site": public_id, "type": "signup", "url": format!("https://{domain}/"), "data": {"plan": "pro"}})
+            .to_string()
+            .into_bytes(),
+        None,
+        &[
+            ("content-type", "application/json"),
+            ("origin", &format!("https://{domain}")),
+            ("user-agent", BROWSER),
+        ],
+    )
+    .await;
+    assert_eq!(signup.status, StatusCode::ACCEPTED, "{}", signup.body);
+    let raw_rows = [
+        "SELECT COUNT(*) AS n FROM insight_events WHERE site_id = $1",
+        "SELECT COUNT(*) AS n FROM insight_event_data WHERE site_id = $1",
+        "SELECT COUNT(*) AS n FROM insight_visits WHERE site_id = $1",
+        "SELECT COUNT(*) AS n FROM insight_site_sessions WHERE site_id = $1",
+    ];
+    let mut counts = Vec::new();
+    for sql in raw_rows {
+        let row = sqlx::query(sql)
+            .bind(&site_id)
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap();
+        counts.push(row.try_get::<i64, _>("n").unwrap());
+    }
+    assert_eq!(counts, [2, 1, 1, 1]);
     let old_id = first.body["id"].as_str().unwrap();
     sqlx::query("UPDATE events SET timestamp = '2000-01-01T00:00:00.000Z' WHERE id = $1")
         .bind(old_id)
         .execute(state.db.pool())
         .await
         .unwrap();
-    sqlx::query("UPDATE insight_events SET timestamp = 10 WHERE site_id = $1")
-        .bind(&site_id)
-        .execute(state.db.pool())
-        .await
-        .unwrap();
+    for sql in [
+        "UPDATE insight_events SET timestamp = 10 WHERE site_id = $1",
+        "UPDATE insight_visits SET started_at = 10, last_at = 10 WHERE site_id = $1",
+        "UPDATE insight_site_sessions SET day = 0 WHERE site_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(&site_id)
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+    }
     let stats = prune_before(&state.db, "2020-01-01T00:00:00.000Z", 1_000_000)
         .await
         .unwrap();
@@ -519,12 +557,14 @@ async fn retention_keeps_rollups(config: Config) {
     .await;
     assert_eq!(overview.status, StatusCode::OK, "{}", overview.body);
     assert_eq!(overview.body["pageviews"], 1);
-    let left = sqlx::query("SELECT COUNT(*) AS n FROM insight_events WHERE site_id = $1")
-        .bind(&site_id)
-        .fetch_one(state.db.pool())
-        .await
-        .unwrap();
-    assert_eq!(left.try_get::<i64, _>("n").unwrap(), 0);
+    for sql in raw_rows {
+        let left = sqlx::query(sql)
+            .bind(&site_id)
+            .fetch_one(state.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(left.try_get::<i64, _>("n").unwrap(), 0, "{sql}");
+    }
 }
 
 async fn quota_is_enforced(config: Config) {

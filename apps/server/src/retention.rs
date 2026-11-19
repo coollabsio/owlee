@@ -1,6 +1,8 @@
 //! Deletes raw ingest rows in batches. Issue counts and analytics daily
-//! rollups stay, because those are what the dashboards read. Dead sessions
-//! and used or expired email links go too.
+//! rollups stay, because those are what the dashboards read. Analytics visits
+//! and per-day visitor ids go with the raw events, and `insight_event_data`
+//! follows its event by foreign-key cascade. Dead sessions and used or expired
+//! email links go too.
 
 use owlee_platform::Database;
 
@@ -24,6 +26,8 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
             .analytics_retention_days
             .saturating_mul(86_400);
     prune_auth(&state.db, now.timestamp_millis()).await?;
+    // Loading this month's salt deletes last month's, even with no analytics traffic.
+    state.insights_salt.for_time(&state.db, now.timestamp()).await?;
     prune_before(&state.db, &error_before, analytics_before).await
 }
 
@@ -58,6 +62,15 @@ pub async fn prune_before(
         analytics_before_unix,
     )
     .await?;
+    for sql in [
+        "DELETE FROM insight_visits WHERE id IN (SELECT id FROM insight_visits WHERE last_at < $1 LIMIT 500)",
+        "DELETE FROM insight_site_sessions WHERE (site_id, day, session_id) IN \
+         (SELECT site_id, day, session_id FROM insight_site_sessions WHERE day < $1 LIMIT 500)",
+        "DELETE FROM insight_link_sessions WHERE (link_id, day, session_id) IN \
+         (SELECT link_id, day, session_id FROM insight_link_sessions WHERE day < $1 LIMIT 500)",
+    ] {
+        delete_unix(db, sql, analytics_before_unix).await?;
+    }
     Ok(PruneStats {
         error_events,
         analytics_events,

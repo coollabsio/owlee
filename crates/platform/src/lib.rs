@@ -16,7 +16,7 @@ mod time;
 pub use ipnet::IpNet;
 pub use auth::{PasswordError, PasswordService, generate_token, hash_token, normalize_email};
 pub use config::{
-    AppKey, Config, ConfigError, EnvironmentMode, IngestConfig, SmtpConfig, default_trusted_proxies,
+    AppKey, Config, ConfigError, EnvironmentMode, GeoPrecision, IngestConfig, SmtpConfig, default_trusted_proxies,
     redact_database_url,
 };
 pub use db::{

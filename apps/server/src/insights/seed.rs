@@ -8,6 +8,7 @@ use crate::state::AppState;
 
 pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
     let now = now_secs();
+    let salt = state.insights_salt.for_time(&state.db, now).await?;
     let site_id = Id::new().to_string();
     let public_id = "pub_coollabs_demo".to_owned();
     sqlx::query(
@@ -94,7 +95,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
             let browser = browsers[visitor % browsers.len()];
             let timestamp = base - 4 * 3_600 + (index as i64) * 1_800;
             let session = session_id(
-                &state.insights_secret,
+                &salt,
                 &site_id,
                 visitors[visitor],
                 agents[visitor % agents.len()],
@@ -153,7 +154,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
                         timestamp: timestamp + 3,
                         event_type: "performance".into(),
                         session_id: Some(session_id(
-                            &state.insights_secret,
+                            &salt,
                             &site_id,
                             visitors[visitor],
                             agents[visitor % agents.len()],
@@ -175,7 +176,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
             }
         }
         let click_session = session_id(
-            &state.insights_secret,
+            &salt,
             &coolify,
             visitors[day as usize % visitors.len()],
             agents[0],
@@ -204,13 +205,7 @@ pub async fn seed_demo(state: &AppState) -> Result<(), AppError> {
                     link_id: Some(docs.clone()),
                     timestamp: base - 1_800,
                     event_type: "click".into(),
-                    session_id: Some(session_id(
-                        &state.insights_secret,
-                        &docs,
-                        visitors[1],
-                        agents[1],
-                        base,
-                    )),
+                    session_id: Some(session_id(&salt, &docs, visitors[1], agents[1], base)),
                     referrer_domain: Some("google.com".into()),
                     country: Some("DE".into()),
                     browser: Some("Firefox".into()),
