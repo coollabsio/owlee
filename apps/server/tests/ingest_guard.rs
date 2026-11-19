@@ -215,7 +215,8 @@ async fn exercise(config: Config) {
     quota_is_enforced(config.clone()).await;
     override_replaces_the_global_cap(config.clone()).await;
     txt_verification(config.clone()).await;
-    login_is_limited(config).await;
+    login_is_limited(config.clone()).await;
+    wrong_guesses_do_not_block_the_right_password(config).await;
 }
 
 async fn oversized_body(config: &Config) {
@@ -917,6 +918,49 @@ async fn login_is_limited(mut config: Config) {
         StatusCode::UNAUTHORIZED,
         "a different forwarded address has its own bucket"
     );
+}
+
+async fn login(app: &Router, email: &str, password: &str, ip: &str) -> Hit {
+    send(
+        app,
+        "POST",
+        "/api/auth/login",
+        json!({"email": email, "password": password}).to_string().into_bytes(),
+        None,
+        &[("content-type", "application/json"), ("x-forwarded-for", ip)],
+    )
+    .await
+}
+
+async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
+    config.proxy_hops = 1;
+    config.ingest.login_rate_account_burst = 2;
+    config.ingest.login_rate_account_per_min = 1;
+    let (app, _, token) = boot_app(config).await;
+    let cookie = owner(&app, token.as_deref()).await;
+    let me = send(&app, "GET", "/api/auth/me", Vec::new(), Some(&cookie), &[]).await;
+    let email = me.body["email"].as_str().expect("me.email").to_owned();
+
+    // A correct login does not use the account bucket.
+    for _ in 0..3 {
+        let ok = login(&app, &email, "correct-horse-battery", "203.0.113.20").await;
+        assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+    }
+    // Wrong guesses from another address use it up.
+    for _ in 0..2 {
+        let bad = login(&app, &email, "wrong-password-1", "203.0.113.21").await;
+        assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
+    }
+    let blocked = login(&app, &email, "wrong-password-1", "203.0.113.22").await;
+    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS, "{}", blocked.body);
+
+    // An unknown email is limited the same way, so the answer does not differ.
+    for _ in 0..2 {
+        let bad = login(&app, "ghost@coollabs.io", "wrong-password-1", "203.0.113.23").await;
+        assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
+    }
+    let ghost = login(&app, "ghost@coollabs.io", "wrong-password-1", "203.0.113.24").await;
+    assert_eq!(ghost.status, StatusCode::TOO_MANY_REQUESTS, "{}", ghost.body);
 }
 
 #[tokio::test]

@@ -32,6 +32,42 @@ impl TokenBucket {
         }
     }
 
+    /// Same answer as [`check`](Self::check), but does not use a token.
+    /// Login uses this so only a failed attempt costs the account a token.
+    pub fn peek(&self, key: &str) -> RateDecision {
+        let now = Instant::now();
+        let buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let level = buckets
+            .get(key)
+            .map_or(self.burst, |bucket| self.level(*bucket, now));
+        self.decide(level)
+    }
+
+    /// Drops the bucket, for example after a successful login.
+    pub fn forget(&self, key: &str) {
+        self.buckets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(key);
+    }
+
+    fn decide(&self, level: f64) -> RateDecision {
+        if level >= 1.0 {
+            RateDecision {
+                allowed: true,
+                retry_after_secs: 0,
+            }
+        } else {
+            RateDecision {
+                allowed: false,
+                retry_after_secs: ((1.0 - level) / self.per_sec).ceil().max(1.0) as u64,
+            }
+        }
+    }
+
     pub fn check(&self, key: &str) -> RateDecision {
         let now = Instant::now();
         let mut buckets = self
@@ -44,23 +80,13 @@ impl TokenBucket {
         let entry = buckets
             .entry(key.to_owned())
             .or_insert((now, self.burst));
-        let elapsed = now.duration_since(entry.0).as_secs_f64();
-        entry.0 = now;
-        entry.1 = (entry.1 + elapsed * self.per_sec).min(self.burst);
-        if entry.1 >= 1.0 {
+        let level = self.level(*entry, now);
+        *entry = (now, level);
+        let decision = self.decide(level);
+        if decision.allowed {
             entry.1 -= 1.0;
-            RateDecision {
-                allowed: true,
-                retry_after_secs: 0,
-            }
-        } else {
-            let need = 1.0 - entry.1;
-            let secs = (need / self.per_sec).ceil().max(1.0) as u64;
-            RateDecision {
-                allowed: false,
-                retry_after_secs: secs,
-            }
         }
+        decision
     }
 }
 
@@ -102,6 +128,17 @@ mod tests {
         let denied = bucket.check("project");
         assert!(!denied.allowed);
         assert!(denied.retry_after_secs >= 1);
+    }
+
+    #[test]
+    fn peek_uses_no_token_and_forget_resets() {
+        let bucket = TokenBucket::per_minute(1, 1);
+        assert!(bucket.peek("account").allowed);
+        assert!(bucket.peek("account").allowed);
+        assert!(bucket.check("account").allowed);
+        assert!(!bucket.peek("account").allowed);
+        bucket.forget("account");
+        assert!(bucket.peek("account").allowed);
     }
 
     #[test]

@@ -238,7 +238,9 @@ Raw `insight_events` rows, including link clicks, older than `OWLEE_ANALYTICS_RE
 
 Visitor ids rotate monthly. A visit ends after 30 minutes of idle time. Set `OWLEE_PROXY_HOPS` when Owlee sits behind a reverse proxy (`1` for Traefik or Coolify, which is the default in `deploy/compose.yaml`; `2` when Cloudflare is also in front, which enables `cf-ipcountry` / `cf-region` / `cf-ipcity`). `0` ignores `X-Forwarded-For` and treats the proxy as the client, so every visitor shares one rate-limit bucket. Point `OWLEE_GEOIP_PATH` at a MaxMind or DB-IP city `.mmdb` if you want country, region, and city without Cloudflare. DB-IP Lite data is published by [DB-IP](https://db-ip.com).
 
-Login attempts are limited per IP and per account (`OWLEE_LOGIN_RATE_IP_*`, `OWLEE_LOGIN_RATE_ACCOUNT_*`). The limit is checked before the password hash. A full bucket answers `429` with `Retry-After`.
+Login, registration, and setup share one limit per client IP (`OWLEE_LOGIN_RATE_IP_*`). Login also has a limit per account (`OWLEE_LOGIN_RATE_ACCOUNT_*`) that only failed passwords use, and a successful login resets it. Both limits are checked before the password hash. A login with an unknown email still checks a hash, so the response time does not show which emails have an account. A full bucket answers `429` with `Retry-After`.
+
+A request that runs longer than 60 seconds gets `408`. The server stops cleanly on Ctrl+C or SIGTERM (`docker stop`).
 
 Short links redirect with `307` or `308` and `Cache-Control: no-store`. On Owlee's own hostname use `/go/{slug}`. On any other hostname that you added under **Links**, the path is the slug. `HEAD` requests and known bots follow the redirect and are not counted.
 
