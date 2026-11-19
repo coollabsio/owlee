@@ -17,10 +17,12 @@ use owlee_platform::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::engine;
 use crate::error::AppError;
+use crate::peer::Client;
 use crate::instance_settings::{self, SmtpInput};
 use crate::notify;
 use crate::present::{self, Stats};
@@ -47,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/me", get(me))
         .route("/admin/settings", get(admin_settings))
         .route("/admin/settings/registration", put(set_registration))
+        .route("/admin/settings/quotas", put(set_quotas))
         .route("/admin/settings/smtp", put(save_smtp).delete(delete_smtp))
         .route("/admin/users", get(admin_users))
         .route("/admin/users/{id}/admin", put(set_installation_admin))
@@ -94,6 +97,11 @@ pub fn router(state: AppState) -> Router {
         .nest("/api", api)
         .merge(crate::insights::public_routes())
         .fallback(crate::insights::fallback)
+        // No route streams, so a request that runs longer than this is stuck.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(60),
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -140,9 +148,11 @@ struct AuthBody {
 
 async fn register(
     State(state): State<AppState>,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<AuthBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
+    limit_auth_ip(&state, &client.ip)?;
     let account = account_fields(&body.email, body.display_name)?;
     if let Err(error) = state.passwords.validate(&body.password) {
         return Err(password_field(error));
@@ -212,9 +222,11 @@ struct SetupBody {
 
 async fn setup_complete(
     State(state): State<AppState>,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<SetupBody>,
 ) -> Result<(StatusCode, CookieJar, Json<present::UserResponse>), AppError> {
+    limit_auth_ip(&state, &client.ip)?;
     let now = TimestampMillis::now();
     // A finished install refuses setup even when the body still carries the old token.
     // A wrong or expired token, while setup is still open, is unauthorized.
@@ -261,19 +273,34 @@ async fn setup_complete(
 
 async fn login(
     State(state): State<AppState>,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<AuthBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
     let normalized = normalize_email(&body.email);
-    let Some(user) = repo::user_by_email(&state.db, &normalized).await? else {
-        return Err(AppError::InvalidLogin);
+    limit_auth_ip(&state, &client.ip)?;
+    // Only failed passwords cost the account a token, so a user who types the
+    // right password is not locked out by someone else's guesses for long.
+    let account_key = format!("login-account:{}", hash_token(&normalized));
+    let account_limit = state.login_account_limit.peek(&account_key);
+    if !account_limit.allowed {
+        return Err(AppError::limited(account_limit.retry_after_secs));
+    }
+    let user = repo::user_by_email(&state.db, &normalized).await?;
+    // Unknown emails still pay for one hash, so the response time does not
+    // tell which emails have an account.
+    let encoded = match &user {
+        Some(user) => user.password_hash.clone(),
+        None => dummy_hash(&state).await,
     };
-    let valid = state::verify_password(&state.passwords, body.password, user.password_hash.clone())
+    let valid = state::verify_password(&state.passwords, body.password, encoded)
         .await
         .unwrap_or(false);
-    if !valid {
+    let Some(user) = user.filter(|_| valid) else {
+        state.login_account_limit.check(&account_key);
         return Err(AppError::InvalidLogin);
-    }
+    };
+    state.login_account_limit.forget(&account_key);
     let now = TimestampMillis::now();
     let jar = issue_session(&state, jar, &user, now).await?;
     let _ = repo::insert_audit(
@@ -286,6 +313,29 @@ async fn login(
     )
     .await;
     Ok((jar, Json(user_response(&state, &user).await?)))
+}
+
+/// Login, register, and setup share one bucket per client IP.
+fn limit_auth_ip(state: &AppState, ip: &str) -> Result<(), AppError> {
+    let decision = state.login_ip_limit.check(&format!("auth-ip:{ip}"));
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(AppError::limited(decision.retry_after_secs))
+    }
+}
+
+/// A real hash of a random password, made once, for logins with an unknown email.
+async fn dummy_hash(state: &AppState) -> String {
+    static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    DUMMY
+        .get_or_init(|| async {
+            state::hash_password(&state.passwords, owlee_platform::generate_token())
+                .await
+                .unwrap_or_default()
+        })
+        .await
+        .clone()
 }
 
 async fn logout(
@@ -478,7 +528,47 @@ async fn settings_body(state: &AppState) -> Result<Value, AppError> {
         "initialized": settings.initialized,
         "version": env!("CARGO_PKG_VERSION"),
         "database": state.config.backend_name(),
+        "error_daily_quota": settings.error_daily_quota,
+        "analytics_daily_quota": settings.analytics_daily_quota,
     }))
+}
+
+#[derive(Deserialize)]
+struct QuotaBody {
+    error_daily: i64,
+    analytics_daily: i64,
+}
+
+async fn set_quotas(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<QuotaBody>,
+) -> Result<Json<Value>, AppError> {
+    let actor = require_root(&state, &jar).await?;
+    if !(1..=100_000_000).contains(&body.error_daily) {
+        return Err(AppError::field(
+            "error_daily",
+            "Use a daily error cap from 1 to 100000000.",
+        ));
+    }
+    if !(1..=100_000_000).contains(&body.analytics_daily) {
+        return Err(AppError::field(
+            "analytics_daily",
+            "Use a daily analytics cap from 1 to 100000000.",
+        ));
+    }
+    let now = TimestampMillis::now();
+    instance_settings::set_quotas(&state.db, body.error_daily, body.analytics_daily, now).await?;
+    let _ = repo::insert_audit(
+        &state.db,
+        Some(actor.id),
+        "instance.quotas_updated",
+        "installation",
+        None,
+        now,
+    )
+    .await;
+    Ok(Json(settings_body(&state).await?))
 }
 
 fn smtp_body(

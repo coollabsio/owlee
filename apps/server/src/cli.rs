@@ -107,11 +107,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let bound = listener.local_addr()?;
             tracing::info!("Owlee listening on http://{bound}");
-            axum::serve(listener, crate::routes::router(state))
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                    tracing::info!("shutting down");
-                })
+            axum::serve(
+                listener,
+                crate::routes::router(state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+                .with_graceful_shutdown(shutdown_signal())
                 .await?;
         }
         Command::Migrate { database } => {
@@ -224,4 +225,27 @@ mod tests {
             })
         ));
     }
+}
+
+/// Ctrl+C, or SIGTERM from `docker stop` and Coolify.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = terminate => {}
+    }
+    tracing::info!("shutting down");
 }

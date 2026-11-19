@@ -13,8 +13,12 @@ mod observability;
 mod problem;
 mod time;
 
+pub use ipnet::IpNet;
 pub use auth::{PasswordError, PasswordService, generate_token, hash_token, normalize_email};
-pub use config::{Config, ConfigError, EnvironmentMode, SmtpConfig, redact_database_url};
+pub use config::{
+    Config, ConfigError, EnvironmentMode, IngestConfig, SmtpConfig, default_trusted_proxies,
+    redact_database_url,
+};
 pub use db::{
     Backend, Database, DatabaseConfig, DatabaseError, Migration, MigrationError, MigrationRunner,
 };
