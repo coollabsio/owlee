@@ -326,7 +326,7 @@ async fn monitors(
         summary.failing.push(FailingMonitor {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
-            url: row.try_get("url")?,
+            url: crate::present::without_secrets(row.try_get("url")?),
             state: row.try_get("state")?,
             since: since_ms
                 .filter(|millis| *millis > 0)

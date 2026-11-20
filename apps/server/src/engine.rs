@@ -2,7 +2,7 @@ use std::ops::DerefMut;
 
 use owlee_domain::{
     CheckStatus, IncidentImpact, IncidentStatus, NotificationEvent, NotificationPayload,
-    PayloadCheck, PayloadIncident, PayloadMonitor, Probe, Rules, apply_outcome, judge,
+    PayloadCheck, PayloadIncident, Probe, Rules, apply_outcome, judge,
 };
 use owlee_platform::{Id, TimestampMillis};
 use serde::{Deserialize, Serialize};
@@ -169,7 +169,7 @@ async fn record(
             let detail = error.unwrap_or_else(|| "The check failed.".to_owned());
             let message = format!(
                 "Owlee recorded {} consecutive failed checks for {}. {detail}",
-                transition.consecutive_failures, monitor.url
+                transition.consecutive_failures, monitor.name
             );
             let incident = Incident {
                 id: incident_id,
@@ -251,12 +251,7 @@ async fn record(
         let payload = NotificationPayload {
             event: event.as_str().to_owned(),
             sent_at: now.to_string(),
-            monitor: Some(PayloadMonitor {
-                id: id.to_string(),
-                name: monitor.name.clone(),
-                url: monitor.url.clone(),
-                state: transition.state,
-            }),
+            monitor: Some(notify::payload_monitor(&monitor, transition.state)),
             check: Some(PayloadCheck {
                 status,
                 status_code,

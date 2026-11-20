@@ -108,3 +108,4 @@ rate limit. Both now share one limit per user (D7).
 | D13 | Pause and resume move `state_changed_at`, because "Paused" is a shown state. After resume, the line shows the old state until the next check. | 2026-11-20 |
 | D14 | p50, p95, and max latency for 24 hours replace "Avg latency today" on the Uptime card. Only success and degraded checks count. | 2026-11-20 |
 | D15 | `last_error` is the newest check with an error, failed or degraded, so the degraded banner has text too. "Failures only" shows failed and degraded checks. | 2026-11-20 |
+| D16 | Monitor URL credentials and query strings never leave Owlee inside text. The automatic incident text names the monitor instead of its URL. Check errors are stored without the request URL (`reqwest::Error::without_url`). The dashboard and alert notifications (email, webhook, Slack, Discord) send the URL without credentials and query. Only the editor's monitor view shows the full URL. | 2026-11-20 |

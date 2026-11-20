@@ -78,7 +78,7 @@ async fn http_probe(http: &HttpClients, job: &Job, timeout: Duration, started: I
         Err(error) => {
             return Probe {
                 latency_ms: elapsed_ms(started),
-                transport_error: Some(trim_error(&error.to_string())),
+                transport_error: Some(request_error(error)),
                 ..Probe::default()
             };
         }
@@ -112,7 +112,7 @@ async fn http_probe(http: &HttpClients, job: &Job, timeout: Duration, started: I
                     status_code: Some(status_code),
                     headers,
                     latency_ms: elapsed_ms(started),
-                    transport_error: Some(trim_error(&error.to_string())),
+                    transport_error: Some(request_error(error)),
                     ..Probe::default()
                 };
             }
@@ -289,6 +289,13 @@ async fn redis_command(
 
 fn elapsed_ms(started: Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// The request URL can carry credentials and tokens, and stored errors are
+/// shown to members and on public status pages, so it is dropped. The causes
+/// say what went wrong, such as a refused connection or a TLS failure.
+fn request_error(error: reqwest::Error) -> String {
+    trim_error(&crate::notify::error_chain(&error.without_url()))
 }
 
 fn trim_error(error: &str) -> String {

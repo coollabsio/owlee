@@ -1833,7 +1833,7 @@ async fn list_channels(
     State(state): State<AppState>,
     member: Member,
 ) -> Result<Json<Vec<present::ChannelResponse>>, AppError> {
-    member.require_editor()?;
+    member.require_editor_to_read()?;
     let channels = repo::list_channels(&state.db, member.workspace_id).await?;
     let mut response = Vec::new();
     for channel in channels {
@@ -2110,12 +2110,9 @@ async fn notify_incident(state: &AppState, incident: &Incident, message: &str) {
     let payload = NotificationPayload {
         event: NotificationEvent::IncidentUpdated.as_str().to_owned(),
         sent_at: TimestampMillis::now().to_string(),
-        monitor: monitor.map(|monitor| owlee_domain::PayloadMonitor {
-            id: monitor.id.to_string(),
-            name: monitor.name,
-            url: monitor.url,
-            state: monitor.state,
-        }),
+        monitor: monitor
+            .as_ref()
+            .map(|monitor| notify::payload_monitor(monitor, monitor.state)),
         check: None,
         incident: Some(owlee_domain::PayloadIncident {
             id: incident.id.to_string(),
@@ -2448,23 +2445,9 @@ fn monitor_view(editor: bool, mut response: present::MonitorResponse) -> present
     if !editor {
         response.headers.clear();
         response.body.clear();
-        response.url = without_secrets(&response.url);
+        response.url = present::without_secrets(&response.url);
     }
     response
-}
-
-fn without_secrets(raw: &str) -> String {
-    match reqwest::Url::parse(raw) {
-        Ok(mut url)
-            if !url.username().is_empty() || url.password().is_some() || url.query().is_some() =>
-        {
-            let _ = url.set_username("");
-            let _ = url.set_password(None);
-            url.set_query(None);
-            url.to_string()
-        }
-        _ => raw.to_owned(),
-    }
 }
 
 pub(crate) async fn require_user(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {

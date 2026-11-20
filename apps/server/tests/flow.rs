@@ -1503,3 +1503,165 @@ async fn detail_reports_state_age_latency_and_incidents(state: &AppState) {
     assert_eq!(listed[0]["state_changed_at"], api["state_changed_at"]);
     assert_eq!(listed[0]["latency_24h"], Value::Null, "the list stays lean");
 }
+
+#[tokio::test]
+async fn monitor_url_secrets_stay_out_of_incidents_errors_dashboard_and_alerts() {
+    use sqlx::Row;
+
+    const SECRET_URL: &str = "http://usr-LEAK0:pw-LEAK1@127.0.0.1:9/health?token=LEAK2";
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let member = Who::from(
+        member_session(&state, ada.workspace.parse().unwrap())
+            .await
+            .unwrap(),
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(4);
+    let hook = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_addr = hook.local_addr().unwrap();
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/hook",
+            axum::routing::post(move |body: String| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(body).await;
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        axum::serve(hook, app).await.unwrap();
+    });
+    for provider in ["webhook", "slack"] {
+        create(
+            &app,
+            &ada,
+            "/api/notifications",
+            json!({
+                "name": provider, "provider": provider, "monitor_ids": [],
+                "config": { "url": format!("http://{hook_addr}/hook") }
+            }),
+        )
+        .await;
+    }
+
+    let (status, monitor, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "Billing API", "job_type": "http",
+            "url": SECRET_URL, "timeout_ms": 2000, "failure_threshold": 1
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{monitor}");
+    assert_eq!(monitor["state"], "down", "{monitor}");
+    let id = monitor["id"].as_str().unwrap().to_owned();
+    let incident_id = monitor["open_incident_id"].as_str().unwrap().to_owned();
+    create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "Billing", "slug": "billing", "published": true, "monitor_ids": [id]}),
+    )
+    .await;
+
+    let mut surfaces: Vec<(String, String)> = Vec::new();
+    for _ in 0..2 {
+        let body = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("both channels are notified")
+            .unwrap();
+        let kind = if body.contains("\"event\"") {
+            "webhook payload"
+        } else {
+            "slack text"
+        };
+        surfaces.push((kind.to_owned(), body));
+    }
+
+    let detail = format!("/api/monitors/{id}");
+    let (status, editor_view, _) = call(&app, "GET", &detail, None, Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{editor_view}");
+    assert_eq!(editor_view["url"], SECRET_URL, "editors keep the full URL");
+    surfaces.push((
+        "editor monitor last_error".to_owned(),
+        editor_view["last_error"].to_string(),
+    ));
+    surfaces.push((
+        "editor monitor recent".to_owned(),
+        editor_view["recent"].to_string(),
+    ));
+
+    let (status, public, _) = call(&app, "GET", "/api/public/billing", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    assert_eq!(public["incidents"].as_array().unwrap().len(), 1, "{public}");
+    surfaces.push(("public status page".to_owned(), public.to_string()));
+
+    for (name, who, uri) in [
+        ("member monitor", &member, detail.clone()),
+        ("member monitor list", &member, "/api/monitors".to_owned()),
+        (
+            "member incident",
+            &member,
+            format!("/api/incidents/{incident_id}"),
+        ),
+        ("member incident list", &member, "/api/incidents".to_owned()),
+        ("member dashboard", &member, "/api/dashboard".to_owned()),
+        ("editor dashboard", &ada, "/api/dashboard".to_owned()),
+        (
+            "editor incident",
+            &ada,
+            format!("/api/incidents/{incident_id}"),
+        ),
+    ] {
+        let (status, body, _) = call(&app, "GET", &uri, None, Some(who)).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        surfaces.push((name.to_owned(), body.to_string()));
+    }
+
+    let errors = sqlx::query("SELECT error FROM check_results")
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(errors.len(), 1);
+    for row in errors {
+        surfaces.push((
+            "check_results.error".to_owned(),
+            row.get::<Option<String>, _>("error")
+                .expect("the failed check stores an error"),
+        ));
+    }
+
+    let leaks: Vec<String> = surfaces
+        .iter()
+        .flat_map(|(name, text)| {
+            ["LEAK0", "LEAK1", "LEAK2"]
+                .into_iter()
+                .filter(move |secret| text.contains(secret))
+                .map(move |secret| format!("{name}: {secret}"))
+        })
+        .collect();
+    assert_eq!(leaks, Vec::<String>::new(), "monitor URL secrets leaked");
+
+    for (kind, body) in &surfaces[..2] {
+        assert!(
+            body.contains("Billing API") && body.contains("http://127.0.0.1:9/health"),
+            "{kind}: {body}"
+        );
+    }
+    assert_eq!(
+        public["incidents"][0]["updates"][0]["message"],
+        "Owlee recorded 1 consecutive failed checks for Billing API. error sending request: \
+         client error (Connect): tcp connect error: Connection refused (os error 111)",
+        "{public}"
+    );
+    let (_, dashboard, _) = call(&app, "GET", "/api/dashboard", None, Some(&ada)).await;
+    assert_eq!(
+        dashboard["monitors"]["failing"][0]["url"], "http://127.0.0.1:9/health",
+        "{dashboard}"
+    );
+}

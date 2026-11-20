@@ -542,3 +542,19 @@ impl From<&repo::Agent> for AgentResponse {
         }
     }
 }
+
+/// The URL without credentials and query string, which often carry API tokens.
+/// Everything except the editor's monitor view shows monitor URLs this way.
+pub fn without_secrets(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url)
+            if !url.username().is_empty() || url.password().is_some() || url.query().is_some() =>
+        {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.to_string()
+        }
+        _ => raw.to_owned(),
+    }
+}

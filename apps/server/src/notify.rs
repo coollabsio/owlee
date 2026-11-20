@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use owlee_domain::{NotificationPayload, sign_body};
+use owlee_domain::{MonitorState, NotificationPayload, PayloadMonitor, sign_body};
 use owlee_platform::{Id, TimestampMillis};
 use serde_json::Value;
 
-use crate::repo::{self, Channel};
+use crate::repo::{self, Channel, Monitor};
 use crate::state::AppState;
 
 /// Sends to the channels of the workspace that owns `project_id`.
@@ -287,8 +287,12 @@ pub fn plain(payload: &NotificationPayload) -> (String, String) {
     (subject, lines.join("\n"))
 }
 
-/// reqwest's message omits the cause, such as a refused address or a TLS failure.
 fn request_error(error: &reqwest::Error) -> String {
+    trim(&error_chain(error))
+}
+
+/// reqwest's message omits the cause, such as a refused address or a TLS failure.
+pub(crate) fn error_chain(error: &reqwest::Error) -> String {
     let mut message = error.to_string();
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
@@ -296,7 +300,18 @@ fn request_error(error: &reqwest::Error) -> String {
         message.push_str(&cause.to_string());
         source = cause.source();
     }
-    trim(&message)
+    message
+}
+
+/// Alerts go to third parties, so they carry the monitor URL without its
+/// credentials and query string.
+pub(crate) fn payload_monitor(monitor: &Monitor, state: MonitorState) -> PayloadMonitor {
+    PayloadMonitor {
+        id: monitor.id.to_string(),
+        name: monitor.name.clone(),
+        url: crate::present::without_secrets(&monitor.url),
+        state,
+    }
 }
 
 fn trim(value: &str) -> String {
