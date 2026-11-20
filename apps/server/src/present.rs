@@ -89,6 +89,8 @@ pub struct MonitorResponse {
     pub last_checked_at: Option<TimestampMillis>,
     pub next_check_at: TimestampMillis,
     pub created_at: TimestampMillis,
+    /// When the shown state (up, down, paused, ...) last changed.
+    pub state_changed_at: TimestampMillis,
     pub agent_id: Option<Id>,
     pub check_type: CheckType,
     pub uptime_24h: Option<f64>,
@@ -110,6 +112,53 @@ pub struct MonitorDetail {
     pub alert_channels: Vec<LinkedChannel>,
     pub alert_channel_count: usize,
     pub status_pages: Vec<LinkedPage>,
+    /// The newest check with an error, even when it is older than `recent`.
+    pub last_error: Option<CheckResponse>,
+    pub latency_24h: Option<LatencySummary>,
+    /// The newest 10, newest first.
+    pub incidents: Vec<MonitorIncident>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct LatencySummary {
+    pub p50: i64,
+    pub p95: i64,
+    pub max: i64,
+}
+
+/// Nearest-rank percentiles. `None` when there are no samples.
+pub fn latency_summary(mut samples: Vec<i64>) -> Option<LatencySummary> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let rank = |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1];
+    Some(LatencySummary {
+        p50: rank(50),
+        p95: rank(95),
+        max: rank(100),
+    })
+}
+
+#[derive(Serialize)]
+pub struct MonitorIncident {
+    pub id: Id,
+    pub title: String,
+    pub status: IncidentStatus,
+    pub started_at: TimestampMillis,
+    pub resolved_at: Option<TimestampMillis>,
+}
+
+impl From<Incident> for MonitorIncident {
+    fn from(incident: Incident) -> Self {
+        Self {
+            id: incident.id,
+            title: incident.title,
+            status: incident.status,
+            started_at: incident.started_at,
+            resolved_at: incident.resolved_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -171,6 +220,7 @@ pub fn monitor_response(
         last_checked_at: monitor.last_checked_at,
         next_check_at: monitor.next_check_at,
         created_at: monitor.created_at,
+        state_changed_at: monitor.state_changed_at,
         agent_id: monitor.agent_id,
         check_type: monitor.check_type.unwrap_or(match monitor.job_type {
             JobType::Http => CheckType::Http,
@@ -228,7 +278,7 @@ fn bar(bucket: owlee_domain::DayBucket) -> BarResponse {
     }
 }
 
-fn check_response(check: CheckRow) -> CheckResponse {
+pub fn check_response(check: CheckRow) -> CheckResponse {
     CheckResponse {
         id: check.id,
         status: check.status,

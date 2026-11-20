@@ -464,6 +464,7 @@ async fn postgres_accepts_the_same_api() {
     assert_eq!(status, StatusCode::OK, "{ready}");
     assert_eq!(ready["database"], "postgres");
     postgres_runs_the_first_check_and_lists_connections(&state).await;
+    detail_reports_state_age_latency_and_incidents(&state).await;
 }
 
 #[tokio::test]
@@ -1242,4 +1243,263 @@ async fn postgres_runs_the_first_check_and_lists_connections(state: &AppState) {
     );
     assert_eq!(detail["alert_channels"], json!([]));
     assert_eq!(detail["open_incident_id"], Value::Null);
+}
+
+#[tokio::test]
+async fn sqlite_detail_reports_state_age_latency_and_incidents() {
+    let (_, state, _) = app_with_state(Vec::new()).await;
+    detail_reports_state_age_latency_and_incidents(&state).await;
+}
+
+async fn exec(state: &AppState, sql: &str, binds: &[&str]) {
+    let mut query = sqlx::query(sql);
+    for value in binds {
+        query = query.bind(*value);
+    }
+    query.execute(state.db.pool()).await.unwrap();
+}
+
+async fn state_changed_at(app: &Router, who: &Who, id: &str) -> Value {
+    let (status, detail, _) =
+        call(app, "GET", &format!("/api/monitors/{id}"), None, Some(who)).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    detail["state_changed_at"].clone()
+}
+
+/// Runs on SQLite and, from `postgres_accepts_the_same_api`, on Postgres.
+async fn detail_reports_state_age_latency_and_incidents(state: &AppState) {
+    let ada = Who::from(editor_session(state).await.unwrap());
+    let eve = Who::from(editor_session(state).await.unwrap());
+    let app = router(state.clone());
+    let pin = |id: &str, at: &str| {
+        format!("UPDATE monitors SET state_changed_at = {at} WHERE id = '{id}'")
+    };
+
+    let (status, worker, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "Worker", "job_type": "tcp",
+            "url": "127.0.0.1:9", "timeout_ms": 1000, "failure_threshold": 2
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{worker}");
+    assert_eq!(
+        worker["state"], "pending",
+        "one failure is under the threshold"
+    );
+    assert_eq!(worker["state_changed_at"], worker["created_at"]);
+    let worker_id = worker["id"].as_str().unwrap().to_owned();
+    let run = format!("/api/monitors/{worker_id}/checks");
+    let active = format!("/api/monitors/{worker_id}/active");
+
+    exec(state, &pin(&worker_id, "1000"), &[]).await;
+    let (_, down, _) = call(&app, "POST", &run, None, Some(&ada)).await;
+    assert_eq!(down["state"], "down", "{down}");
+    assert_ne!(
+        down["state_changed_at"], "1970-01-01T00:00:01.000Z",
+        "pending to down moves it"
+    );
+    assert_eq!(down["consecutive_failures"], 2);
+    assert_eq!(
+        down["last_error"]["error"],
+        "Connection refused (os error 111)"
+    );
+    assert_eq!(
+        down["latency_24h"],
+        Value::Null,
+        "failures have no answered latency"
+    );
+
+    exec(state, &pin(&worker_id, "2000"), &[]).await;
+    let (_, still, _) = call(&app, "POST", &run, None, Some(&ada)).await;
+    assert_eq!(still["state"], "down");
+    assert_eq!(
+        still["state_changed_at"], "1970-01-01T00:00:02.000Z",
+        "down to down keeps it"
+    );
+
+    let (_, paused, _) = call(
+        &app,
+        "POST",
+        &active,
+        Some(json!({"active": false})),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(paused["active"], false);
+    assert_ne!(
+        paused["state_changed_at"], "1970-01-01T00:00:02.000Z",
+        "pausing moves it"
+    );
+    exec(state, &pin(&worker_id, "3000"), &[]).await;
+    call(
+        &app,
+        "POST",
+        &active,
+        Some(json!({"active": false})),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(
+        state_changed_at(&app, &ada, &worker_id).await,
+        "1970-01-01T00:00:03.000Z",
+        "pausing twice keeps it"
+    );
+    call(
+        &app,
+        "POST",
+        &active,
+        Some(json!({"active": true})),
+        Some(&ada),
+    )
+    .await;
+    assert_ne!(
+        state_changed_at(&app, &ada, &worker_id).await,
+        "1970-01-01T00:00:03.000Z",
+        "resuming moves it"
+    );
+
+    let (status, api, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "API", "job_type": "http",
+            "url": "http://127.0.0.1:9/", "active": false
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{api}");
+    assert_eq!(
+        api["recent"],
+        Value::Null,
+        "a paused monitor runs no first check"
+    );
+    assert_eq!(api["latency_24h"], Value::Null);
+    assert_eq!(api["last_error"], Value::Null);
+    assert_eq!(api["incidents"], json!([]));
+    let api_id = api["id"].as_str().unwrap().to_owned();
+
+    let now = TimestampMillis::now().as_millis();
+    let mut rows = (1..=20)
+        .map(|n| ("success", n * 10, None, now - n * 60_000))
+        .collect::<Vec<_>>();
+    rows.extend([
+        (
+            "degraded",
+            500,
+            Some("latency 500ms is above the degraded threshold of 400ms"),
+            now - 30 * 60_000,
+        ),
+        ("failure", 9_000, Some("timed out"), now - 40 * 60_000),
+        ("maintenance", 0, None, now - 50 * 60_000),
+        ("success", 7_000, None, now - 25 * 3_600_000),
+    ]);
+    for (status, latency, error, at) in rows {
+        sqlx::query(
+            "INSERT INTO check_results (id, monitor_id, status, status_code, latency_ms, error, region, checked_at) \
+             VALUES ($1, $2, $3, NULL, $4, $5, 'local', $6)",
+        )
+        .bind(owlee_platform::Id::new().to_string())
+        .bind(&api_id)
+        .bind(status)
+        .bind(latency)
+        .bind(error)
+        .bind(at)
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    }
+
+    let insert_incident = |project: &str, n: i64| {
+        let (id, project, api_id) = (
+            owlee_platform::Id::new().to_string(),
+            project.to_owned(),
+            api_id.clone(),
+        );
+        async move {
+            sqlx::query(
+                "INSERT INTO incidents (id, project_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, 'major', 1, $6, $7, $6, $6)",
+            )
+            .bind(&id)
+            .bind(&project)
+            .bind(&api_id)
+            .bind(format!("Incident {n}"))
+            .bind(if n == 12 { "investigating" } else { "resolved" })
+            .bind(n * 1000)
+            .bind(if n == 12 { None } else { Some(n * 1000 + 500) })
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let mut newest = String::new();
+    for n in 1..=12 {
+        let id = insert_incident(&ada.project, n).await;
+        if n == 12 {
+            newest = id;
+        }
+    }
+    insert_incident(&eve.project, 99).await;
+
+    let (status, detail, _) = call(
+        &app,
+        "GET",
+        &format!("/api/monitors/{api_id}"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["latency_24h"],
+        json!({"p50": 110, "p95": 200, "max": 500}),
+        "20 successes of 10..200 ms and one degraded 500 ms; the failure, maintenance and 25 h old rows are left out"
+    );
+    assert_eq!(
+        detail["last_error"]["error"],
+        "latency 500ms is above the degraded threshold of 400ms"
+    );
+    let titles = detail["incidents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|incident| incident["title"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        [
+            "Incident 12",
+            "Incident 11",
+            "Incident 10",
+            "Incident 9",
+            "Incident 8",
+            "Incident 7",
+            "Incident 6",
+            "Incident 5",
+            "Incident 4",
+            "Incident 3"
+        ],
+        "newest 10, and not the incident in Eve's workspace that names the same monitor"
+    );
+    assert_eq!(
+        detail["incidents"][0],
+        json!({"id": newest, "title": "Incident 12", "status": "investigating", "started_at": "1970-01-01T00:00:12.000Z", "resolved_at": null})
+    );
+    assert_eq!(
+        detail["incidents"][1]["resolved_at"],
+        "1970-01-01T00:00:11.500Z"
+    );
+
+    let (_, listed, _) = call(&app, "GET", "/api/monitors", None, Some(&ada)).await;
+    assert_eq!(listed[0]["name"], "API");
+    assert_eq!(listed[0]["state_changed_at"], api["state_changed_at"]);
+    assert_eq!(listed[0]["latency_24h"], Value::Null, "the list stays lean");
 }

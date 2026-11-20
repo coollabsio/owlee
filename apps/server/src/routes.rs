@@ -2072,6 +2072,18 @@ async fn detail(
         alert_channels,
         alert_channel_count,
         status_pages,
+        last_error: repo::last_error_check(&state.db, id)
+            .await?
+            .map(present::check_response),
+        latency_24h: present::latency_summary(
+            repo::answered_latencies(&state.db, id, TimestampMillis::now().as_millis() - DAY_MS)
+                .await?,
+        ),
+        incidents: repo::incidents_for_monitor(&state.db, member.workspace_id, id, 10)
+            .await?
+            .into_iter()
+            .map(present::MonitorIncident::from)
+            .collect(),
     })
 }
 
@@ -2178,6 +2190,9 @@ fn materialize(
         next_check_at: previous.map(|monitor| monitor.next_check_at).unwrap_or(now),
         created_at: previous.map(|monitor| monitor.created_at).unwrap_or(now),
         updated_at: now,
+        state_changed_at: previous
+            .map(|monitor| monitor.state_changed_at)
+            .unwrap_or(now),
         agent_id: None,
         check_type: None,
     }

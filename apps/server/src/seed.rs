@@ -225,6 +225,14 @@ fn monitor(
         next_check_at: now,
         created_at: TimestampMillis::from_millis(now.as_millis() - 90 * 86_400_000),
         updated_at: now,
+        // Matches `fill_days`: healthy since the degraded day 12 days ago, down for the last day.
+        state_changed_at: TimestampMillis::from_millis(
+            now.as_millis()
+                - match state {
+                    MonitorState::Down => 86_400_000,
+                    _ => 11 * 86_400_000,
+                },
+        ),
         agent_id: None,
         check_type: None,
     }

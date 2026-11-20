@@ -15,7 +15,7 @@ const MONITOR_COLUMNS: &str = "\
 m.id, m.project_id, m.name, m.description, m.job_type, m.url, m.method, m.headers_json, m.body, \
 m.timeout_ms, m.interval_seconds, m.degraded_after_ms, m.expected_status, m.assertions_json, \
 m.follow_redirects, m.failure_threshold, m.active, m.state, m.consecutive_failures, m.last_checked_at, \
-m.next_check_at, m.created_at, m.updated_at, m.agent_id, m.check_type";
+m.next_check_at, m.created_at, m.updated_at, m.agent_id, m.check_type, m.state_changed_at";
 
 /// `column` names a project inside the workspace bound at `$n`, and the project
 /// bound at `$n + 1` when `project` is set. Bind them with `bind_scope`.
@@ -75,6 +75,8 @@ pub struct Monitor {
     pub next_check_at: TimestampMillis,
     pub created_at: TimestampMillis,
     pub updated_at: TimestampMillis,
+    /// When `state` or `active` last changed.
+    pub state_changed_at: TimestampMillis,
     /// The agent that runs this check. `None` means this server runs it.
     pub agent_id: Option<Id>,
     /// Set only for agent checks. `None` means `job_type` says it all.
@@ -589,9 +591,9 @@ pub async fn insert_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
             id, name, description, job_type, url, method, headers_json, body, timeout_ms, interval_seconds, \
             degraded_after_ms, expected_status, assertions_json, follow_redirects, failure_threshold, active, \
             state, consecutive_failures, last_checked_at, next_check_at, created_at, updated_at, agent_id, check_type, \
-            project_id\
+            project_id, state_changed_at\
          ) VALUES (\
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25\
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26\
          )",
     )
     .bind(monitor.id.to_string())
@@ -619,6 +621,7 @@ pub async fn insert_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
     .bind(monitor.agent_id.map(|id| id.to_string()))
     .bind(monitor.check_type.map(CheckType::as_str))
     .bind(monitor.project_id.to_string())
+    .bind(monitor.state_changed_at.as_millis())
     .execute(db.pool())
     .await?;
     Ok(())
@@ -629,6 +632,7 @@ pub async fn update_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
         "UPDATE monitors SET name = $1, description = $2, job_type = $3, url = $4, method = $5, \
          headers_json = $6, body = $7, timeout_ms = $8, interval_seconds = $9, degraded_after_ms = $10, \
          expected_status = $11, assertions_json = $12, follow_redirects = $13, failure_threshold = $14, \
+         state_changed_at = CASE WHEN active != $15 THEN $17 ELSE state_changed_at END, \
          active = $15, next_check_at = $16, updated_at = $17 WHERE id = $18",
     )
     .bind(&monitor.name)
@@ -662,7 +666,8 @@ pub async fn set_active(
     now: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE monitors SET active = $1, next_check_at = $2, updated_at = $3 WHERE id = $4",
+        "UPDATE monitors SET state_changed_at = CASE WHEN active != $1 THEN $3 ELSE state_changed_at END, \
+         active = $1, next_check_at = $2, updated_at = $3 WHERE id = $4",
     )
     .bind(bit(active))
     .bind(next_check_at)
@@ -847,13 +852,16 @@ pub async fn sync_agent_checks(
             next_check_at: now,
             created_at: previous.map_or(now, |monitor| monitor.created_at),
             updated_at: now,
+            state_changed_at: previous.map_or(now, |monitor| monitor.state_changed_at),
             agent_id: Some(agent.id),
             check_type: Some(check.check_type),
         };
         if previous.is_some() {
             sqlx::query(
                 "UPDATE monitors SET job_type = $1, check_type = $2, url = $3, timeout_ms = $4, \
-                 interval_seconds = $5, failure_threshold = $6, active = 1, updated_at = $7 WHERE id = $8",
+                 interval_seconds = $5, failure_threshold = $6, \
+                 state_changed_at = CASE WHEN active = 0 THEN $7 ELSE state_changed_at END, \
+                 active = 1, updated_at = $7 WHERE id = $8",
             )
             .bind(monitor.job_type.as_str())
             .bind(check.check_type.as_str())
@@ -929,7 +937,8 @@ pub async fn save_outcome(
     next_check_at: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE monitors SET state = $1, consecutive_failures = $2, last_checked_at = $3, \
+        "UPDATE monitors SET state_changed_at = CASE WHEN state != $1 THEN $3 ELSE state_changed_at END, \
+         state = $1, consecutive_failures = $2, last_checked_at = $3, \
          next_check_at = $4, updated_at = $3 WHERE id = $5",
     )
     .bind(state.as_str())
@@ -1014,19 +1023,51 @@ pub async fn recent_checks(
     .bind(limit)
     .fetch_all(db.pool())
     .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(CheckRow {
-                id: parse_id(row, "id")?,
-                status: parse_status(&row.try_get::<String, _>("status")?)?,
-                status_code: row.try_get("status_code")?,
-                latency_ms: row.try_get("latency_ms")?,
-                error: row.try_get("error")?,
-                region: row.try_get("region")?,
-                checked_at: millis(row, "checked_at")?,
-            })
-        })
-        .collect()
+    rows.iter().map(map_check).collect()
+}
+
+/// The newest check that recorded an error: a failure, or a degraded check.
+pub async fn last_error_check(
+    db: &Database,
+    monitor_id: Id,
+) -> Result<Option<CheckRow>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, status, status_code, latency_ms, error, region, checked_at FROM check_results \
+         WHERE monitor_id = $1 AND error IS NOT NULL ORDER BY checked_at DESC LIMIT 1",
+    )
+    .bind(monitor_id.to_string())
+    .fetch_optional(db.pool())
+    .await?;
+    row.as_ref().map(map_check).transpose()
+}
+
+/// Latencies of the checks that reached the target (success or degraded) since `since`.
+pub async fn answered_latencies(
+    db: &Database,
+    monitor_id: Id,
+    since: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT latency_ms FROM check_results \
+         WHERE monitor_id = $1 AND checked_at >= $2 AND status IN ('success', 'degraded')",
+    )
+    .bind(monitor_id.to_string())
+    .bind(since)
+    .fetch_all(db.pool())
+    .await?;
+    rows.iter().map(|row| row.try_get("latency_ms")).collect()
+}
+
+fn map_check(row: &sqlx::any::AnyRow) -> Result<CheckRow, sqlx::Error> {
+    Ok(CheckRow {
+        id: parse_id(row, "id")?,
+        status: parse_status(&row.try_get::<String, _>("status")?)?,
+        status_code: row.try_get("status_code")?,
+        latency_ms: row.try_get("latency_ms")?,
+        error: row.try_get("error")?,
+        region: row.try_get("region")?,
+        checked_at: millis(row, "checked_at")?,
+    })
 }
 
 pub async fn daily_since(db: &Database, start_day: i64) -> Result<Vec<DailyRow>, sqlx::Error> {
@@ -1160,6 +1201,29 @@ pub async fn open_incident_for_monitor(
     row.map(|row| parse_id(&row, "id")).transpose()
 }
 
+/// The newest incidents linked to this monitor, auto or manual.
+pub async fn incidents_for_monitor(
+    db: &Database,
+    workspace_id: Id,
+    monitor_id: Id,
+    limit: i64,
+) -> Result<Vec<Incident>, sqlx::Error> {
+    let sql = format!(
+        "{} ORDER BY started_at DESC, id LIMIT $3",
+        incident_select(&format!(
+            "monitor_id = $1 AND {}",
+            in_scope("project_id", 2, None)
+        ))
+    );
+    let rows = sqlx::query(&sql)
+        .bind(monitor_id.to_string())
+        .bind(workspace_id.to_string())
+        .bind(limit)
+        .fetch_all(db.pool())
+        .await?;
+    rows.iter().map(map_incident).collect()
+}
+
 /// Slugs are global because they route public traffic.
 pub async fn page_by_slug(db: &Database, slug: &str) -> Result<Option<Page>, sqlx::Error> {
     let row = sqlx::query(&format!(
@@ -1276,7 +1340,10 @@ pub async fn list_incidents(
     workspace_id: Id,
     project: Option<Id>,
 ) -> Result<Vec<Incident>, sqlx::Error> {
-    let sql = incident_select(&in_scope("project_id", 1, project));
+    let sql = format!(
+        "{} ORDER BY started_at DESC LIMIT 100",
+        incident_select(&in_scope("project_id", 1, project))
+    );
     let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
         .fetch_all(db.pool())
         .await?;
@@ -1786,7 +1853,7 @@ async fn link_channel_monitors(
 fn incident_select(filter: &str) -> String {
     format!(
         "SELECT id, project_id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
-         FROM incidents WHERE {filter} ORDER BY started_at DESC LIMIT 100"
+         FROM incidents WHERE {filter}"
     )
 }
 
@@ -1857,6 +1924,7 @@ fn map_monitor(row: &sqlx::any::AnyRow) -> Result<Monitor, sqlx::Error> {
         next_check_at: millis(row, "next_check_at")?,
         created_at: millis(row, "created_at")?,
         updated_at: millis(row, "updated_at")?,
+        state_changed_at: millis(row, "state_changed_at")?,
         agent_id: optional_id(row, "agent_id")?,
         check_type: row
             .try_get::<Option<String>, _>("check_type")?
