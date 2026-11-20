@@ -119,10 +119,18 @@ async fn send(
 }
 
 /// The root user when setup is still open, so instance settings are reachable.
-/// On a reused Postgres database, a fresh editor instead.
+/// On a reused Postgres database, a fresh editor instead, with the same password,
+/// so the login tests work on both paths.
 async fn owner(app: &Router, state: &AppState, setup_token: Option<&str>) -> Session {
     let Some(token) = setup_token else {
         let session = editor_session(state).await.unwrap();
+        let hash = state.passwords.hash("correct-horse-battery").unwrap();
+        sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+            .bind(hash)
+            .bind(session.user_id.to_string())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
         return Session {
             cookie: session.cookie,
             workspace: session.workspace_id.to_string(),
