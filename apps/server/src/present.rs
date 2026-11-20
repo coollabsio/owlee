@@ -100,6 +100,32 @@ pub struct MonitorResponse {
     pub recent: Vec<CheckResponse>,
 }
 
+/// A monitor with what it is connected to, for its detail page.
+#[derive(Serialize)]
+pub struct MonitorDetail {
+    #[serde(flatten)]
+    pub monitor: MonitorResponse,
+    pub open_incident_id: Option<Id>,
+    /// Empty for members, who may not read channels. The count is for everyone.
+    pub alert_channels: Vec<LinkedChannel>,
+    pub alert_channel_count: usize,
+    pub status_pages: Vec<LinkedPage>,
+}
+
+#[derive(Serialize)]
+pub struct LinkedChannel {
+    pub id: Id,
+    pub name: String,
+    pub provider: String,
+}
+
+#[derive(Serialize)]
+pub struct LinkedPage {
+    pub id: Id,
+    pub title: String,
+    pub slug: String,
+}
+
 pub struct Stats<'a> {
     pub daily: &'a [DailyRow],
     pub counts: &'a [StatusCount],

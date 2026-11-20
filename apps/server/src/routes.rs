@@ -70,6 +70,7 @@ pub fn router(state: AppState) -> Router {
             "/monitors/{id}",
             get(get_monitor).put(update_monitor).delete(delete_monitor),
         )
+        .route("/monitors/test", post(test_monitor))
         .route("/monitors/{id}/checks", post(run_check))
         .route("/monitors/{id}/active", post(set_active))
         .route("/agents", get(list_agents).post(create_agent))
@@ -1064,7 +1065,7 @@ async fn create_monitor(
     State(state): State<AppState>,
     member: Member,
     Json(body): Json<MonitorBody>,
-) -> Result<(StatusCode, Json<present::MonitorResponse>), AppError> {
+) -> Result<(StatusCode, Json<present::MonitorDetail>), AppError> {
     member.require_editor()?;
     let project_id = body_project(&state, &member, body.project_id).await?;
     let input = monitor_input(body);
@@ -1081,27 +1082,36 @@ async fn create_monitor(
         now,
     )
     .await;
-    let stats = load_stats(&state).await?;
+    if monitor.active {
+        first_check(&state, monitor.id).await;
+    }
     Ok((
         StatusCode::CREATED,
-        Json(present::monitor_response(
-            &monitor,
-            stats_view(&stats),
-            30,
-            Vec::new(),
-        )),
+        Json(detail(&state, &member, monitor.id).await?),
     ))
+}
+
+/// Long enough for a healthy target to answer. A slow one keeps running in the
+/// background and the response shows the monitor as pending.
+const FIRST_CHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn first_check(state: &AppState, id: Id) {
+    let state = state.clone();
+    let check = tokio::spawn(async move {
+        match engine::execute(&state, id).await {
+            Ok(()) | Err(AppError::Busy | AppError::Offline) => {}
+            Err(error) => tracing::warn!(%error, monitor = %id, "first check failed"),
+        }
+    });
+    let _ = tokio::time::timeout(FIRST_CHECK_WAIT, check).await;
 }
 
 async fn get_monitor(
     State(state): State<AppState>,
     member: Member,
     Path(id): Path<Id>,
-) -> Result<Json<present::MonitorResponse>, AppError> {
-    Ok(Json(monitor_view(
-        member.is_editor(),
-        detail(&state, &member, id).await?,
-    )))
+) -> Result<Json<present::MonitorDetail>, AppError> {
+    Ok(Json(detail(&state, &member, id).await?))
 }
 
 async fn update_monitor(
@@ -1109,7 +1119,7 @@ async fn update_monitor(
     member: Member,
     Path(id): Path<Id>,
     Json(body): Json<MonitorBody>,
-) -> Result<Json<present::MonitorResponse>, AppError> {
+) -> Result<Json<present::MonitorDetail>, AppError> {
     member.require_editor()?;
     let existing = workspace_monitor(&state, &member, id).await?;
     reject_agent_monitor(&existing, "Edit this check in the agent config.")?;
@@ -1158,12 +1168,37 @@ async fn run_check(
     State(state): State<AppState>,
     member: Member,
     Path(id): Path<Id>,
-) -> Result<Json<present::MonitorResponse>, AppError> {
+) -> Result<Json<present::MonitorDetail>, AppError> {
     member.require_editor()?;
     let monitor = workspace_monitor(&state, &member, id).await?;
     reject_agent_monitor(&monitor, "The agent runs this check on its own schedule.")?;
+    limit_checks(&state, &member)?;
     engine::execute(&state, id).await?;
     Ok(Json(detail(&state, &member, id).await?))
+}
+
+/// Runs a monitor that is not saved yet, with the create body and its checks.
+async fn test_monitor(
+    State(state): State<AppState>,
+    member: Member,
+    Json(body): Json<MonitorBody>,
+) -> Result<Json<engine::Outcome>, AppError> {
+    member.require_editor()?;
+    let project_id = body_project(&state, &member, body.project_id).await?;
+    let input = monitor_input(body);
+    validate_monitor(&input).map_err(AppError::Validation)?;
+    limit_checks(&state, &member)?;
+    let monitor = materialize(Id::new(), project_id, &input, TimestampMillis::now(), None);
+    Ok(Json(engine::trial(&state, &monitor).await?))
+}
+
+fn limit_checks(state: &AppState, member: &Member) -> Result<(), AppError> {
+    let decision = state.check_limit.check(&member.user.id.to_string());
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(AppError::limited(decision.retry_after_secs))
+    }
 }
 
 async fn list_agents(
@@ -1361,7 +1396,7 @@ async fn set_active(
     member: Member,
     Path(id): Path<Id>,
     Json(body): Json<ActiveBody>,
-) -> Result<Json<present::MonitorResponse>, AppError> {
+) -> Result<Json<present::MonitorDetail>, AppError> {
     member.require_editor()?;
     let monitor = workspace_monitor(&state, &member, id).await?;
     let now = TimestampMillis::now();
@@ -2000,16 +2035,44 @@ async fn detail(
     state: &AppState,
     member: &Member,
     id: Id,
-) -> Result<present::MonitorResponse, AppError> {
+) -> Result<present::MonitorDetail, AppError> {
     let monitor = workspace_monitor(state, member, id).await?;
     let stats = load_stats(state).await?;
     let recent = repo::recent_checks(&state.db, id, 60).await?;
-    Ok(present::monitor_response(
-        &monitor,
-        stats_view(&stats),
-        90,
-        recent,
-    ))
+    let channels = repo::channels_for_monitor(&state.db, monitor.project_id, Some(id)).await?;
+    let alert_channel_count = channels.len();
+    let alert_channels = if member.is_editor() {
+        channels
+            .into_iter()
+            .map(|channel| present::LinkedChannel {
+                id: channel.id,
+                name: channel.name,
+                provider: channel.provider,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let status_pages = repo::pages_for_monitor(&state.db, member.workspace_id, id)
+        .await?
+        .into_iter()
+        .map(|page| present::LinkedPage {
+            id: page.id,
+            title: page.title,
+            slug: page.slug,
+        })
+        .collect();
+    Ok(present::MonitorDetail {
+        monitor: monitor_view(
+            member.is_editor(),
+            present::monitor_response(&monitor, stats_view(&stats), 90, recent),
+        ),
+        open_incident_id: repo::open_incident_for_monitor(&state.db, member.workspace_id, id)
+            .await?,
+        alert_channels,
+        alert_channel_count,
+        status_pages,
+    })
 }
 
 async fn incident_views(

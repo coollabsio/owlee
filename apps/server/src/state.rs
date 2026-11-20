@@ -33,6 +33,8 @@ pub struct AppState {
     pub login_account_limit: Arc<TokenBucket>,
     /// Account mails per address, so the auth routes cannot flood an inbox.
     pub mail_address_limit: Arc<TokenBucket>,
+    /// Checks an editor starts by hand, per user: "Run check" and the unsaved test.
+    pub check_limit: Arc<TokenBucket>,
     /// Tests set this to read account mails instead of sending them.
     pub outbox: Option<crate::notify::Outbox>,
     pub dns: Arc<dyn TxtResolver>,
@@ -156,6 +158,7 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
             ingest.login_rate_account_burst,
         )),
         mail_address_limit: Arc::new(TokenBucket::per_hour(3, 3)),
+        check_limit: Arc::new(TokenBucket::per_minute(30, 15)),
         outbox: None,
         dns: Arc::new(SystemResolver::from_system()),
         geo: insights.geo,

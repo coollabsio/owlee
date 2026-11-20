@@ -57,21 +57,26 @@ pub async fn execute(state: &AppState, id: Id) -> Result<(), AppError> {
     let outcome = if repo::in_maintenance(&state.db, id, now.as_millis()).await? {
         Outcome::maintenance()
     } else {
-        let probe = checker::probe(&state.http, &Job::from(&monitor)).await;
-        if probe.transport_error.is_some() && !state.connectivity.online().await {
-            return Err(AppError::Offline);
-        }
-        judge_probe(
-            &Rules {
-                job_type: monitor.job_type,
-                expected_status: monitor.expected_status,
-                degraded_after_ms: monitor.degraded_after_ms,
-                assertions: monitor.assertions.clone(),
-            },
-            &probe,
-        )
+        trial(state, &monitor).await?
     };
     record(state, &monitor, outcome, LOCAL_REGION, now).await
+}
+
+/// Probes and judges a monitor from this server without recording anything.
+pub async fn trial(state: &AppState, monitor: &Monitor) -> Result<Outcome, AppError> {
+    let probe = checker::probe(&state.http, &Job::from(monitor)).await;
+    if probe.transport_error.is_some() && !state.connectivity.online().await {
+        return Err(AppError::Offline);
+    }
+    Ok(judge_probe(
+        &Rules {
+            job_type: monitor.job_type,
+            expected_status: monitor.expected_status,
+            degraded_after_ms: monitor.degraded_after_ms,
+            assertions: monitor.assertions.clone(),
+        },
+        &probe,
+    ))
 }
 
 /// Records an outcome that an agent judged inside its network.

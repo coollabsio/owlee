@@ -1121,6 +1121,45 @@ pub async fn workspace_page(
     row.as_ref().map(map_page).transpose()
 }
 
+/// Status pages in the workspace that show this monitor as a component.
+pub async fn pages_for_monitor(
+    db: &Database,
+    workspace_id: Id,
+    monitor_id: Id,
+) -> Result<Vec<Page>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {PAGE_COLUMNS} FROM status_pages \
+         WHERE id IN (SELECT page_id FROM page_components WHERE monitor_id = $1) AND {} \
+         ORDER BY lower(title)",
+        in_scope("project_id", 2, None)
+    );
+    let rows = sqlx::query(&sql)
+        .bind(monitor_id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_all(db.pool())
+        .await?;
+    rows.iter().map(map_page).collect()
+}
+
+/// The newest unresolved incident linked to this monitor, auto or manual.
+pub async fn open_incident_for_monitor(
+    db: &Database,
+    workspace_id: Id,
+    monitor_id: Id,
+) -> Result<Option<Id>, sqlx::Error> {
+    let sql = format!(
+        "SELECT id FROM incidents WHERE monitor_id = $1 AND status != 'resolved' AND {} \
+         ORDER BY started_at DESC LIMIT 1",
+        in_scope("project_id", 2, None)
+    );
+    let row = sqlx::query(&sql)
+        .bind(monitor_id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
+    row.map(|row| parse_id(&row, "id")).transpose()
+}
+
 /// Slugs are global because they route public traffic.
 pub async fn page_by_slug(db: &Database, slug: &str) -> Result<Option<Page>, sqlx::Error> {
     let row = sqlx::query(&format!(

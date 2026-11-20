@@ -439,7 +439,7 @@ async fn postgres_accepts_the_same_api() {
         Some(_) => None,
         None => Some(Who::from(editor_session(&state).await.unwrap())),
     };
-    let app = router(state);
+    let app = router(state.clone());
     let email = format!("pg-{}@coollabs.io", owlee_platform::Id::new());
     let (status, user, _) = if let Some(token) = token {
         call(
@@ -463,6 +463,7 @@ async fn postgres_accepts_the_same_api() {
     let (status, ready, _) = call(&app, "GET", "/api/health/ready", None, None).await;
     assert_eq!(status, StatusCode::OK, "{ready}");
     assert_eq!(ready["database"], "postgres");
+    postgres_runs_the_first_check_and_lists_connections(&state).await;
 }
 
 #[tokio::test]
@@ -724,6 +725,15 @@ async fn another_workspace_cannot_read_change_or_link_records() {
     let (app, state, token) = app_with_state(Vec::new()).await;
     let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
     let eve = Who::from(editor_session(&state).await.unwrap());
+    // Before the monitor, so its first check at create reaches the channels.
+    let hook = |name: &str| {
+        json!({
+            "name": name, "provider": "webhook", "monitor_ids": [],
+            "config": { "url": "http://127.0.0.1:9/hook" }
+        })
+    };
+    let ada_channel = create(&app, &ada, "/api/notifications", hook("Ada hooks")).await;
+    let eve_channel = create(&app, &eve, "/api/notifications", hook("Eve hooks")).await;
 
     let monitor = json!({
         "project_id": ada.project,
@@ -751,14 +761,6 @@ async fn another_workspace_cannot_read_change_or_link_records() {
         }),
     )
     .await;
-    let hook = |name: &str| {
-        json!({
-            "name": name, "provider": "webhook", "monitor_ids": [],
-            "config": { "url": "http://127.0.0.1:9/hook" }
-        })
-    };
-    let ada_channel = create(&app, &ada, "/api/notifications", hook("Ada hooks")).await;
-    let eve_channel = create(&app, &eve, "/api/notifications", hook("Eve hooks")).await;
 
     let page = json!({"title": "Mine", "slug": "mine", "monitor_ids": []});
     let foreign: Vec<(&str, String, Option<Value>)> = vec![
@@ -894,7 +896,13 @@ async fn another_workspace_cannot_read_change_or_link_records() {
     assert_eq!(checked["state"], "down");
     let (_, ada_channels, _) = call(&app, "GET", "/api/notifications", None, Some(&ada)).await;
     assert_eq!(ada_channels[0]["id"], ada_channel.as_str());
-    assert_eq!(ada_channels[0]["deliveries"][0]["event"], "monitor.down");
+    let events = ada_channels[0]["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|delivery| delivery["event"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events, ["incident.updated", "monitor.down"]);
     let (_, eve_channels, _) = call(&app, "GET", "/api/notifications", None, Some(&eve)).await;
     assert_eq!(eve_channels[0]["id"], eve_channel.as_str());
     assert_eq!(
@@ -967,4 +975,271 @@ async fn project_filter_lists_one_project_and_members_cannot_create() {
     let (status, listed, _) = call(&app, "GET", "/api/monitors", None, Some(&member)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed.as_array().unwrap().len(), 2);
+}
+
+async fn local_health() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/health", axum::routing::get(|| async { "ok" })),
+        )
+        .await
+        .unwrap();
+    });
+    address
+}
+
+async fn count(state: &AppState, table: &str) -> i64 {
+    use sqlx::Row;
+    sqlx::query(&format!("SELECT COUNT(*) AS n FROM {table}"))
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap()
+        .get::<i64, _>("n")
+}
+
+#[tokio::test]
+async fn monitor_test_runs_one_check_and_stores_nothing() {
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let address = local_health().await;
+    let test = |job_type: &str, url: String| json!({"project_id": ada.project, "name": "Try", "job_type": job_type, "url": url, "timeout_ms": 2000});
+
+    let (status, up, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(test("http", format!("http://{address}/health"))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{up}");
+    assert_eq!(up["status"], "success");
+    assert_eq!(up["status_code"], 200);
+    assert_eq!(up["error"], Value::Null);
+    assert!(up["latency_ms"].is_i64(), "{up}");
+
+    let (status, down, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(test("tcp", "127.0.0.1:9".into())),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{down}");
+    assert_eq!(down["status"], "failure");
+    assert_eq!(down["status_code"], Value::Null);
+    assert_eq!(down["error"], "Connection refused (os error 111)");
+
+    assert_eq!(count(&state, "check_results").await, 0);
+    assert_eq!(count(&state, "monitors").await, 0);
+
+    let mut statuses = Vec::new();
+    for _ in 0..14 {
+        let (status, _, _) = call(
+            &app,
+            "POST",
+            "/api/monitors/test",
+            Some(test("tcp", "127.0.0.1:9".into())),
+            Some(&ada),
+        )
+        .await;
+        statuses.push(status.as_u16());
+    }
+    assert_eq!(
+        statuses,
+        [[200; 13].as_slice(), &[429]].concat(),
+        "a burst of 15 checks per user, shared with Run check"
+    );
+
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(test("tcp", "no port".into())),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(problem["fields"]["url"].is_string(), "{problem}");
+
+    let workspace = ada.workspace.parse().unwrap();
+    let member = Who::from(member_session(&state, workspace).await.unwrap());
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(test("tcp", "127.0.0.1:9".into())),
+        Some(&member),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
+}
+
+#[tokio::test]
+async fn create_runs_the_first_check_and_detail_lists_connections() {
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let eve = Who::from(editor_session(&state).await.unwrap());
+    let address = local_health().await;
+    let hook = |name: &str| {
+        json!({
+            "name": name, "provider": "webhook", "monitor_ids": [],
+            "config": { "url": "http://127.0.0.1:9/hook" }
+        })
+    };
+    let ada_channel = create(&app, &ada, "/api/notifications", hook("Ops hooks")).await;
+    create(&app, &eve, "/api/notifications", hook("Eve hooks")).await;
+
+    let (status, api, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "API", "job_type": "http",
+            "url": format!("http://{address}/health"), "timeout_ms": 2000
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{api}");
+    assert_eq!(api["state"], "up");
+    assert_eq!(api["recent"].as_array().unwrap().len(), 1);
+    assert_eq!(api["recent"][0]["status"], "success");
+    assert_eq!(api["open_incident_id"], Value::Null);
+    let api_id = api["id"].as_str().unwrap().to_owned();
+
+    let page_id = create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "Ada status", "slug": "ada", "monitor_ids": [api_id]}),
+    )
+    .await;
+    let eve_page = create(
+        &app,
+        &eve,
+        "/api/pages",
+        json!({"project_id": eve.project, "title": "Eve status", "slug": "eve", "monitor_ids": []}),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO page_components (id, page_id, monitor_id, name, created_at) VALUES ($1, $2, $3, 'API', 0)",
+    )
+    .bind(owlee_platform::Id::new().to_string())
+    .bind(&eve_page)
+    .bind(&api_id)
+    .execute(state.db.pool())
+    .await
+    .unwrap();
+
+    let (status, detail, _) = call(
+        &app,
+        "GET",
+        &format!("/api/monitors/{api_id}"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["alert_channels"],
+        json!([{"id": ada_channel, "name": "Ops hooks", "provider": "webhook"}])
+    );
+    assert_eq!(detail["alert_channel_count"], 1);
+    assert_eq!(
+        detail["status_pages"],
+        json!([{"id": page_id, "title": "Ada status", "slug": "ada"}]),
+        "Eve's page is in another workspace"
+    );
+    assert_eq!(detail["open_incident_id"], Value::Null);
+
+    let workspace = ada.workspace.parse().unwrap();
+    let member = Who::from(member_session(&state, workspace).await.unwrap());
+    let (_, seen, _) = call(
+        &app,
+        "GET",
+        &format!("/api/monitors/{api_id}"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(
+        seen["alert_channels"],
+        json!([]),
+        "members cannot read channels"
+    );
+    assert_eq!(seen["alert_channel_count"], 1);
+    assert_eq!(seen["status_pages"], detail["status_pages"]);
+
+    let (status, worker, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "Worker", "job_type": "tcp",
+            "url": "127.0.0.1:9", "timeout_ms": 1000, "failure_threshold": 1
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{worker}");
+    assert_eq!(worker["state"], "down");
+    let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    assert_eq!(incidents.as_array().unwrap().len(), 1, "{incidents}");
+    assert_eq!(worker["open_incident_id"], incidents[0]["id"]);
+    assert_eq!(count(&state, "check_results").await, 2);
+}
+
+/// Part of `postgres_accepts_the_same_api`: two tests booting one empty
+/// database at once race on the migrations.
+async fn postgres_runs_the_first_check_and_lists_connections(state: &AppState) {
+    let ada = Who::from(editor_session(state).await.unwrap());
+    let app = router(state.clone());
+    let address = local_health().await;
+
+    let body = json!({
+        "project_id": ada.project, "name": "API", "job_type": "http",
+        "url": format!("http://{address}/health"), "timeout_ms": 2000
+    });
+    let (status, tested, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(body.clone()),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(tested["status"], "success");
+
+    let (status, api, _) = call(&app, "POST", "/api/monitors", Some(body), Some(&ada)).await;
+    assert_eq!(status, StatusCode::CREATED, "{api}");
+    let api_id = api["id"].as_str().unwrap().to_owned();
+    assert_eq!(api["recent"][0]["status"], "success", "{api}");
+    let slug = format!("pg-{}", &api_id[api_id.len() - 12..]);
+    let page_id = create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "PG status", "slug": slug, "monitor_ids": [api_id]}),
+    )
+    .await;
+    let (_, detail, _) = call(
+        &app,
+        "GET",
+        &format!("/api/monitors/{api_id}"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(
+        detail["status_pages"],
+        json!([{"id": page_id, "title": "PG status", "slug": slug}])
+    );
+    assert_eq!(detail["alert_channels"], json!([]));
+    assert_eq!(detail["open_incident_id"], Value::Null);
 }
