@@ -265,9 +265,12 @@ async fn postgres_collects_a_pageview_when_configured() {
     config.database_url = Some(url);
     let state = boot(config).await.expect("postgres boot");
     let editor = editor_session(&state).await.unwrap();
-    let app = router(state);
+    let app = router(state.clone());
     let domain = format!("pg-{}.owlee.test", owlee_platform::Id::new()).to_lowercase();
     let site = create_site(&app, &editor, &domain).await;
+    let site_id = site["id"].as_str().unwrap();
+    let [waiting, _] = traffic(&app, &editor, site_id).await;
+    assert_eq!(waiting["waiting"], true);
     let (status, _, _) = call(
         &app,
         "POST",
@@ -293,6 +296,21 @@ async fn postgres_collects_a_pageview_when_configured() {
     .await;
     assert_eq!(status, StatusCode::OK, "{overview}");
     assert_eq!(overview["pageviews"], 1);
+    let seen = json!({
+        "tracker_url": "http://127.0.0.1/data.js",
+        "waiting": false,
+        "visitors_24h": 1,
+        "pageviews_24h": 1,
+    });
+    assert_eq!(traffic(&app, &editor, site_id).await, [seen.clone(), seen]);
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT CAST(COUNT(*) AS BIGINT) FROM insight_events WHERE site_id = $1",
+    )
+    .bind(site_id)
+    .fetch_one(state.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored, 1, "the page view row is in Postgres");
 }
 
 #[tokio::test]
@@ -531,4 +549,202 @@ async fn another_workspace_cannot_take_a_go_slug() {
     let (status, _, location) = call(&app, "GET", "/go/launch", None, None, Some(BROWSER)).await;
     assert!(status.is_redirection(), "{status}");
     assert_eq!(location.as_deref(), Some("https://go.owner.test/launch"));
+}
+
+async fn pageview(app: &Router, site: &Value, path: &str) {
+    let domain = site["domain"].as_str().unwrap();
+    let (status, body, _) = call(
+        app,
+        "POST",
+        "/api/receive",
+        Some(json!({
+            "site": site["public_id"],
+            "type": "pageview",
+            "url": format!("https://{domain}{path}"),
+            "hostname": domain
+        })),
+        None,
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}
+
+/// The fields the setup guide and the site list read, from the detail and from the list.
+async fn traffic(app: &Router, session: &TestSession, site_id: &str) -> [Value; 2] {
+    let (status, detail, _) = call(
+        app,
+        "GET",
+        &format!("/api/sites/{site_id}"),
+        None,
+        Some(session),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let (status, list, _) =
+        call(app, "GET", "/api/sites", None, Some(session), Some(BROWSER)).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|site| site["id"] == site_id)
+        .unwrap()
+        .clone();
+    [detail, listed].map(|site| {
+        json!({
+            "tracker_url": site["tracker_url"],
+            "waiting": site["last_event_at"].is_null(),
+            "visitors_24h": site["visitors_24h"],
+            "pageviews_24h": site["pageviews_24h"],
+        })
+    })
+}
+
+#[tokio::test]
+async fn site_view_reports_the_tracker_url_and_the_last_day_of_traffic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = testing_config(dir.path().join("owlee.sqlite"));
+    config.public_origin = "http://owlee.example.com:8080/".to_owned();
+    let state = boot(config).await.unwrap();
+    let app = router(state.clone());
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let site_id = site["id"].as_str().unwrap();
+    let before = json!({
+        "tracker_url": "http://owlee.example.com:8080/data.js",
+        "waiting": true,
+        "visitors_24h": 0,
+        "pageviews_24h": 0,
+    });
+    assert_eq!(
+        traffic(&app, &editor, site_id).await,
+        [before.clone(), before]
+    );
+
+    let start = owlee_insights::now_secs();
+    pageview(&app, &site, "/").await;
+    pageview(&app, &site, "/pricing").await;
+    let after = json!({
+        "tracker_url": "http://owlee.example.com:8080/data.js",
+        "waiting": false,
+        "visitors_24h": 1,
+        "pageviews_24h": 2,
+    });
+    assert_eq!(
+        traffic(&app, &editor, site_id).await,
+        [after.clone(), after]
+    );
+    let (_, detail, _) = call(
+        &app,
+        "GET",
+        &format!("/api/sites/{site_id}"),
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    let last = detail["last_event_at"].as_i64().unwrap();
+    assert!(
+        (start..=start + 5).contains(&last),
+        "last_event_at {last} is the time of the page view"
+    );
+
+    let (status, _, _) = call(
+        &app,
+        "DELETE",
+        &format!("/api/sites/{site_id}/analytics"),
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let reset = json!({
+        "tracker_url": "http://owlee.example.com:8080/data.js",
+        "waiting": true,
+        "visitors_24h": 0,
+        "pageviews_24h": 0,
+    });
+    assert_eq!(
+        traffic(&app, &editor, site_id).await,
+        [reset.clone(), reset]
+    );
+}
+
+#[tokio::test]
+async fn a_pasted_url_is_not_stored_as_a_domain() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    for domain in ["https://coolify.io/blog", "coolify.io/blog"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/api/sites",
+            Some(json!({"project_id": editor.project_id, "name": "Docs", "domain": domain})),
+            Some(&editor),
+            Some(BROWSER),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{domain}: {body}");
+    }
+    let site = create_site(&app, &editor, "WWW.Coolify.io:443").await;
+    assert_eq!(site["domain"], "www.coolify.io");
+}
+
+#[tokio::test]
+async fn members_can_read_a_site_but_not_change_it() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let member = owlee_server::member_session(&state, editor.workspace_id)
+        .await
+        .unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let site_id = site["id"].as_str().unwrap();
+    pageview(&app, &site, "/").await;
+    for (method, uri, body) in [
+        (
+            "PUT",
+            format!("/api/sites/{site_id}"),
+            Some(json!({"name": "Renamed", "domain": "coolify.io"})),
+        ),
+        ("DELETE", format!("/api/sites/{site_id}/analytics"), None),
+        ("DELETE", format!("/api/sites/{site_id}"), None),
+        (
+            "PUT",
+            format!("/api/sites/{site_id}/quota"),
+            Some(json!({"daily_quota": 5})),
+        ),
+        ("POST", format!("/api/sites/{site_id}/verify"), None),
+        (
+            "PUT",
+            format!("/api/sites/{site_id}/public"),
+            Some(
+                json!({"enabled": true, "slug": site["public_slug"], "threshold": 0, "sections": []}),
+            ),
+        ),
+    ] {
+        let (status, body, _) = call(&app, method, &uri, body, Some(&member), Some(BROWSER)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
+    }
+    let [seen, _] = traffic(&app, &member, site_id).await;
+    assert_eq!(seen["pageviews_24h"], 1, "the member's reset did not land");
+    let (_, detail, _) = call(
+        &app,
+        "GET",
+        &format!("/api/sites/{site_id}"),
+        None,
+        Some(&member),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(
+        (
+            detail["name"].clone(),
+            detail["daily_quota"].clone(),
+            detail["public_enabled"].clone()
+        ),
+        (json!("Docs"), json!(1_000_000), json!(false))
+    );
 }

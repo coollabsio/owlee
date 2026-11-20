@@ -3,14 +3,18 @@ const RESERVED_SLUGS: [&str; 8] = [
 ];
 
 pub fn clean_host(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    // Checked before the port is cut off, so `https://host/path` is refused rather than stored as `https`.
+    if value.contains('/') {
+        return Err("Enter a hostname without a scheme or path.");
+    }
     let value = value
-        .trim()
         .trim_end_matches('.')
         .split(':')
         .next()
         .unwrap_or("")
         .to_lowercase();
-    if value.is_empty() || value.len() > 253 || value.contains('/') || value.contains(' ') {
+    if value.is_empty() || value.len() > 253 || value.contains(' ') {
         Err("Enter a hostname without a scheme or path.")
     } else {
         Ok(value)

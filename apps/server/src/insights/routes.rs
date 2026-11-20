@@ -543,17 +543,17 @@ async fn list_sites(
 ) -> Result<Json<Value>, AppError> {
     let project = filter.resolve(&state.db, member.workspace_id).await?;
     let sql = format!(
-        "SELECT s.id, s.project_id, s.public_id, s.name, s.domain, s.color, s.public_slug, s.public_enabled, \
-         s.public_threshold, s.public_sections, s.created_at, s.verified, s.verify_token, s.verified_at, s.daily_quota \
-         FROM insight_sites s JOIN projects p ON p.id = s.project_id \
-         WHERE p.workspace_id = $1{} ORDER BY s.created_at",
+        "SELECT {SITE_COLUMNS} FROM insight_sites s JOIN projects p ON p.id = s.project_id \
+         WHERE p.workspace_id = $2{} ORDER BY s.created_at",
         if project.is_some() {
-            " AND s.project_id = $2"
+            " AND s.project_id = $3"
         } else {
             ""
         },
     );
-    let mut query = sqlx::query(&sql).bind(member.workspace_id.to_string());
+    let mut query = sqlx::query(&sql)
+        .bind(now_secs() - 86_400)
+        .bind(member.workspace_id.to_string());
     if let Some(project) = project {
         query = query.bind(project.to_string());
     }
@@ -1696,12 +1696,22 @@ fn redirect_type(value: Option<&str>) -> Result<&'static str, AppError> {
     }
 }
 
+/// Every site query selects these, binding `$1` to the start of the last 24 hours. The subqueries
+/// run per site on the `(site_id, timestamp)` index, so the list stays one statement.
+const SITE_COLUMNS: &str = "s.id, s.project_id, s.public_id, s.name, s.domain, s.color, s.public_slug, \
+     s.public_enabled, s.public_threshold, s.public_sections, s.created_at, s.verified, s.verify_token, \
+     s.verified_at, s.daily_quota, \
+     (SELECT MAX(e.timestamp) FROM insight_events e WHERE e.site_id = s.id) AS last_event_at, \
+     (SELECT CAST(COUNT(DISTINCT e.session_id) AS BIGINT) FROM insight_events e \
+      WHERE e.site_id = s.id AND e.timestamp >= $1 AND e.event_type <> 'performance') AS visitors_24h, \
+     (SELECT CAST(COUNT(*) AS BIGINT) FROM insight_events e \
+      WHERE e.site_id = s.id AND e.timestamp >= $1 AND e.event_type = 'pageview') AS pageviews_24h";
+
 async fn fetch_site(state: &AppState, id: &str) -> Result<Value, AppError> {
-    let row = sqlx::query(
-        "SELECT id, project_id, public_id, name, domain, color, public_slug, public_enabled, public_threshold, public_sections, \
-         created_at, verified, verify_token, verified_at, daily_quota \
-         FROM insight_sites WHERE id = $1",
-    )
+    let row = sqlx::query(&format!(
+        "SELECT {SITE_COLUMNS} FROM insight_sites s WHERE s.id = $2"
+    ))
+    .bind(now_secs() - 86_400)
     .bind(id)
     .fetch_optional(state.db.pool())
     .await?
@@ -1746,6 +1756,10 @@ async fn site_json(state: &AppState, row: &sqlx::any::AnyRow) -> Result<Value, A
         "created_at": row.try_get::<i64, _>("created_at")?,
         "verified": verified,
         "verified_at": verified_at,
+        "tracker_url": format!("{}/data.js", state.config.public_origin.trim_end_matches('/')),
+        "last_event_at": row.try_get::<Option<i64>, _>("last_event_at")?,
+        "visitors_24h": row.try_get::<i64, _>("visitors_24h")?,
+        "pageviews_24h": row.try_get::<i64, _>("pageviews_24h")?,
         "verify_name": verify_name,
         "verify_value": verify_value,
         "ingest_open": verified || dev,
