@@ -64,7 +64,32 @@ same shape as a stored check.
 new reach: an editor can already save a monitor for the same target and read its result. "Run check" had no
 rate limit. Both now share one limit per user (D7).
 
-## 6. Decisions
+## 6. Part 2: list and detail
+
+### 6.1 Problems
+
+| # | Problem | Page |
+|---|---|---|
+| P9 | The list has no summary by state. To find what is down, the user must sort or click a badge. | Monitor list |
+| P10 | A row shows two percentages but no picture of the last days. | Monitor list |
+| P11 | Search, state filter, and sort reset on reload and cannot be shared. | Monitor list |
+| P12 | The detail page does not say how long the monitor has been in its state ("Down for 12 min"). | Monitor detail |
+| P13 | When a monitor is down or degraded, the last error and the failure count are only in the checks table. | Monitor detail |
+| P14 | The checks table cannot show failures only. | Monitor detail |
+| P15 | Latency shows only the average for today. A slow tail is hidden. | Monitor detail |
+| P16 | Past incidents of the monitor are not shown. | Monitor detail |
+
+### 6.2 Design
+
+- List: state tabs with counts (All, Down, Degraded, Up, Paused). Down and degraded sort first by default. Each row
+  shows the last 30 daily uptime bars. Search, state, and sort live in the URL, and defaults are left out.
+- Detail: a status line under the title: "Up for 3 days" or "Down for 12 min". When the monitor is down or
+  degraded, a banner shows the last error, the failures against the threshold, and the incident link.
+- Detail: latency stats for 24 hours: p50, p95, and max, next to uptime.
+- Detail: the checks table has a "Failures only" switch.
+- Detail: an "Incidents" card lists the last 10 incidents of the monitor with start, duration, and status.
+
+## 7. Decisions
 
 | # | Decision | Date |
 |---|---|---|
@@ -77,3 +102,9 @@ rate limit. Both now share one limit per user (D7).
 | D7 | "Run check" and "Test" share one rate limit per user: 30 a minute, with a burst of 15. | 2026-11-20 |
 | D8 | Members get no alert channel names (channels hold webhook URLs), only `alert_channel_count`. The open incident link shows for members, because they can read incidents. | 2026-11-20 |
 | D9 | The description field moves into Advanced. | 2026-11-20 |
+| D10 | The time of the last state change is stored on the monitor when the state changes, not computed from check rows, because a long healthy run would need to scan every check. | 2026-11-20 |
+| D11 | Latency percentiles are computed in Rust from the last 24 hours of check rows. SQLite has no percentile function, and one day is at most 5,760 rows at a 15-second interval. | 2026-11-20 |
+| D12 | The state tabs count the monitors that the server returns and that match the search, so a tab's number matches its rows. Filtering is in the browser, because a workspace has few monitors. | 2026-11-20 |
+| D13 | Pause and resume move `state_changed_at`, because "Paused" is a shown state. After resume, the line shows the old state until the next check. | 2026-11-20 |
+| D14 | p50, p95, and max latency for 24 hours replace "Avg latency today" on the Uptime card. Only success and degraded checks count. | 2026-11-20 |
+| D15 | `last_error` is the newest check with an error, failed or degraded, so the degraded banner has text too. "Failures only" shows failed and degraded checks. | 2026-11-20 |
