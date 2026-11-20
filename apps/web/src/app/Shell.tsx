@@ -162,16 +162,8 @@ export function Shell() {
   const [swap, setSwap] = useState<"" | "forward" | "back">("");
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebarCollapsed") === "true");
   const [searchOpen, setSearchOpen] = useState(false);
-  const [scrolled, setScrolled] = useState(false);
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
   const version = meta.data?.version ?? "0.1.0";
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 0);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -255,7 +247,7 @@ export function Shell() {
 
   return (
     <div className={cn("app-shell min-h-svh text-[var(--color-fg)]", collapsed && "is-collapsed")}>
-      <header className={cn("app-topbar fixed inset-x-0 top-0 z-40 hidden h-12 items-center lg:flex", scrolled && "is-scrolled")}>
+      <header className="app-topbar fixed top-0 left-0 z-40 hidden h-12 items-center lg:flex">
         <div
           className={cn(
             "app-logo-cell flex h-full shrink-0 items-center transition-[width] duration-200",
@@ -270,7 +262,6 @@ export function Shell() {
             <Wordmark version={version} />
           )}
         </div>
-        <div className="app-topbar-main h-full min-w-0 flex-1" />
       </header>
 
       <div className="mobile-topbar sticky top-0 z-40 flex items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:hidden">
@@ -363,7 +354,7 @@ export function Shell() {
 
       <main
         className={cn(
-          "app-main min-h-svh bg-[var(--ui-canvas)] px-5 py-6 transition-[margin] duration-200 sm:px-8 lg:px-10 lg:pt-[calc(3rem+1.75rem)] lg:pb-10",
+          "app-main min-h-svh bg-[var(--ui-canvas)] px-5 py-6 transition-[margin] duration-200 sm:px-8 lg:px-10 lg:pt-7 lg:pb-10",
           collapsed ? "lg:ml-16" : "lg:ml-56",
         )}
       >

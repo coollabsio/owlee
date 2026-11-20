@@ -728,34 +728,6 @@ html.dark:not([data-nav-items="flat"]) .menu-item.menu-item-active:hover .menu-i
   background: var(--ui-canvas);
 }
 
-/* The scroll hairline sits under the content part only. The logo cell has
-   no bottom border, except in the collapsed sidebar. */
-.app-topbar-main {
-  border-bottom: 1px solid transparent;
-  transition: border-color 150ms, box-shadow 150ms;
-}
-
-.app-topbar.is-scrolled .app-topbar-main {
-  border-bottom-color: var(--ui-chrome-border);
-}
-
-.dark .app-topbar.is-scrolled .app-topbar-main {
-  border-bottom-color: var(--ui-sidebar-border);
-}
-
-.app-topbar.is-scrolled .app-topbar-main {
-  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
-}
-
-.dark .app-topbar.is-scrolled .app-topbar-main {
-  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
-}
-
-.dark .app-topbar.is-scrolled {
-  background: rgb(10 10 10 / 0.72);
-  backdrop-filter: blur(12px);
-}
-
 .app-sidebar,
 .app-drawer {
   --color-nav-text: oklch(43.86% 0 0);
@@ -1832,7 +1804,6 @@ html[data-page-width="full"] .app-content {
 
   html[data-nav-style="floating"] .app-main {
     margin-left: calc(14rem + var(--floating-gap));
-    padding-top: calc(var(--floating-top) + 1px);
     background: transparent;
   }
 
@@ -1846,22 +1817,14 @@ html[data-page-width="full"] .app-content {
     border-radius: var(--floating-radius);
   }
 
-  /* The top bar hugs the logo cell instead of spanning an empty bar. */
   html[data-nav-style="floating"] .app-topbar {
     top: var(--floating-gap);
     left: var(--floating-gap);
-    right: auto;
     width: 14rem;
-    box-shadow: none;
-    backdrop-filter: none;
   }
 
   html[data-nav-style="floating"] .app-shell.is-collapsed .app-topbar {
     width: 4rem;
-  }
-
-  html[data-nav-style="floating"] .app-topbar-main {
-    display: none;
   }
 
   html[data-nav-style="floating"] .app-logo-cell {

@@ -346,7 +346,7 @@ export function IssueDetailPage() {
           )}
         </div>
 
-        <aside className="flex flex-col gap-4 xl:sticky xl:top-[calc(3rem+1.75rem)] xl:self-start">
+        <aside className="flex flex-col gap-4 xl:sticky xl:top-7 xl:self-start">
           <LayerCard
             title={`${data.periodEventCount.toLocaleString()} ${data.periodEventCount === 1 ? "event" : "events"}`}
             description={`In the ${rangeLabel}`}>
