@@ -330,8 +330,12 @@ function LoginForm() {
   const navigate = useNavigate();
   const location = useLocation();
   const client = useQueryClient();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const demo = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") }).data?.demo;
+  // Dev servers expose the seeded demo login; it fills the form until the user types.
+  const [typedEmail, setEmail] = useState<string | null>(null);
+  const [typedPassword, setPassword] = useState<string | null>(null);
+  const email = typedEmail ?? demo?.email ?? "";
+  const password = typedPassword ?? demo?.password ?? "";
   const [fields, setFields] = useState<Record<string, string>>({});
   const from = (location.state as { from?: unknown } | null)?.from;
   const mutation = useMutation({
