@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -12,22 +12,11 @@ export function AgentsPage() {
   const canEdit = useCanEdit();
   const scope = useListScope();
   const query = useQuery({ queryKey: scope.key("agents"), queryFn: () => api<Agent[]>(scope.path("/api/agents")), refetchInterval: 10_000 });
-  const [name, setName] = useState("");
-  const [projectId, setProjectId] = useProjectChoice();
-  const [fields, setFields] = useState<Record<string, string>>({});
+  const [open, setOpen] = useState(false);
   const [created, setCreated] = useState<CreatedAgent | null>(null);
   const [search, setSearch] = useState("");
   const [onlineFilter, setOnlineFilter] = useState<boolean | null>(null);
   const [deleting, setDeleting] = useState<Agent | null>(null);
-  const save = useMutation({
-    mutationFn: () => createAgent({ name, project_id: projectId }),
-    onSuccess: async (agent) => {
-      setName("");
-      setCreated(agent);
-      await client.invalidateQueries({ queryKey: ["agents"] });
-    },
-    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
-  });
   const remove = useMutation({
     mutationFn: deleteAgent,
     onSuccess: async () => {
@@ -35,12 +24,6 @@ export function AgentsPage() {
       setDeleting(null);
     },
   });
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    setFields({});
-    save.mutate();
-  }
 
   const filtered = (query.data ?? []).filter(
     (agent) => agent.name.toLowerCase().includes(search.trim().toLowerCase()) && (onlineFilter === null || agent.online === onlineFilter),
@@ -51,77 +34,73 @@ export function AgentsPage() {
     monitors: (agent) => agent.monitor_count,
     seen: (agent) => (agent.last_seen_at ? Date.parse(agent.last_seen_at) : null),
   });
+  const newAgent = <Button variant="primary" onClick={() => setOpen(true)}>New agent</Button>;
+  function closeNew() {
+    setOpen(false);
+    setCreated(null);
+  }
   const filters = onlineFilter === null ? [] : [{ key: "status", label: `Status: ${onlineFilter ? "Online" : "Offline"}`, onRemove: () => setOnlineFilter(null) }];
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Agents" description="Agents run checks inside private networks. Each agent reads its checks from a config file on its host and reports results over outbound HTTPS, so nothing needs to be exposed." />
-      <div className={canEdit ? "grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_340px]" : "grid items-start gap-6"}>
-        {!query.isLoading && (query.data?.length ?? 0) === 0 ? (
-          <Empty title="No agents" body="Add one, list the checks in its config file, and run it next to the services you want to check. Its checks show up under Monitors, in the agent's project." />
-        ) : (
-          <LayerCard title="All agents" flush>
-            <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
-              <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search agents" aria-label="Search agents" />
-              <FilterChips filters={filters} onClear={() => setOnlineFilter(null)} />
-            </div>
-            <div className="overflow-x-auto">
-              <table className="cool-table">
-                <thead>
-                  <tr>
-                    <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                    <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                    <SortHeader column="monitors" sort={sort} onSort={toggle} className="hidden sm:table-cell">Monitors</SortHeader>
-                    <SortHeader column="seen" sort={sort} onSort={toggle} className="hidden md:table-cell">Last seen</SortHeader>
-                    {canEdit ? <th className="text-right">Actions</th> : null}
-                  </tr>
-                </thead>
-                <tbody>
-                  {query.isLoading ? <SkeletonRows columns={[undefined, undefined, "hidden sm:table-cell", "hidden md:table-cell", ...(canEdit ? ["text-right"] : [])]} /> : null}
-                  {agents.map((agent) => (
-                    <tr key={agent.id}>
-                      <td className="font-medium text-[var(--ui-fg)]">{agent.name}<ProjectTag id={agent.project_id} /></td>
-                      <td>
-                        <FilterValue active={onlineFilter === agent.online} label={agent.online ? "Online" : "Offline"} onToggle={() => setOnlineFilter(onlineFilter === agent.online ? null : agent.online)}>
-                          <StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge>
-                        </FilterValue>
+      {!query.isLoading && (query.data?.length ?? 0) === 0 ? (
+        <Empty title="No agents" body="Add one, list the checks in its config file, and run it next to the services you want to check. Its checks show up under Monitors, in the agent's project." action={canEdit ? newAgent : undefined} />
+      ) : (
+        <LayerCard title="All agents" actions={canEdit ? newAgent : null} flush>
+          <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
+            <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search agents" aria-label="Search agents" />
+            <FilterChips filters={filters} onClear={() => setOnlineFilter(null)} />
+          </div>
+          <div className="overflow-x-auto">
+            <table className="cool-table">
+              <thead>
+                <tr>
+                  <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
+                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
+                  <SortHeader column="monitors" sort={sort} onSort={toggle} className="hidden sm:table-cell">Monitors</SortHeader>
+                  <SortHeader column="seen" sort={sort} onSort={toggle} className="hidden md:table-cell">Last seen</SortHeader>
+                  {canEdit ? <th className="text-right">Actions</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {query.isLoading ? <SkeletonRows columns={[undefined, undefined, "hidden sm:table-cell", "hidden md:table-cell", ...(canEdit ? ["text-right"] : [])]} /> : null}
+                {agents.map((agent) => (
+                  <tr key={agent.id}>
+                    <td className="font-medium text-[var(--ui-fg)]">{agent.name}<ProjectTag id={agent.project_id} /></td>
+                    <td>
+                      <FilterValue active={onlineFilter === agent.online} label={agent.online ? "Online" : "Offline"} onToggle={() => setOnlineFilter(onlineFilter === agent.online ? null : agent.online)}>
+                        <StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge>
+                      </FilterValue>
+                    </td>
+                    <td className="hidden sm:table-cell">{agent.monitor_count}</td>
+                    <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
+                    {canEdit ? (
+                      <td className="text-right">
+                        <RowActions label={agent.name} actions={[{ label: "Delete", danger: true, onSelect: () => setDeleting(agent) }]} />
                       </td>
-                      <td className="hidden sm:table-cell">{agent.monitor_count}</td>
-                      <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
-                      {canEdit ? (
-                        <td className="text-right">
-                          <RowActions label={agent.name} actions={[{ label: "Delete", danger: true, onSelect: () => setDeleting(agent) }]} />
-                        </td>
-                      ) : null}
-                    </tr>
-                  ))}
-                  {!query.isLoading && agents.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No agents match your search or filters.</td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </LayerCard>
-        )}
-        {!canEdit ? null : created ? (
-          <AgentToken agent={created} onDone={() => setCreated(null)} />
-        ) : (
-          <LayerCard title="Add an agent" description="The name is shown as the check region.">
-            <form className="flex flex-col gap-4" onSubmit={submit}>
-              <Field label="Name" error={fields.name}>
-                <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="office-vpc" required />
-              </Field>
-              <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
-              <ErrorText error={fields.name ? null : save.error} />
-              <div className="flex justify-end">
-                <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Add agent"}</Button>
-              </div>
-            </form>
-          </LayerCard>
-        )}
-      </div>
+                    ) : null}
+                  </tr>
+                ))}
+                {!query.isLoading && agents.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No agents match your search or filters.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </LayerCard>
+      )}
+      <Dialog
+        open={canEdit && open}
+        wide={created !== null}
+        title={created ? `${created.name} is ready` : "New agent"}
+        description={created ? "Copy the token now. Owlee stores only its hash and cannot show it again." : "The name is shown as the check region."}
+        onClose={closeNew}
+      >
+        {created ? <AgentToken agent={created} onDone={closeNew} /> : open ? <NewAgentForm onCreated={setCreated} /> : null}
+      </Dialog>
       <ConfirmDialog
         open={deleting !== null}
         title="Delete agent?"
@@ -135,6 +114,40 @@ export function AgentsPage() {
         }}
       />
     </div>
+  );
+}
+
+function NewAgentForm({ onCreated }: { onCreated: (agent: CreatedAgent) => void }) {
+  const client = useQueryClient();
+  const [name, setName] = useState("");
+  const [projectId, setProjectId] = useProjectChoice();
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const save = useMutation({
+    mutationFn: () => createAgent({ name, project_id: projectId }),
+    onSuccess: async (agent) => {
+      onCreated(agent);
+      await client.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    save.mutate();
+  }
+
+  return (
+    <form className="flex flex-col gap-4" onSubmit={submit}>
+      <Field label="Name" error={fields.name}>
+        <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="office-vpc" required />
+      </Field>
+      <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
+      <ErrorText error={fields.name ? null : save.error} />
+      <div className="flex justify-end">
+        <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Add agent"}</Button>
+      </div>
+    </form>
   );
 }
 
@@ -154,18 +167,16 @@ function AgentToken({ agent, onDone }: { agent: CreatedAgent; onDone: () => void
   const docker = `docker run -d --name owlee-agent --restart unless-stopped --no-healthcheck -e OWLEE_AGENT_SERVER=${origin} -e OWLEE_AGENT_TOKEN=${agent.token} -e OWLEE_AGENT_CONFIG=${configPath} -e PG_PASSWORD=... -v ${configPath}:${configPath}:ro ghcr.io/coollabsio/owlee:latest agent`;
   const binary = `PG_PASSWORD=... owlee agent --server ${origin} --token ${agent.token} --config ${configPath}`;
   return (
-    <LayerCard title={`${agent.name} is ready`} description="Copy the token now. Owlee stores only its hash and cannot show it again." >
-      <div className="flex flex-col gap-4">
-        <Snippet label="Token" value={agent.token} />
-        <Snippet label={configPath} value={exampleConfig} multiline />
-        <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">Passwords stay on the agent host. The config names an environment variable, not the password.</p>
-        <Snippet label="Docker" value={docker} />
-        <Snippet label="Binary" value={binary} />
-        <div className="flex justify-end">
-          <Button variant="highlighted" onClick={onDone}>Done</Button>
-        </div>
+    <div className="flex flex-col gap-4">
+      <Snippet label="Token" value={agent.token} />
+      <Snippet label={configPath} value={exampleConfig} multiline />
+      <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">Passwords stay on the agent host. The config names an environment variable, not the password.</p>
+      <Snippet label="Docker" value={docker} />
+      <Snippet label="Binary" value={binary} />
+      <div className="flex justify-end">
+        <Button variant="highlighted" onClick={onDone}>Done</Button>
       </div>
-    </LayerCard>
+    </div>
   );
 }
 

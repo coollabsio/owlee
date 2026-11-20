@@ -5,7 +5,7 @@ import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, GuideStep } from "@/components/setup-guide";
-import { Button, ConfirmDialog, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
@@ -13,15 +13,10 @@ import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function ErrorAppsPage() {
-  const navigate = useNavigate();
   const canEdit = useCanEdit();
-  const client = useQueryClient();
   const scope = useListScope();
   const apps = useQuery({ queryKey: scope.key("apps"), queryFn: () => api<ErrorApp[]>(scope.path("/api/error-apps")) });
-  const [name, setName] = useState("");
-  const [platform, setPlatform] = useState<PlatformId>("php");
-  const [projectId, setProjectId] = useProjectChoice();
-  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
   const { rows, sort, toggle } = useSort(
     (apps.data ?? []).filter((app) => !platformFilter || app.platform === platformFilter),
@@ -32,17 +27,6 @@ export function ErrorAppsPage() {
       issues: (app) => app.issueCount,
     },
   );
-  const create = useMutation({
-    mutationFn: () =>
-      api<ErrorApp>("/api/error-apps", { method: "POST", body: JSON.stringify({ name, platform, project_id: projectId }) }),
-    onSuccess: async (app) => {
-      setName("");
-      client.setQueryData(["app", app.id], app);
-      await client.invalidateQueries({ queryKey: ["apps"] });
-      navigate(`/errors/apps/${app.id}`);
-    },
-    onError: (reason: Error) => setError(reason.message),
-  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -50,60 +34,11 @@ export function ErrorAppsPage() {
         title="Apps"
         description="Each app has a Sentry DSN. Paste it into an official SDK and errors land in Issues."
       />
-      {canEdit ? (
-        <LayerCard title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it.">
-          <form
-            className="flex flex-col gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              setError("");
-              create.mutate();
-            }}
-          >
-            <div role="radiogroup" aria-label="Platform" className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-              {platformIds.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  role="radio"
-                  aria-checked={platform === id}
-                  onClick={() => setPlatform(id)}
-                  className={cn(
-                    "rounded-lg border px-3 py-2.5 text-left transition-colors",
-                    platform === id
-                      ? "border-[var(--ui-accent)] bg-[var(--ui-hover)]"
-                      : "border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] hover:bg-[var(--ui-hover)]",
-                  )}
-                >
-                  <span className="block text-[0.8125rem] font-medium text-[var(--ui-fg)]">{platformGuides[id].label}</span>
-                  <span className="block truncate font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">{platformGuides[id].sdk}</span>
-                </button>
-              ))}
-            </div>
-            <div className="flex flex-col gap-3 md:flex-row md:items-end">
-              <div className="flex-1">
-                <Field label="Name">
-                  <Input
-                    id="new-app-name"
-                    value={name}
-                    required
-                    placeholder={`${platformGuides[platform].label} app`}
-                    onChange={(event) => setName(event.target.value)}
-                  />
-                </Field>
-              </div>
-              <div className="md:w-56">
-                <ProjectField value={projectId} onChange={setProjectId} />
-              </div>
-              <Button variant="highlighted" type="submit" disabled={create.isPending}>
-                {create.isPending ? <><Spinner />Creating…</> : "Create app"}
-              </Button>
-            </div>
-          </form>
-          {error ? <p className="field-error">{error}</p> : null}
-        </LayerCard>
-      ) : null}
-      <LayerCard title="All apps" flush>
+      <LayerCard
+        title="All apps"
+        actions={canEdit && apps.data?.length !== 0 ? <Button variant="highlighted" onClick={() => setOpen(true)}>New app</Button> : null}
+        flush
+      >
         {platformFilter ? (
           <div className="border-b border-[var(--ui-divider)] p-2">
             <FilterChips filters={[{ key: "platform", label: `Platform: ${guideFor(platformFilter).label}`, onRemove: () => setPlatformFilter(null) }]} onClear={() => setPlatformFilter(null)} />
@@ -118,7 +53,7 @@ export function ErrorAppsPage() {
                 : "An editor has to create an app before errors can be collected."}
             </p>
             {canEdit ? (
-              <Button className="mt-4" variant="highlighted" onClick={() => document.getElementById("new-app-name")?.focus()}>
+              <Button className="mt-4" variant="highlighted" onClick={() => setOpen(true)}>
                 Create your first app
               </Button>
             ) : null}
@@ -178,7 +113,67 @@ export function ErrorAppsPage() {
           </div>
         ) : null}
       </LayerCard>
+      <Dialog open={canEdit && open} wide title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it." onClose={() => setOpen(false)}>
+        {open ? <NewAppForm /> : null}
+      </Dialog>
     </div>
+  );
+}
+
+function NewAppForm() {
+  const navigate = useNavigate();
+  const client = useQueryClient();
+  const [name, setName] = useState("");
+  const [platform, setPlatform] = useState<PlatformId>("php");
+  const [projectId, setProjectId] = useProjectChoice();
+  const create = useMutation({
+    mutationFn: () =>
+      api<ErrorApp>("/api/error-apps", { method: "POST", body: JSON.stringify({ name, platform, project_id: projectId }) }),
+    onSuccess: async (app) => {
+      client.setQueryData(["app", app.id], app);
+      await client.invalidateQueries({ queryKey: ["apps"] });
+      navigate(`/errors/apps/${app.id}`);
+    },
+  });
+  return (
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        create.mutate();
+      }}
+    >
+      <div role="radiogroup" aria-label="Platform" className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {platformIds.map((id) => (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={platform === id}
+            onClick={() => setPlatform(id)}
+            className={cn(
+              "rounded-lg border px-3 py-2.5 text-left transition-colors",
+              platform === id
+                ? "border-[var(--ui-accent)] bg-[var(--ui-hover)]"
+                : "border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] hover:bg-[var(--ui-hover)]",
+            )}
+          >
+            <span className="block text-[0.8125rem] font-medium text-[var(--ui-fg)]">{platformGuides[id].label}</span>
+            <span className="block truncate font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">{platformGuides[id].sdk}</span>
+          </button>
+        ))}
+      </div>
+      <Field label="Name">
+        <Input value={name} required placeholder={`${platformGuides[platform].label} app`} onChange={(event) => setName(event.target.value)} />
+      </Field>
+      <ProjectField value={projectId} onChange={setProjectId} />
+      <ErrorText error={create.error} />
+      <div className="flex justify-end">
+        <Button variant="highlighted" type="submit" disabled={create.isPending}>
+          {create.isPending ? <><Spinner />Creating…</> : "Create app"}
+        </Button>
+      </div>
+    </form>
   );
 }
 

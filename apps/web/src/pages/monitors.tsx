@@ -237,12 +237,16 @@ export function MonitorsPage() {
       <PageHeader
         title="Monitors"
         description="HTTP and TCP checks from this server. Agents add checks from their own config files."
-        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : null}
       />
       {all.length === 0 && !query.isLoading ? (
         <Empty title="No monitors" body="Paste a URL or a host:port. Owlee checks it as soon as you save." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : undefined} />
       ) : (
-        <LayerCard title="All monitors" description={query.data ? `${all.length} total` : undefined} flush>
+        <LayerCard
+          title="All monitors"
+          description={query.data ? `${all.length} total` : undefined}
+          actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : null}
+          flush
+        >
           <div className="min-w-0 border-b border-[var(--ui-divider)] px-3">
             <nav className="-mb-px flex gap-1 overflow-x-auto overflow-y-hidden" aria-label="Monitor state">
               {tabs.map((tab) => (

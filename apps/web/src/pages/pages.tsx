@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router";
-import { Button, ConfirmDialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { Link, useNavigate, useParams } from "react-router";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -12,6 +12,7 @@ export function PagesPage() {
   const query = useQuery({ queryKey: scope.key("pages"), queryFn: () => api<StatusPage[]>(scope.path("/api/pages")) });
   const canEdit = useCanEdit();
   const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [publishedFilter, setPublishedFilter] = useState<boolean | null>(null);
   const needle = search.trim().toLowerCase();
@@ -32,12 +33,16 @@ export function PagesPage() {
       <PageHeader
         title="Status pages"
         description="Public pages at /status/your-slug."
-        actions={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : null}
       />
       {!query.isLoading && (query.data?.length ?? 0) === 0 ? (
-        <Empty title="No status pages" body="Group monitors onto a page your customers can open without signing in." action={canEdit ? <Link to="/pages/new"><Button variant="highlighted">New page</Button></Link> : undefined} />
+        <Empty title="No status pages" body="Group monitors onto a page your customers can open without signing in." action={canEdit ? <Button variant="highlighted" onClick={() => setOpen(true)}>New page</Button> : undefined} />
       ) : (
-        <LayerCard title="All pages" description="Customers open these pages without signing in." flush>
+        <LayerCard
+          title="All pages"
+          description="Customers open these pages without signing in."
+          actions={canEdit ? <Button variant="highlighted" onClick={() => setOpen(true)}>New page</Button> : null}
+          flush
+        >
           <div className="flex items-center gap-2 border-b border-[var(--ui-divider)] p-2">
             <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search pages" />
             <FilterChips filters={filters} onClear={() => setPublishedFilter(null)} />
@@ -86,24 +91,93 @@ export function PagesPage() {
           </div>
         </LayerCard>
       )}
+      <Dialog open={canEdit && open} title="New status page" description="Pick the monitors to show. You can add a description and homepage after." onClose={() => setOpen(false)}>
+        {open ? <NewPageForm /> : null}
+      </Dialog>
+    </div>
+  );
+}
+
+function NewPageForm() {
+  const navigate = useNavigate();
+  const client = useQueryClient();
+  const monitors = useAllMonitors();
+  const [projectId, setProjectId] = useProjectChoice();
+  const [title, setTitle] = useState("");
+  const [slug, setSlug] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const create = useMutation({
+    mutationFn: () =>
+      api<StatusPage>("/api/pages", {
+        method: "POST",
+        body: JSON.stringify({ title, description: "", slug, homepage_url: "", published: true, monitor_ids: selected, project_id: projectId }),
+      }),
+    onSuccess: async (page) => {
+      await client.invalidateQueries({ queryKey: ["pages"] });
+      navigate(`/pages/${page.id}`);
+    },
+    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
+  });
+  return (
+    <form
+      className="flex flex-col gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setFields({});
+        create.mutate();
+      }}
+    >
+      <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
+      <Field label="Slug" hint="public URL" error={fields.slug}><Input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="coollabs" required /></Field>
+      <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
+      <div role="group" aria-label="Monitors">
+        <span className="field-label">Monitors</span>
+        <MonitorPicker monitors={monitors.data ?? []} selected={selected} onChange={setSelected} />
+        {fields.monitor_ids ? <p className="field-error">{fields.monitor_ids}</p> : null}
+      </div>
+      <ErrorText error={create.error} />
+      <div className="flex justify-end">
+        <Button type="submit" variant="highlighted" disabled={create.isPending}>{create.isPending ? <><Spinner />Creating…</> : "Create page"}</Button>
+      </div>
+    </form>
+  );
+}
+
+function useAllMonitors() {
+  const workspaceWide = useListScope({ allProjects: true });
+  return useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
+}
+
+function MonitorPicker({ monitors, selected, onChange }: { monitors: Monitor[]; selected: string[]; onChange: (ids: string[]) => void }) {
+  if (monitors.length === 0) return <p className="py-4 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">Create a monitor first.</p>;
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {monitors.map((monitor) => (
+        <label key={monitor.id} className="check-row">
+          <input
+            type="checkbox"
+            className="size-4 accent-[var(--ui-accent)]"
+            checked={selected.includes(monitor.id)}
+            onChange={(event) => onChange(event.target.checked ? [...selected, monitor.id] : selected.filter((item) => item !== monitor.id))}
+          />
+          {monitor.name}
+        </label>
+      ))}
     </div>
   );
 }
 
 export function PageEditor() {
-  const { id = "new" } = useParams();
-  const creating = id === "new";
+  const { id = "" } = useParams();
   const navigate = useNavigate();
   const canEdit = useCanEdit();
   const client = useQueryClient();
   const existing = useQuery({
     queryKey: ["page", id],
     queryFn: () => api<StatusPage>(`/api/pages/${id}`),
-    enabled: !creating,
   });
-  const workspaceWide = useListScope({ allProjects: true });
-  const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
-  const [projectId, setProjectId] = useProjectChoice();
+  const monitors = useAllMonitors();
   const page = existing.data;
   const [title, setTitle] = useState(page?.title ?? "");
   const [description, setDescription] = useState(page?.description ?? "");
@@ -126,8 +200,8 @@ export function PageEditor() {
 
   const save = useMutation({
     mutationFn: () =>
-      api<StatusPage>(creating ? "/api/pages" : `/api/pages/${id}`, {
-        method: creating ? "POST" : "PUT",
+      api<StatusPage>(`/api/pages/${id}`, {
+        method: "PUT",
         body: JSON.stringify({
           title,
           description,
@@ -135,7 +209,6 @@ export function PageEditor() {
           homepage_url: homepage,
           published,
           monitor_ids: selected,
-          ...(creating ? { project_id: projectId } : {}),
         }),
       }),
     onSuccess: async (saved) => {
@@ -155,8 +228,7 @@ export function PageEditor() {
     save.mutate();
   }
 
-  if (creating && !canEdit) return <Navigate to="/pages" replace />;
-  if (!creating && existing.isLoading) {
+  if (existing.isLoading) {
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6" aria-busy="true">
         <div className="space-y-2">
@@ -172,15 +244,14 @@ export function PageEditor() {
   return (
     <form className="mx-auto flex w-full max-w-3xl flex-col gap-6" onSubmit={submit}>
       <PageHeader
-        title={creating ? "New status page" : canEdit ? "Edit status page" : "Status page"}
+        title={canEdit ? "Edit status page" : "Status page"}
         description="Choose a slug and the monitors that appear on it."
-        actions={!creating && page?.published ? <Link to={`/status/${page.slug}`}><Button type="button">View public page</Button></Link> : null}
+        actions={page?.published ? <Link to={`/status/${page.slug}`}><Button type="button">View public page</Button></Link> : null}
       />
       <fieldset disabled={!canEdit} className="contents">
-      <LayerCard title="Details" description={!creating && page?.published ? `Public URL: /status/${page.slug}` : "What customers see at the top of the page."}>
+      <LayerCard title="Details" description={page?.published ? `Public URL: /status/${page.slug}` : "What customers see at the top of the page."}>
         <div className="flex flex-col gap-4">
           <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
-          {creating ? <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} /> : null}
           <Field label="Description" error={fields.description}><Textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Slug" hint="public URL" error={fields.slug}><Input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="coollabs" required /></Field>
@@ -200,32 +271,14 @@ export function PageEditor() {
         </div>
       </LayerCard>
       <LayerCard title="Monitors" description="Each selected monitor shows as a component on the page.">
-        {(monitors.data ?? []).length === 0 ? (
-          <p className="py-4 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">Create a monitor first.</p>
-        ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {monitors.data?.map((monitor) => (
-              <label key={monitor.id} className="check-row">
-                <input
-                  type="checkbox"
-                  className="size-4 accent-[var(--ui-accent)]"
-                  checked={selected.includes(monitor.id)}
-                  onChange={(event) =>
-                    setSelected(event.target.checked ? [...selected, monitor.id] : selected.filter((item) => item !== monitor.id))
-                  }
-                />
-                {monitor.name}
-              </label>
-            ))}
-          </div>
-        )}
+        <MonitorPicker monitors={monitors.data ?? []} selected={selected} onChange={setSelected} />
         {fields.monitor_ids ? <p className="field-error">{fields.monitor_ids}</p> : null}
       </LayerCard>
       </fieldset>
       <ErrorText error={save.error} />
       {canEdit ? (
         <div className="flex justify-between gap-2">
-          {!creating ? <Button type="button" variant="danger" onClick={() => setDeleting(true)}>Delete</Button> : <span />}
+          <Button type="button" variant="danger" onClick={() => setDeleting(true)}>Delete</Button>
           <Button type="submit" variant="highlighted" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save page"}</Button>
         </div>
       ) : null}

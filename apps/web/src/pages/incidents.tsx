@@ -64,12 +64,16 @@ export function IncidentsPage() {
       <PageHeader
         title="Incidents"
         description="A timeline customers read on the status page. Automatic incidents open after repeated failures."
-        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : null}
       />
       {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
-        <Empty title="No incidents" body="When a monitor crosses its failure threshold, Owlee files one. You can also write one by hand." />
+        <Empty title="No incidents" body="When a monitor crosses its failure threshold, Owlee files one. You can also write one by hand." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : undefined} />
       ) : (
-        <LayerCard title="All incidents" description={query.data ? `${query.data.length} total` : undefined} flush>
+        <LayerCard
+          title="All incidents"
+          description={query.data ? `${query.data.length} total` : undefined}
+          actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : null}
+          flush
+        >
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--ui-divider)] p-2">
             <div className="relative w-full sm:w-72">
               <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--ui-fg-faint)]" aria-hidden="true" />

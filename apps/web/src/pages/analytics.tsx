@@ -94,13 +94,17 @@ function SiteList() {
       <PageHeader
         title="Sites"
         description="Cookieless page views. Visitors are a daily hash of address and browser, and the address is not stored."
-        actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : null}
       />
       <ErrorText error={query.error} />
       {sites.length === 0 && !query.isLoading ? (
         <Empty title="No sites yet" body="Add the site you want to measure, then paste the tracker snippet." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : undefined} />
       ) : (
-        <LayerCard title="Sites" description="Open a site to see its traffic." flush>
+        <LayerCard
+          title="Sites"
+          description="Open a site to see its traffic."
+          actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : null}
+          flush
+        >
           <table className="cool-table">
             <thead>
               <tr>
