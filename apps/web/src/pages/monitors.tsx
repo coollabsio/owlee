@@ -414,7 +414,7 @@ export function MonitorDetailPage() {
           failuresOnly ? (
             <CardText title="No failed checks" body={`None of the last ${monitor.recent?.length ?? 0} checks failed or was degraded.`} />
           ) : (
-            <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : "Resume the monitor to run checks."} />
+            <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : canEdit ? "Resume the monitor to run checks." : "An editor can resume the monitor to run checks."} />
           )
         ) : (
           <div className="overflow-x-auto">

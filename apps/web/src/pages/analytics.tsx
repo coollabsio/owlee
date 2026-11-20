@@ -190,11 +190,12 @@ function SiteDetail({ siteId }: { siteId: string }) {
     refetchInterval: (state) => (state.state.data && state.state.data.last_event_at == null ? 3000 : false),
   });
   const [params, setParams] = useSearchParams();
+  const canEdit = useCanEdit();
   // Picked once per visit, so the first page view does not move the user off Setup.
   const [landing, setLanding] = useState<Tab | null>(null);
   const [sawWaiting, setSawWaiting] = useState(false);
   const site = query.data;
-  if (site && landing == null) setLanding(site.last_event_at == null ? "setup" : "overview");
+  if (site && landing == null) setLanding(site.last_event_at == null && canEdit ? "setup" : "overview");
   if (site && site.last_event_at == null && !sawWaiting) setSawWaiting(true);
 
   if (query.isLoading || (site && landing == null)) {
@@ -271,6 +272,7 @@ function SiteDetail({ siteId }: { siteId: string }) {
 }
 
 function UnverifiedBanner({ site, onOpen }: { site: InsightSite; onOpen: () => void }) {
+  const canEdit = useCanEdit();
   return (
     <div
       role="alert"
@@ -278,9 +280,11 @@ function UnverifiedBanner({ site, onOpen }: { site: InsightSite; onOpen: () => v
     >
       <div className="min-w-0 flex-1 space-y-1">
         <p className="font-medium text-[var(--ui-fg)]">Page views from {site.domain} are dropped.</p>
-        <p className="text-[var(--ui-fg-dim)]">This server accepts events only after the domain's TXT record verifies.</p>
+        <p className="text-[var(--ui-fg-dim)]">
+          This server accepts events only after the domain's TXT record verifies.{canEdit ? "" : " An editor has to verify the domain."}
+        </p>
       </div>
-      <Button size="sm" onClick={onOpen}>Verify domain</Button>
+      {canEdit ? <Button size="sm" onClick={onOpen}>Verify domain</Button> : null}
     </div>
   );
 }
@@ -631,6 +635,7 @@ type TrackerVariant = (typeof trackerVariants)[number]["id"];
 function SetupPanel({ site, sawWaiting, overviewLink }: { site: InsightSite; sawWaiting: boolean; overviewLink: string }) {
   const [variantId, setVariantId] = useState<TrackerVariant>("html");
   const variant = trackerVariants.find((item) => item.id === variantId)!;
+  const canEdit = useCanEdit();
   const tag = `<script defer src="${site.tracker_url}" data-site="${site.public_id}"></script>`;
   const last = site.last_event_at;
   return (
@@ -642,7 +647,7 @@ function SetupPanel({ site, sawWaiting, overviewLink }: { site: InsightSite; saw
           ) : (
             <>
               <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">
-                Add this TXT record at your DNS host, then verify.
+                {canEdit ? "Add this TXT record at your DNS host, then verify." : "An editor adds this TXT record at the DNS host and verifies the domain."}
                 {site.ingest_open ? " This server runs in development, so it accepts events before the domain verifies." : " Events are dropped until it verifies."}
               </p>
               <VerifyRecord site={site} />

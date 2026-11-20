@@ -398,7 +398,7 @@ function AppQuota({ app }: { app: ErrorApp }) {
   return (
     <LayerCard
       title="Daily cap"
-      description={inherited ? "Empty inherits the number from Settings → Ingest quotas." : "This app uses its own cap instead of the instance default."}
+      description={inherited ? (canEdit ? "Empty inherits the number from Settings → Ingest quotas." : "This app uses the instance default cap.") : "This app uses its own cap instead of the instance default."}
       actions={app.quotaExceeded ? <StatusBadge tone="error">Cap reached</StatusBadge> : null}
     >
       <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-faint)]">
