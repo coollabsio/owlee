@@ -51,6 +51,16 @@ export function intakeSummary(intake: IntakeCounts) {
   return `${counts} Last drop ${timeAgo(intake.last_drop.at)}: ${DROP_REASONS[intake.last_drop.reason]}.`;
 }
 
+/** How long from `from` to `to` (default now), in words: "12 min", "5 hours", "3 days". */
+export function span(from: string, to?: string | null) {
+  const minutes = Math.floor(((to ? Date.parse(to) : Date.now()) - Date.parse(from)) / 60_000);
+  if (!(minutes >= 1)) return "less than a minute";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return hours === 1 ? "1 hour" : `${hours} hours`;
+  return `${Math.floor(hours / 24)} days`;
+}
+
 export function timeAgo(iso?: string | null) {
   if (!iso) return "never";
   const delta = Date.now() - new Date(iso).getTime();

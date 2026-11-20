@@ -79,6 +79,8 @@ export type Monitor = {
   last_checked_at: string | null;
   next_check_at: string;
   created_at: string;
+  /** When the shown state (including paused) last changed. */
+  state_changed_at: string;
   uptime_24h: number | null;
   uptime_30d: number | null;
   uptime_90d: number | null;
@@ -94,6 +96,12 @@ export type MonitorDetail = Monitor & {
   alert_channels: { id: string; name: string; provider: Channel["provider"] }[];
   alert_channel_count: number;
   status_pages: { id: string; title: string; slug: string }[];
+  /** The newest check with an error, even when it is older than `recent`. */
+  last_error: Check | null;
+  /** Checks that got an answer (success or degraded) in the last 24 hours. */
+  latency_24h: { p50: number; p95: number; max: number } | null;
+  /** The newest 10, newest first. */
+  incidents: Pick<Incident, "id" | "title" | "status" | "started_at" | "resolved_at">[];
 };
 
 /** One check run by `POST /api/monitors/test`. Nothing is stored. */

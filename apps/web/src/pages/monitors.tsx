@@ -1,15 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, nextSort, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, type SortState, sortRows, Spinner, StatusBadge, Switch, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, type Agent, api, type Assertion, type CheckOutcome, type Monitor, type MonitorDetail } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { hostOf, inferType, type JobType, normalizeTarget } from "@/lib/monitor-target";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
-import { fullTime, percent, providerLabel, stateLabel, timeAgo } from "@/lib/utils";
+import { cn, fullTime, oneOf, percent, providerLabel, span, stateLabel, timeAgo } from "@/lib/utils";
+import { statusTone as incidentTone } from "@/pages/incidents";
 
 type Draft = {
   name: string;
@@ -123,7 +124,7 @@ function epoch(value: string | null) {
   return value ? Date.parse(value) : null;
 }
 
-function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor: Monitor; subtitle: string; stateFilter: ShownState | null; onStateFilter: (state: ShownState) => void }) {
+function MonitorRow({ monitor, subtitle }: { monitor: Monitor; subtitle: string }) {
   const to = `/monitors/${monitor.id}`;
   const state = shownState(monitor);
   return (
@@ -136,9 +137,7 @@ function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor
       </td>
       <td className="cell-link">
         {rowCover(to)}
-        <FilterValue active={stateFilter === state} label={stateLabel[state]} onToggle={() => onStateFilter(state)}>
-          <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
-        </FilterValue>
+        <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
       </td>
       <td className="cell-link hidden md:table-cell">
         {rowCover(to)}
@@ -146,7 +145,10 @@ function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor
       </td>
       <td className="cell-link hidden sm:table-cell">
         {rowCover(to)}
-        {percent(monitor.uptime_30d)}
+        <div className="flex items-center gap-3">
+          <UptimeBars bars={monitor.bars} className="hidden h-5 w-32 lg:flex" />
+          <span className="tabular-nums">{percent(monitor.uptime_30d)}</span>
+        </div>
       </td>
       <td className="cell-link whitespace-nowrap">
         {rowCover(to)}
@@ -156,30 +158,80 @@ function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor
   );
 }
 
+const tabs = [
+  { id: "all", label: "All" },
+  { id: "down", label: "Down" },
+  { id: "degraded", label: "Degraded" },
+  { id: "up", label: "Up" },
+  { id: "paused", label: "Paused" },
+] as const;
+type Tab = (typeof tabs)[number]["id"];
+const sortKeys = ["name", "state", "today", "month", "checked"] as const;
+type SortKey = (typeof sortKeys)[number];
+const defaultSort = { key: "state", direction: "asc" } as const;
+
+/** `sort` is a column, with a leading `-` for descending. Down and degraded first is the default and is left out. */
+function parseSort(value: string | null): NonNullable<SortState<SortKey>> {
+  const desc = value?.startsWith("-") ?? false;
+  const key = oneOf(desc ? value!.slice(1) : value, sortKeys, defaultSort.key);
+  return { key, direction: desc ? "desc" : "asc" };
+}
+
+type ListView = { q: string; state: Tab; sort: NonNullable<SortState<SortKey>> };
+
+function parseView(params: URLSearchParams): ListView {
+  return { q: params.get("q") ?? "", state: oneOf(params.get("state"), tabs.map((tab) => tab.id), "all"), sort: parseSort(params.get("sort")) };
+}
+
+function listSearch(view: ListView) {
+  const search = new URLSearchParams();
+  if (view.q) search.set("q", view.q);
+  if (view.state !== "all") search.set("state", view.state);
+  if (view.sort.key !== defaultSort.key || view.sort.direction !== defaultSort.direction) {
+    search.set("sort", `${view.sort.direction === "desc" ? "-" : ""}${view.sort.key}`);
+  }
+  return search;
+}
+
 export function MonitorsPage() {
   const scope = useListScope();
   const query = useQuery({ queryKey: scope.key("monitors"), queryFn: () => api<Monitor[]>(scope.path("/api/monitors")), refetchInterval: 10_000 });
   const label = useMonitorLabel();
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [stateFilter, setStateFilter] = useState<ShownState | null>(null);
-  const needle = search.trim().toLowerCase();
-  const filtered = (query.data ?? [])
-    .filter(
-      (monitor) =>
-        (!needle || monitor.name.toLowerCase().includes(needle) || monitor.url.toLowerCase().includes(needle)) &&
-        (!stateFilter || shownState(monitor) === stateFilter),
-    )
+  const [params, setParams] = useSearchParams();
+  const view = parseView(params);
+  // The input keeps its own text, because the URL lags behind fast typing. Back and forward reset it.
+  const [draft, setDraft] = useState(view.q);
+  const { key } = useLocation();
+  const navigationType = useNavigationType();
+  const [seenKey, setSeenKey] = useState(key);
+  if (key !== seenKey) {
+    setSeenKey(key);
+    if (navigationType === "POP") setDraft(view.q);
+  }
+  // Reads the live URL: setSearchParams(fn) does not queue, so a keystroke right after a tab click would
+  // otherwise start from the old URL and undo the click. Typing replaces the entry, so back skips keystrokes.
+  const setView = (patch: Partial<ListView>, replace = false) =>
+    setParams(listSearch({ ...parseView(new URLSearchParams(window.location.search)), ...patch }), { replace });
+  const all = query.data ?? [];
+  const needle = draft.trim().toLowerCase();
+  const matching = all
+    .filter((monitor) => !needle || monitor.name.toLowerCase().includes(needle) || monitor.url.toLowerCase().includes(needle))
     .sort((a, b) => Number(b.active) - Number(a.active));
-  const { rows, sort, toggle } = useSort(filtered, {
-    name: (monitor) => monitor.name,
-    state: (monitor) => stateRank[shownState(monitor)],
-    today: (monitor) => monitor.uptime_24h,
-    month: (monitor) => monitor.uptime_30d,
-    checked: (monitor) => epoch(monitor.last_checked_at),
-  });
-  const filters = stateFilter ? [{ key: "state", label: `State: ${stateLabel[stateFilter]}`, onRemove: () => setStateFilter(null) }] : [];
+  const counts = Object.fromEntries(tabs.map((tab) => [tab.id, tab.id === "all" ? matching.length : matching.filter((monitor) => shownState(monitor) === tab.id).length])) as Record<Tab, number>;
+  const rows = sortRows(
+    view.state === "all" ? matching : matching.filter((monitor) => shownState(monitor) === view.state),
+    {
+      name: (monitor) => monitor.name,
+      state: (monitor) => stateRank[shownState(monitor)],
+      today: (monitor) => monitor.uptime_24h,
+      month: (monitor) => monitor.uptime_30d,
+      checked: (monitor) => epoch(monitor.last_checked_at),
+    },
+    view.sort,
+  );
+  const toggle = (key: SortKey) => setView({ sort: nextSort(view.sort, key) ?? defaultSort });
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -187,44 +239,54 @@ export function MonitorsPage() {
         description="HTTP and TCP checks from this server. Agents add checks from their own config files."
         actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : null}
       />
-      {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
+      {all.length === 0 && !query.isLoading ? (
         <Empty title="No monitors" body="Paste a URL or a host:port. Owlee checks it as soon as you save." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : undefined} />
       ) : (
-        <LayerCard title="All monitors" description={query.data ? `${query.data.length} total` : undefined} flush>
+        <LayerCard title="All monitors" description={query.data ? `${all.length} total` : undefined} flush>
+          <div className="min-w-0 border-b border-[var(--ui-divider)] px-3">
+            <nav className="-mb-px flex gap-1 overflow-x-auto overflow-y-hidden" aria-label="Monitor state">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  aria-current={tab.id === view.state ? "page" : undefined}
+                  className={cn(
+                    "h-10 shrink-0 border-b-2 px-2.5 text-[0.8125rem] font-medium transition-colors",
+                    tab.id === view.state ? "border-[var(--ui-accent)] text-[var(--ui-fg)]" : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
+                  )}
+                  onClick={() => setView({ state: tab.id })}
+                >
+                  {tab.label}
+                  {query.data ? <span className="ml-1.5 font-normal tabular-nums text-[var(--ui-fg-faint)]">{counts[tab.id]}</span> : null}
+                </button>
+              ))}
+            </nav>
+          </div>
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--ui-divider)] p-2">
             <div className="relative w-full sm:w-72">
               <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--ui-fg-faint)]" aria-hidden="true" />
-              <Input style={{ paddingLeft: 36 }} placeholder="Search by name or URL" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search monitors" />
+              <Input style={{ paddingLeft: 36 }} placeholder="Search by name or URL" value={draft} onChange={(event) => { setDraft(event.target.value); setView({ q: event.target.value }, true); }} aria-label="Search monitors" />
             </div>
-            <FilterChips filters={filters} onClear={() => setStateFilter(null)} />
           </div>
           {!query.isLoading && rows.length === 0 ? (
-            <CardText title="No matching monitors" body="Try a different name or URL, or remove a filter." />
+            <CardText title="No matching monitors" body={view.state === "all" ? "Try a different name or URL." : `No ${tabs.find((tab) => tab.id === view.state)?.label.toLowerCase()} monitors${needle ? " match the search" : ""}.`} />
           ) : (
             <div className="overflow-x-auto">
               <table className="cool-table">
                 <thead>
                   <tr>
-                    <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                    <SortHeader column="state" sort={sort} onSort={toggle}>State</SortHeader>
-                    <SortHeader column="today" sort={sort} onSort={toggle} className="hidden md:table-cell">Today</SortHeader>
-                    <SortHeader column="month" sort={sort} onSort={toggle} className="hidden sm:table-cell">30 days</SortHeader>
-                    <SortHeader column="checked" sort={sort} onSort={toggle}>Last check</SortHeader>
+                    <SortHeader column="name" sort={view.sort} onSort={toggle}>Name</SortHeader>
+                    <SortHeader column="state" sort={view.sort} onSort={toggle}>State</SortHeader>
+                    <SortHeader column="today" sort={view.sort} onSort={toggle} className="hidden md:table-cell">Today</SortHeader>
+                    <SortHeader column="month" sort={view.sort} onSort={toggle} className="hidden sm:table-cell">30 days</SortHeader>
+                    <SortHeader column="checked" sort={view.sort} onSort={toggle}>Last check</SortHeader>
                   </tr>
                 </thead>
                 <tbody>
                   {query.isLoading ? (
                     <SkeletonRows columns={[undefined, undefined, "hidden md:table-cell", "hidden sm:table-cell", undefined]} />
                   ) : (
-                    rows.map((monitor) => (
-                      <MonitorRow
-                        key={monitor.id}
-                        monitor={monitor}
-                        subtitle={label(monitor)}
-                        stateFilter={stateFilter}
-                        onStateFilter={(state) => setStateFilter(stateFilter === state ? null : state)}
-                      />
-                    ))
+                    rows.map((monitor) => <MonitorRow key={monitor.id} monitor={monitor} subtitle={label(monitor)} />)
                   )}
                 </tbody>
               </table>
@@ -245,6 +307,7 @@ export function MonitorDetailPage() {
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [checksPage, setChecksPage] = useState(0);
+  const [failuresOnly, setFailuresOnly] = useState(false);
   const query = useQuery({
     queryKey: ["monitor", id],
     queryFn: () => api<MonitorDetail>(`/api/monitors/${id}`),
@@ -278,17 +341,25 @@ export function MonitorDetailPage() {
     );
   }
   if (!monitor) return <p className="field-error">{(query.error as Error | null)?.message ?? "Monitor not found."}</p>;
-  const checks = monitor.recent ?? [];
+  const checks = (monitor.recent ?? []).filter((check) => !failuresOnly || isProblem(check.status));
   const pages = Math.ceil(checks.length / checksPerPage);
   const pageIndex = Math.min(checksPage, Math.max(0, pages - 1));
   const shown = checks.slice(pageIndex * checksPerPage, (pageIndex + 1) * checksPerPage);
   const state = shownState(monitor);
+  const problem = state === "down" || state === "degraded";
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title={monitor.name}
         keepTitle
-        description={label(monitor)}
+        description={
+          <>
+            {label(monitor)}
+            <span className="mt-1 block font-medium text-[var(--ui-fg-dim)]">
+              {statePhrase[state]} for <time dateTime={monitor.state_changed_at} title={fullTime(monitor.state_changed_at)}>{span(monitor.state_changed_at)}</time>
+            </span>
+          </>
+        }
         actions={
           <>
             <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
@@ -304,27 +375,43 @@ export function MonitorDetailPage() {
         }
       />
       <ErrorText error={run.error || pause.error} />
+      {problem ? <ProblemBanner monitor={monitor} /> : null}
       {monitor.agent_id ? (
         <LayerCard title="Managed by an agent">
           <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">This check is defined in the agent's config file. Change it there and restart the agent.</p>
         </LayerCard>
       ) : null}
-      <SetupCard monitor={monitor} canEdit={canEdit} />
+      <SetupCard monitor={monitor} canEdit={canEdit} bannerShown={problem} />
       <LayerCard title="Uptime" description="Last 90 days">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-3 gap-4 sm:grid-cols-6">
           <Stat label="Today" value={percent(monitor.uptime_24h)} />
           <Stat label="30 days" value={percent(monitor.uptime_30d)} />
           <Stat label="90 days" value={percent(monitor.uptime_90d)} />
-          <Stat label="Avg latency today" value={monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`} />
+          <Stat label="p50 latency, 24h" value={ms(monitor.latency_24h?.p50)} />
+          <Stat label="p95 latency, 24h" value={ms(monitor.latency_24h?.p95)} />
+          <Stat label="Max latency, 24h" value={ms(monitor.latency_24h?.max)} />
         </div>
         <UptimeBars bars={monitor.bars} className="mt-4" />
       </LayerCard>
       <LayerCard title="Latency">
         <LatencyChart checks={monitor.recent ?? []} />
       </LayerCard>
-      <LayerCard title="Recent checks" flush>
+      <LayerCard
+        title="Recent checks"
+        flush
+        actions={
+          <label className="flex items-center gap-2 text-[0.8125rem] text-[var(--ui-fg-dim)]">
+            Failures only
+            <Switch checked={failuresOnly} onCheckedChange={(on) => { setFailuresOnly(on); setChecksPage(0); }} aria-label="Failures only" />
+          </label>
+        }
+      >
         {checks.length === 0 ? (
-          <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : "Resume the monitor to run checks."} />
+          failuresOnly ? (
+            <CardText title="No failed checks" body={`None of the last ${monitor.recent?.length ?? 0} checks failed or was degraded.`} />
+          ) : (
+            <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : "Resume the monitor to run checks."} />
+          )
         ) : (
           <div className="overflow-x-auto">
             <table className="cool-table">
@@ -343,7 +430,7 @@ export function MonitorDetailPage() {
                   <tr key={check.id}>
                     <td><StatusBadge tone={checkTone[check.status] ?? "info"}>{stateLabel[check.status] ?? check.status}</StatusBadge></td>
                     <td>{check.status_code ?? "-"}</td>
-                    <td className="whitespace-nowrap">{check.latency_ms} ms</td>
+                    <td className="whitespace-nowrap">{check.status === "failure" ? "-" : `${check.latency_ms} ms`}</td>
                     <td>{check.error || "-"}</td>
                     <td>{check.region === "local" ? "This server" : check.region}</td>
                     <td className="whitespace-nowrap"><Ago at={check.checked_at} /></td>
@@ -365,6 +452,7 @@ export function MonitorDetailPage() {
           </div>
         ) : null}
       </LayerCard>
+      <IncidentsCard incidents={monitor.incidents} />
       {monitor.agent_id || !canEdit ? null : <MonitorDialog open={editing} onClose={() => setEditing(false)} monitor={monitor} />}
       <ConfirmDialog
         open={deleting}
@@ -381,11 +469,94 @@ export function MonitorDetailPage() {
 
 const checksPerPage = 20;
 
+const statePhrase: Record<ShownState, string> = { up: "Up", down: "Down", degraded: "Degraded", pending: "Pending", paused: "Paused" };
+
+function isProblem(status: string) {
+  return status === "failure" || status === "degraded";
+}
+
+function ms(value: number | undefined) {
+  return value == null ? "-" : `${value} ms`;
+}
+
+function ProblemBanner({ monitor }: { monitor: MonitorDetail }) {
+  const down = monitor.state === "down";
+  const error = monitor.last_error;
+  return (
+    <div
+      role="alert"
+      className={cn(
+        "flex flex-wrap items-start gap-3 rounded-lg border px-4 py-3 text-[0.8125rem]",
+        down
+          ? "border-[color-mix(in_oklab,var(--ui-error)_45%,transparent)] bg-[color-mix(in_oklab,var(--ui-error)_8%,transparent)]"
+          : "border-[color-mix(in_oklab,var(--ui-warning)_45%,transparent)] bg-[color-mix(in_oklab,var(--ui-warning)_8%,transparent)]",
+      )}
+    >
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="font-medium text-[var(--ui-fg)]">{error?.error ?? (down ? "The checks are failing." : "The checks are slow.")}</p>
+        <p className="text-[var(--ui-fg-dim)]">
+          {monitor.consecutive_failures} of {monitor.failure_threshold} failed checks in a row mark it down.
+          {error ? <> Last error <Ago at={error.checked_at} />.</> : null}
+        </p>
+      </div>
+      {monitor.open_incident_id ? <Link className={smallButton} to={`/incidents/${monitor.open_incident_id}`}>View incident</Link> : null}
+    </div>
+  );
+}
+
+function IncidentsCard({ incidents }: { incidents: MonitorDetail["incidents"] }) {
+  return (
+    <LayerCard title="Incidents" description="The last 10 for this monitor." flush>
+      {incidents.length === 0 ? (
+        <CardText title="No incidents" body="An incident opens when the checks fail enough times in a row." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="cool-table">
+            <thead>
+              <tr>
+                <th>Incident</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              {incidents.map((incident) => {
+                const to = `/incidents/${incident.id}`;
+                return (
+                  <tr key={incident.id} className="clickable-row">
+                    <td className="cell-link">
+                      <Link className="row-link" to={to}>{incident.title}</Link>
+                      {rowCover(to)}
+                    </td>
+                    <td className="cell-link">
+                      {rowCover(to)}
+                      <StatusBadge tone={incidentTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
+                    </td>
+                    <td className="cell-link whitespace-nowrap">
+                      {rowCover(to)}
+                      <Ago at={incident.started_at} />
+                    </td>
+                    <td className="cell-link whitespace-nowrap">
+                      {rowCover(to)}
+                      {incident.resolved_at ? span(incident.started_at, incident.resolved_at) : `${span(incident.started_at)} so far`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </LayerCard>
+  );
+}
+
 const linkClass = "font-medium text-[var(--ui-fg)] underline-offset-2 hover:underline";
 const smallButton = "button h-7 px-2 text-xs";
 
 /** What this monitor is connected to. Editors get a link to fix each missing part. */
-function SetupCard({ monitor, canEdit }: { monitor: MonitorDetail; canEdit: boolean }) {
+function SetupCard({ monitor, canEdit, bannerShown }: { monitor: MonitorDetail; canEdit: boolean; bannerShown: boolean }) {
   const channels = monitor.alert_channel_count;
   const pages = monitor.status_pages;
   return (
@@ -428,7 +599,7 @@ function SetupCard({ monitor, canEdit }: { monitor: MonitorDetail; canEdit: bool
           tone={monitor.open_incident_id ? "error" : "success"}
           label={monitor.open_incident_id ? "Open" : "None"}
           title="Incident"
-          action={monitor.open_incident_id ? <Link className={smallButton} to={`/incidents/${monitor.open_incident_id}`}>View incident</Link> : null}
+          action={monitor.open_incident_id && !bannerShown ? <Link className={smallButton} to={`/incidents/${monitor.open_incident_id}`}>View incident</Link> : null}
         >
           {monitor.open_incident_id ? "An incident is open for this monitor." : "No open incident."}
         </SetupItem>

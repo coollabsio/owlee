@@ -228,7 +228,7 @@ export function PageHeader({
   keepTitle = false,
 }: {
   title: ReactNode;
-  description?: string;
+  description?: ReactNode;
   actions?: ReactNode;
   keepTitle?: boolean;
 }) {
@@ -571,23 +571,27 @@ export type SortState<K extends string> = { key: K; direction: SortDirection } |
 type SortValue = string | number | null | undefined;
 
 /** Client-side table sort. The first click on a column sorts ascending, the next one flips it. Empty values go last. */
+/** Empty values sort last in both directions. */
+export function sortRows<T, K extends string>(rows: T[], columns: Record<K, (row: T) => SortValue>, sort: SortState<K>) {
+  if (!sort) return rows;
+  const value = columns[sort.key];
+  return [...rows].sort((a, b) => {
+    const left = value(a);
+    const right = value(b);
+    if (left == null || left === "") return right == null || right === "" ? 0 : 1;
+    if (right == null || right === "") return -1;
+    const order = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+    return sort.direction === "asc" ? order : -order;
+  });
+}
+
+export function nextSort<K extends string>(current: SortState<K>, key: K): SortState<K> {
+  return current?.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" };
+}
+
 export function useSort<T, K extends string>(rows: T[], columns: Record<K, (row: T) => SortValue>, initial: SortState<K> = null) {
   const [sort, setSort] = useState<SortState<K>>(initial);
-  const value = sort ? columns[sort.key] : null;
-  const sorted = value && sort
-    ? [...rows].sort((a, b) => {
-        const left = value(a);
-        const right = value(b);
-        if (left == null || left === "") return right == null || right === "" ? 0 : 1;
-        if (right == null || right === "") return -1;
-        const order = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
-        return sort.direction === "asc" ? order : -order;
-      })
-    : rows;
-  function toggle(key: K) {
-    setSort((current) => (current?.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" }));
-  }
-  return { rows: sorted, sort, toggle };
+  return { rows: sortRows(rows, columns, sort), sort, toggle: (key: K) => setSort((current) => nextSort(current, key)) };
 }
 
 export function SortHeader<K extends string>({

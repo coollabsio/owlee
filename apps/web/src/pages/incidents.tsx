@@ -16,7 +16,7 @@ function impactTone(impact: string) {
   return impact === "critical" || impact === "major" ? "error" : impact === "minor" ? "warning" : "neutral";
 }
 
-function statusTone(status: string) {
+export function statusTone(status: string) {
   return status === "resolved" ? "success" : status === "investigating" ? "warning" : "info";
 }
 
