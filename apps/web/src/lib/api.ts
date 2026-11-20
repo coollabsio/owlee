@@ -457,6 +457,12 @@ export type InsightSite = {
   verify_name: string;
   verify_value: string;
   ingest_open: boolean;
+  /** The script URL, from the server's public origin. */
+  tracker_url: string;
+  /** Unix seconds. Null until the site records its first event. */
+  last_event_at: number | null;
+  visitors_24h: number;
+  pageviews_24h: number;
   daily_quota: number;
   quota_override: number | null;
   used_today: number;

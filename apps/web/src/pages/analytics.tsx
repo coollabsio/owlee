@@ -1,12 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
-import { Button, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { CodeBlock, GuideStep } from "@/components/setup-guide";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { useCanEdit } from "@/lib/me";
-import { cn, intakeSummary } from "@/lib/utils";
+import { cleanHost, siteName } from "@/lib/site-host";
+import { cn, fullTime, intakeSummary, oneOf, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 const ranges = [
@@ -14,35 +16,52 @@ const ranges = [
   { id: "7d", label: "7 days", seconds: 7 * 86_400 },
   { id: "30d", label: "30 days", seconds: 30 * 86_400 },
   { id: "90d", label: "90 days", seconds: 90 * 86_400 },
-];
+] as const;
+type RangeId = (typeof ranges)[number]["id"];
+const defaultRange: RangeId = "30d";
 
-const tabs = ["Overview", "Realtime", "Events", "Visitors", "Tracker"] as const;
+const tabs = [
+  { id: "overview", label: "Overview", ranged: true },
+  { id: "setup", label: "Setup", ranged: false },
+  { id: "realtime", label: "Realtime", ranged: false },
+  { id: "events", label: "Events", ranged: true },
+  { id: "visitors", label: "Visitors", ranged: true },
+  { id: "settings", label: "Settings", ranged: false },
+] as const;
+type Tab = (typeof tabs)[number]["id"];
 
-function rangeQuery(seconds: number) {
+/** `tab` is null when the URL names none, and the page picks one from the site. */
+type SiteView = { tab: Tab | null; range: RangeId };
+
+function parseView(params: URLSearchParams): SiteView {
+  const tab = params.get("tab");
+  return {
+    tab: tabs.some((item) => item.id === tab) ? (tab as Tab) : null,
+    range: oneOf(params.get("range"), ranges.map((range) => range.id), defaultRange),
+  };
+}
+
+function viewSearch(view: SiteView, landing: Tab) {
+  const search = new URLSearchParams();
+  if (view.tab && view.tab !== landing) search.set("tab", view.tab);
+  if (view.range !== defaultRange) search.set("range", view.range);
+  return search;
+}
+
+function rangeQuery(range: RangeId) {
+  const seconds = ranges.find((item) => item.id === range)!.seconds;
   const to = Math.floor(Date.now() / 1000);
   return `from=${to - seconds}&to=${to}`;
 }
 
+function epochIso(seconds: number) {
+  return new Date(seconds * 1000).toISOString();
+}
+
 export function AnalyticsPage() {
   const { siteId } = useParams();
-  // A site page looks its site up across the workspace, so a link from another project still opens.
-  const scope = useListScope({ allProjects: siteId != null });
-  const sites = useQuery({ queryKey: scope.key("sites"), queryFn: () => api<InsightSite[]>(scope.path("/api/sites")) });
-  if (!siteId) return <SiteList sites={sites.data ?? []} loading={sites.isLoading} error={sites.error} />;
-  if (sites.isLoading) {
-    return (
-      <div className="flex flex-col gap-6" aria-busy="true">
-        <div className="space-y-2">
-          <Skeleton className="h-6 w-40" />
-          <Skeleton className="h-3 w-72" />
-        </div>
-        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
-        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
-      </div>
-    );
-  }
-  const site = sites.data?.find((item) => item.id === siteId);
-  return <SiteDetail siteId={siteId} site={site} />;
+  if (siteId) return <SiteDetail key={siteId} siteId={siteId} />;
+  return <SiteList />;
 }
 
 function rowCover(to: string) {
@@ -58,26 +77,17 @@ function CardEmpty({ title, body }: { title: string; body?: string }) {
   );
 }
 
-function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: boolean; error: unknown }) {
-  const client = useQueryClient();
+function SiteList() {
+  const scope = useListScope();
+  const query = useQuery({ queryKey: scope.key("sites"), queryFn: () => api<InsightSite[]>(scope.path("/api/sites")) });
+  const sites = query.data ?? [];
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [domain, setDomain] = useState("");
-  const [projectId, setProjectId] = useProjectChoice();
   const { rows, sort, toggle } = useSort(sites, {
     name: (site) => site.name,
     domain: (site) => site.domain,
-    id: (site) => site.public_id,
-  });
-  const create = useMutation({
-    mutationFn: () => api<InsightSite>("/api/sites", { method: "POST", body: JSON.stringify({ name, domain, project_id: projectId }) }),
-    onSuccess: async () => {
-      setOpen(false);
-      setName("");
-      setDomain("");
-      await client.invalidateQueries({ queryKey: ["sites"] });
-    },
+    visitors: (site) => site.visitors_24h,
+    pageviews: (site) => site.pageviews_24h,
   });
   return (
     <div className="flex flex-col gap-6">
@@ -86,8 +96,8 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
         description="Cookieless page views. Visitors are a daily hash of address and browser, and the address is not stored."
         actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : null}
       />
-      <ErrorText error={error} />
-      {sites.length === 0 && !loading ? (
+      <ErrorText error={query.error} />
+      {sites.length === 0 && !query.isLoading ? (
         <Empty title="No sites yet" body="Add the site you want to measure, then paste the tracker snippet." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : undefined} />
       ) : (
         <LayerCard title="Sites" description="Open a site to see its traffic." flush>
@@ -95,26 +105,35 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
             <thead>
               <tr>
                 <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                <SortHeader column="domain" sort={sort} onSort={toggle}>Domain</SortHeader>
-                <SortHeader column="id" sort={sort} onSort={toggle} className="hidden sm:table-cell">Public id</SortHeader>
+                <SortHeader column="domain" sort={sort} onSort={toggle} className="hidden sm:table-cell">Domain</SortHeader>
+                <SortHeader column="visitors" sort={sort} onSort={toggle} className="text-right!">Visitors, 24h</SortHeader>
+                <SortHeader column="pageviews" sort={sort} onSort={toggle} className="text-right!">Pageviews, 24h</SortHeader>
               </tr>
             </thead>
             <tbody>
-              {loading ? <SkeletonRows columns={[undefined, undefined, "hidden sm:table-cell"]} /> : null}
+              {query.isLoading ? <SkeletonRows columns={[undefined, "hidden sm:table-cell", undefined, undefined]} /> : null}
               {rows.map((site) => {
                 const to = `/analytics/${site.id}`;
                 return (
                   <tr key={site.id} className="clickable-row">
-                    <td className="cell-link"><Link className="row-link" to={to}>{site.name}</Link><ProjectTag id={site.project_id} />{rowCover(to)}</td>
                     <td className="cell-link">
+                      <span className="inline-flex items-center gap-2">
+                        <Link className="row-link" to={to}>{site.name}</Link>
+                        <ProjectTag id={site.project_id} />
+                        {site.last_event_at == null ? <StatusBadge tone="info">Waiting for data</StatusBadge> : null}
+                      </span>
+                      {rowCover(to)}
+                    </td>
+                    <td className="cell-link hidden sm:table-cell">
                       {rowCover(to)}
                       <span className="inline-flex items-center gap-2">
                         {site.domain}
-                        <StatusBadge tone={site.verified ? "success" : "warning"}>{site.verified ? "Verified" : "Unverified"}</StatusBadge>
+                        {site.verified ? null : <StatusBadge tone="warning">Unverified</StatusBadge>}
                         {site.quota_exceeded ? <StatusBadge tone="error">Quota reached</StatusBadge> : null}
                       </span>
                     </td>
-                    <td className="cell-link hidden font-mono text-[0.75rem] sm:table-cell">{rowCover(to)}{site.public_id}</td>
+                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{site.visitors_24h.toLocaleString()}</td>
+                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{site.pageviews_24h.toLocaleString()}</td>
                   </tr>
                 );
               })}
@@ -122,67 +141,142 @@ function SiteList({ sites, loading, error }: { sites: InsightSite[]; loading: bo
           </table>
         </LayerCard>
       )}
-      <Dialog open={canEdit && open} title="New site" description="The domain is used to ignore your own referrer." onClose={() => setOpen(false)}>
-        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-          <Field label="Name"><Input required value={name} onChange={(event) => setName(event.target.value)} placeholder="coolLabs website" /></Field>
-          <Field label="Domain"><Input required value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="coolify.io" /></Field>
-          <ProjectField value={projectId} onChange={setProjectId} />
-          <ErrorText error={create.error} />
-          <Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? <><Spinner />Creating…</> : "Create site"}</Button>
-        </form>
+      <Dialog open={canEdit && open} title="New site" description="Paste the site's address. Only the hostname is kept." onClose={() => setOpen(false)}>
+        {open ? <NewSiteForm /> : null}
       </Dialog>
     </div>
   );
 }
 
-function SiteDetail({ siteId, site }: { siteId: string; site?: InsightSite }) {
-  const [tab, setTab] = useState<(typeof tabs)[number]>("Overview");
-  const [seconds, setSeconds] = useState(ranges[2].seconds);
-  const query = rangeQuery(seconds);
+function NewSiteForm() {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const [domain, setDomain] = useState("");
+  // Null while the name follows the domain. Typing a name stops that.
+  const [name, setName] = useState<string | null>(null);
+  const [projectId, setProjectId] = useProjectChoice();
+  const host = cleanHost(domain);
+  const shownName = name ?? siteName(host);
+  const create = useMutation({
+    mutationFn: () => api<InsightSite>("/api/sites", { method: "POST", body: JSON.stringify({ name: shownName, domain: host, project_id: projectId }) }),
+    onSuccess: async (site) => {
+      await client.invalidateQueries({ queryKey: ["sites"] });
+      navigate(`/analytics/${site.id}`);
+    },
+  });
+  return (
+    <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); setDomain(host); create.mutate(); }}>
+      <Field label="Domain">
+        <Input required value={domain} onChange={(event) => setDomain(event.target.value)} onBlur={() => setDomain(host)} placeholder="coolify.io" />
+      </Field>
+      <Field label="Name">
+        <Input required value={shownName} onChange={(event) => setName(event.target.value)} placeholder="coolify.io" />
+      </Field>
+      <ProjectField value={projectId} onChange={setProjectId} />
+      <ErrorText error={create.error} />
+      <Button variant="primary" type="submit" disabled={create.isPending}>{create.isPending ? <><Spinner />Creating…</> : "Create site"}</Button>
+    </form>
+  );
+}
+
+function SiteDetail({ siteId }: { siteId: string }) {
+  const query = useQuery({
+    queryKey: ["sites", "detail", siteId],
+    queryFn: () => api<InsightSite>(`/api/sites/${siteId}`),
+    refetchInterval: (state) => (state.state.data && state.state.data.last_event_at == null ? 3000 : false),
+  });
+  const [params, setParams] = useSearchParams();
+  // Picked once per visit, so the first page view does not move the user off Setup.
+  const [landing, setLanding] = useState<Tab | null>(null);
+  const [sawWaiting, setSawWaiting] = useState(false);
+  const site = query.data;
+  if (site && landing == null) setLanding(site.last_event_at == null ? "setup" : "overview");
+  if (site && site.last_event_at == null && !sawWaiting) setSawWaiting(true);
+
+  if (query.isLoading || (site && landing == null)) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-3 w-72" />
+        </div>
+        <LayerCard><Skeleton className="h-16 w-full" /></LayerCard>
+        <LayerCard><Skeleton className="h-40 w-full" /></LayerCard>
+      </div>
+    );
+  }
+  if (!site || !landing) return <ErrorText error={query.error ?? new Error("Site not found.")} />;
+
+  const view = parseView(params);
+  const tab = view.tab ?? landing;
+  // Reads the live URL, as on the monitor list: setSearchParams(fn) does not queue.
+  const setView = (patch: Partial<SiteView>) =>
+    setParams(viewSearch({ ...parseView(new URLSearchParams(window.location.search)), ...patch }, landing));
+  const overviewSearch = viewSearch({ tab: "overview", range: view.range }, landing).toString();
+  const overviewLink = `/analytics/${site.id}${overviewSearch ? `?${overviewSearch}` : ""}`;
+  const range = rangeQuery(view.range);
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
-        title={site?.name ?? "Site"}
+        title={site.name}
         keepTitle
-        description={site ? `${site.domain} · no cookies, no stored IP addresses` : undefined}
+        description={`${site.domain} · no cookies, no stored IP addresses`}
         actions={
-          <Select
-            className="w-36"
-            aria-label="Range"
-            value={String(seconds)}
-            options={ranges.map((range) => ({ value: String(range.seconds), label: range.label }))}
-            onChange={(value) => setSeconds(Number(value))}
-          />
+          tabs.find((item) => item.id === tab)!.ranged ? (
+            <Select
+              className="w-36"
+              aria-label="Range"
+              value={view.range}
+              options={ranges.map((range) => ({ value: range.id, label: range.label }))}
+              onChange={(range) => setView({ range })}
+            />
+          ) : null
         }
       />
+      {site.ingest_open ? null : <UnverifiedBanner site={site} onOpen={() => setView({ tab: "settings" })} />}
       {/* The rule lives on the wrapper. The nav overlaps it by 1px so the
           active underline covers that rule. Putting the overlap on the
           buttons, inside overflow-x-auto, computes overflow-y to auto and
           the extra pixel shows a scrollbar even when the tabs fit. */}
-      {site ? <DomainCard site={site} /> : null}
       <div className="-mt-2 min-w-0 border-b border-[var(--ui-divider)]">
         <nav className="-mb-px flex gap-1 overflow-x-auto overflow-y-hidden" aria-label="Site sections">
           {tabs.map((item) => (
             <button
-              key={item}
+              key={item.id}
               type="button"
-              aria-current={item === tab ? "page" : undefined}
+              aria-current={item.id === tab ? "page" : undefined}
               className={cn(
                 "h-9 shrink-0 border-b-2 px-2.5 text-[0.8125rem] font-medium transition-colors",
-                item === tab ? "border-[var(--ui-accent)] text-[var(--ui-fg)]" : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
+                item.id === tab ? "border-[var(--ui-accent)] text-[var(--ui-fg)]" : "border-transparent text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
               )}
-              onClick={() => setTab(item)}
+              onClick={() => setView({ tab: item.id })}
             >
-              {item}
+              {item.label}
             </button>
           ))}
         </nav>
       </div>
-      {tab === "Overview" ? <OverviewPanel siteId={siteId} query={query} /> : null}
-      {tab === "Realtime" ? <RealtimePanel siteId={siteId} /> : null}
-      {tab === "Events" ? <EventsPanel siteId={siteId} query={query} /> : null}
-      {tab === "Visitors" ? <VisitorsPanel siteId={siteId} query={query} /> : null}
-      {tab === "Tracker" && site ? <TrackerPanel site={site} /> : null}
+      {tab === "overview" ? <OverviewPanel siteId={siteId} query={range} /> : null}
+      {tab === "setup" ? <SetupPanel site={site} sawWaiting={sawWaiting} overviewLink={overviewLink} /> : null}
+      {tab === "realtime" ? <RealtimePanel siteId={siteId} /> : null}
+      {tab === "events" ? <EventsPanel siteId={siteId} query={range} /> : null}
+      {tab === "visitors" ? <VisitorsPanel siteId={siteId} query={range} /> : null}
+      {tab === "settings" ? <SettingsPanel site={site} /> : null}
+    </div>
+  );
+}
+
+function UnverifiedBanner({ site, onOpen }: { site: InsightSite; onOpen: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center gap-3 rounded-lg border border-[color-mix(in_oklab,var(--ui-warning)_45%,transparent)] bg-[color-mix(in_oklab,var(--ui-warning)_8%,transparent)] px-4 py-3 text-[0.8125rem]"
+    >
+      <div className="min-w-0 flex-1 space-y-1">
+        <p className="font-medium text-[var(--ui-fg)]">Page views from {site.domain} are dropped.</p>
+        <p className="text-[var(--ui-fg-dim)]">This server accepts events only after the domain's TXT record verifies.</p>
+      </div>
+      <Button size="sm" onClick={onOpen}>Verify domain</Button>
     </div>
   );
 }
@@ -487,44 +581,206 @@ export function VisitorPage() {
   );
 }
 
-function DomainCard({ site }: { site: InsightSite }) {
+function VerifyRecord({ site }: { site: InsightSite }) {
   const client = useQueryClient();
   const canEdit = useCanEdit();
   const verify = useMutation({
     mutationFn: () => api<InsightSite>(`/api/sites/${site.id}/verify`, { method: "POST" }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["sites"] }),
+  });
+  return (
+    <>
+      <CodeBlock file="TXT name" code={site.verify_name} />
+      <CodeBlock file="TXT value" code={site.verify_value} />
+      {canEdit ? (
+        <div>
+          <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
+            {verify.isPending ? <><Spinner />Verifying…</> : "Verify"}
+          </Button>
+        </div>
+      ) : null}
+      <ErrorText error={verify.error} />
+    </>
+  );
+}
+
+const trackerVariants = [
+  { id: "html", label: "HTML", file: "index.html", hint: "Paste the tag into the <head> of every page.", code: (tag: string) => tag },
+  {
+    id: "next",
+    label: "Next.js",
+    file: "app/layout.tsx",
+    hint: "Add the Script to the root layout, inside <body>. Client-side navigation counts as page views.",
+    code: (_tag: string, site: InsightSite) =>
+      `import Script from "next/script";\n\n<Script src="${site.tracker_url}" data-site="${site.public_id}" strategy="afterInteractive" />`,
+  },
+  {
+    id: "other",
+    label: "Other frameworks",
+    file: undefined,
+    hint: "Put the tag in the layout or template that renders <head> on every page, such as a base layout or app.html.",
+    code: (tag: string) => tag,
+  },
+] as const;
+type TrackerVariant = (typeof trackerVariants)[number]["id"];
+
+function SetupPanel({ site, sawWaiting, overviewLink }: { site: InsightSite; sawWaiting: boolean; overviewLink: string }) {
+  const [variantId, setVariantId] = useState<TrackerVariant>("html");
+  const variant = trackerVariants.find((item) => item.id === variantId)!;
+  const tag = `<script defer src="${site.tracker_url}" data-site="${site.public_id}"></script>`;
+  const last = site.last_event_at;
+  return (
+    <LayerCard title="Set up the tracker" description="Three steps. The tracker sets no cookies.">
+      <ol className="flex flex-col gap-6">
+        <GuideStep number={1} title="Verify the domain">
+          {site.verified ? (
+            <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]"><StatusBadge tone="success">Verified</StatusBadge> {site.domain} is verified.</p>
+          ) : (
+            <>
+              <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">
+                Add this TXT record at your DNS host, then verify.
+                {site.ingest_open ? " This server runs in development, so it accepts events before the domain verifies." : " Events are dropped until it verifies."}
+              </p>
+              <VerifyRecord site={site} />
+            </>
+          )}
+        </GuideStep>
+        <GuideStep number={2} title="Add the tracker">
+          <span className="inline-flex self-start rounded-md border border-[var(--ui-control-border)] p-0.5" role="group" aria-label="Framework">
+            {trackerVariants.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={item.id === variantId}
+                className={cn(
+                  "h-6 rounded px-2 text-[0.75rem] font-medium",
+                  item.id === variantId ? "bg-[var(--ui-hover)] text-[var(--ui-fg)]" : "text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
+                )}
+                onClick={() => setVariantId(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </span>
+          <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{variant.hint}</p>
+          <CodeBlock file={variant.file} code={variant.code(tag, site)} />
+          <CodeBlock file="Optional: custom events" code={`owleeEvent("signup", { plan: "hobby" })`} />
+        </GuideStep>
+        <GuideStep number={3} title="Wait for the first page view">
+          {last == null ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--ui-control-border)] px-4 py-3 text-[0.8125rem]">
+              <StatusBadge tone="info">Listening</StatusBadge>
+              <p className="min-w-0 flex-1 text-[var(--ui-fg-dim)]">Open {site.domain} in a browser. This page checks every 3 seconds.</p>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--ui-control-border)] px-4 py-3 text-[0.8125rem]">
+              <StatusBadge tone="success">{sawWaiting ? "First page view received" : "Receiving page views"}</StatusBadge>
+              <p className="min-w-0 flex-1 text-[var(--ui-fg-dim)]">
+                Last event <time dateTime={epochIso(last)} title={fullTime(epochIso(last))}>{timeAgo(epochIso(last))}</time>.
+              </p>
+              <Link className="button button-highlighted h-7 px-2 text-xs" to={overviewLink}>Open Overview</Link>
+            </div>
+          )}
+        </GuideStep>
+      </ol>
+    </LayerCard>
+  );
+}
+
+function SettingsPanel({ site }: { site: InsightSite }) {
+  return (
+    <div className="grid items-start gap-6 lg:grid-cols-2">
+      <NameCard key={site.name} site={site} />
+      <LayerCard
+        title="Domain verification"
+        description="Owlee re-checks verified domains about once an hour."
+        actions={<StatusBadge tone={site.verified ? "success" : "warning"}>{site.verified ? "Verified" : "Unverified"}</StatusBadge>}
+      >
+        <div className="flex flex-col gap-3">
+          <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">
+            {site.verified
+              ? `${site.domain} is verified.`
+              : site.ingest_open
+                ? "This server runs in development, so it accepts events before the domain verifies. Production drops them."
+                : "Events are dropped until the domain verifies."}
+          </p>
+          <VerifyRecord site={site} />
+        </div>
+      </LayerCard>
+      <SiteQuota key={String(site.quota_override ?? "inherit")} site={site} />
+      <PublicCard site={site} />
+      <DangerCard site={site} />
+    </div>
+  );
+}
+
+function NameCard({ site }: { site: InsightSite }) {
+  const client = useQueryClient();
+  const canEdit = useCanEdit();
+  const [name, setName] = useState(site.name);
+  const save = useMutation({
+    mutationFn: () => api<InsightSite>(`/api/sites/${site.id}`, { method: "PUT", body: JSON.stringify({ name, domain: site.domain, color: site.color }) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["sites"] }),
+  });
+  return (
+    <LayerCard title="Site" description={`Tracks ${site.domain}.`}>
+      <form className="flex flex-col gap-3 sm:flex-row sm:items-end" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+        <div className="sm:flex-1">
+          <Field label="Name"><Input required disabled={!canEdit} value={name} onChange={(event) => setName(event.target.value)} /></Field>
+        </div>
+        {canEdit ? <Button variant="primary" type="submit" disabled={save.isPending || name.trim() === site.name}>Rename</Button> : null}
+      </form>
+      <ErrorText error={save.error} />
+    </LayerCard>
+  );
+}
+
+function DangerCard({ site }: { site: InsightSite }) {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const canEdit = useCanEdit();
+  const [confirming, setConfirming] = useState<"reset" | "delete" | null>(null);
+  const reset = useMutation({
+    mutationFn: () => api(`/api/sites/${site.id}/analytics`, { method: "DELETE" }),
     onSuccess: async () => {
+      setConfirming(null);
+      await client.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).startsWith("site") });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => api(`/api/sites/${site.id}`, { method: "DELETE" }),
+    onSuccess: async () => {
+      navigate("/analytics");
       await client.invalidateQueries({ queryKey: ["sites"] });
     },
   });
+  if (!canEdit) return null;
   return (
-    <LayerCard
-      title="Domain verification"
-      description="Add this TXT record at your DNS host, then verify. Owlee re-checks verified domains about once an hour."
-      actions={
-        <StatusBadge tone={site.verified ? "success" : "warning"}>{site.verified ? "Verified" : "Unverified"}</StatusBadge>
-      }
-    >
-      <SiteQuota key={String(site.quota_override ?? "inherit")} site={site} />
-      {!site.verified && site.ingest_open ? (
-        <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-dim)]">
-          This install is in development, so events from the configured domain are still accepted. Production refuses them until the TXT record verifies.
-        </p>
-      ) : null}
-      {!site.verified && !site.ingest_open ? (
-        <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-dim)]">
-          Events are rejected until this domain is verified.
-        </p>
-      ) : null}
-      <p className="mb-1 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Name</p>
-      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] text-[var(--ui-fg)]">{site.verify_name}</pre>
-      <p className="mb-1 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Value</p>
-      <pre className="mb-3 overflow-x-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] text-[var(--ui-fg)]">{site.verify_value}</pre>
-      {canEdit ? (
-        <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
-          {verify.isPending ? <><Spinner />Verifying…</> : "Verify"}
-        </Button>
-      ) : null}
-      <ErrorText error={verify.error} />
+    <LayerCard title="Danger zone" description="Neither can be undone.">
+      <div className="flex flex-wrap gap-3">
+        <Button variant="danger" onClick={() => setConfirming("reset")}>Reset data</Button>
+        <Button variant="danger" onClick={() => setConfirming("delete")}>Delete site</Button>
+      </div>
+      <ConfirmDialog
+        open={confirming === "reset"}
+        title="Reset data?"
+        description={`Every page view, event, and visitor of ${site.name} is deleted. The site and its tracker keep working. This cannot be undone.`}
+        confirmLabel="Reset data"
+        pending={reset.isPending}
+        error={reset.error}
+        onConfirm={() => reset.mutate()}
+        onClose={() => setConfirming(null)}
+      />
+      <ConfirmDialog
+        open={confirming === "delete"}
+        title="Delete site?"
+        description={`${site.name} and all its data are deleted. The tracker on ${site.domain} is rejected. This cannot be undone.`}
+        confirmLabel="Delete site"
+        pending={remove.isPending}
+        error={remove.error}
+        onConfirm={() => remove.mutate()}
+        onClose={() => setConfirming(null)}
+      />
     </LayerCard>
   );
 }
@@ -552,7 +808,7 @@ function SiteQuota({ site }: { site: InsightSite }) {
     },
   });
   return (
-    <div className="mb-4 border-b border-[var(--ui-divider)] pb-4">
+    <LayerCard title="Daily cap" description="A safety valve against floods, not a bill.">
       <p className={`mb-3 text-[0.8125rem] ${site.quota_exceeded ? "text-[var(--ui-error)]" : "text-[var(--ui-fg-faint)]"}`}>
         {site.used_today.toLocaleString()} of {site.daily_quota.toLocaleString()} events today
         {site.quota_override == null ? " (instance default)" : " (this site)"}
@@ -578,15 +834,14 @@ function SiteQuota({ site }: { site: InsightSite }) {
         ) : null}
       </form> : null}
       <ErrorText error={save.error} />
-    </div>
+    </LayerCard>
   );
 }
 
-function TrackerPanel({ site }: { site: InsightSite }) {
+function PublicCard({ site }: { site: InsightSite }) {
   const client = useQueryClient();
   const canEdit = useCanEdit();
   const [enabled, setEnabled] = useState(site.public_enabled);
-  const snippet = `<script defer src="${window.location.origin}/data.js" data-site="${site.public_id}"></script>`;
   const save = useMutation({
     mutationFn: () =>
       api(`/api/sites/${site.id}/public`, {
@@ -600,29 +855,21 @@ function TrackerPanel({ site }: { site: InsightSite }) {
       }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["sites"] }),
   });
-  const code = "rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] font-mono text-[0.75rem]";
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <LayerCard title="Tracker" description="Paste this before </body>. It sets no cookies.">
-        <pre className={cn(code, "overflow-x-auto p-3 text-[var(--ui-fg)]")}>{snippet}</pre>
-        <p className="mt-4 mb-1.5 text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">Custom events</p>
-        <pre className={cn(code, "overflow-x-auto p-3 text-[var(--ui-fg)]")}>{`owleeEvent("signup", { plan: "hobby" })`}</pre>
-      </LayerCard>
-      <LayerCard title="Public dashboard" description="Share aggregate numbers without a login.">
-        <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); save.mutate(); }}>
-          <label className="flex items-center gap-2 text-[0.8125rem] font-medium text-[var(--ui-fg-dim)]">
-            <input type="checkbox" className="accent-[var(--ui-accent)]" disabled={!canEdit} checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-            Public page enabled
-          </label>
-          {site.public_enabled ? (
-            <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
-              Share path <Link className="auth-text-link font-mono text-[0.75rem]" to={`/share/sites/${site.public_slug}`}>/share/sites/{site.public_slug}</Link>
-            </p>
-          ) : null}
-          <ErrorText error={save.error} />
-          {canEdit ? <Button type="submit" variant="primary" disabled={save.isPending}>Save sharing</Button> : null}
-        </form>
-      </LayerCard>
-    </div>
+    <LayerCard title="Public dashboard" description="Share aggregate numbers without a login.">
+      <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); save.mutate(); }}>
+        <label className="flex items-center gap-2 text-[0.8125rem] font-medium text-[var(--ui-fg-dim)]">
+          <input type="checkbox" className="accent-[var(--ui-accent)]" disabled={!canEdit} checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          Public page enabled
+        </label>
+        {site.public_enabled ? (
+          <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
+            Share path <Link className="auth-text-link font-mono text-[0.75rem]" to={`/share/sites/${site.public_slug}`}>/share/sites/{site.public_slug}</Link>
+          </p>
+        ) : null}
+        <ErrorText error={save.error} />
+        {canEdit ? <Button type="submit" variant="primary" disabled={save.isPending}>Save sharing</Button> : null}
+      </form>
+    </LayerCard>
   );
 }
