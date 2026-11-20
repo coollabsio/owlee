@@ -274,6 +274,53 @@ export function LayerCard({
   );
 }
 
+export function Collapsible({
+  title,
+  defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
+  children,
+  className,
+}: {
+  title: ReactNode;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  const [localOpen, setLocalOpen] = useState(defaultOpen);
+  const open = controlledOpen ?? localOpen;
+  const setOpen = (next: boolean) => {
+    setLocalOpen(next);
+    onOpenChange?.(next);
+  };
+  const id = useId();
+  return (
+    <div className={cn("rounded-lg border border-[var(--ui-card-border)]", className)}>
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-left text-[0.8125rem] font-medium text-[var(--ui-fg-dim)] transition-colors hover:bg-[var(--ui-card-bg)] hover:text-[var(--ui-fg)]"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(!open)}
+      >
+        {title}
+        <ChevronDown className={cn("size-3.5 shrink-0 transition-transform duration-200", open && "rotate-180")} aria-hidden="true" />
+      </button>
+      <div
+        id={id}
+        inert={!open}
+        className={cn("grid transition-[grid-template-rows] duration-200 ease-[var(--ui-ease-out)] motion-reduce:transition-none", open ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="border-t border-[var(--ui-card-border)] p-3">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function StatusBadge({
   tone = "neutral",
   children,

@@ -3,7 +3,7 @@ import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, nextSort, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, type SortState, sortRows, Spinner, StatusBadge, Switch, Textarea } from "@/components/ui";
+import { Button, Collapsible, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, nextSort, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, type SortState, sortRows, Spinner, StatusBadge, Switch, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, type Agent, api, type Assertion, type CheckOutcome, type Monitor, type MonitorDetail } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -747,10 +747,7 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
           </Field>
           {monitor ? null : <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />}
         </div>
-        <button type="button" className="text-[0.8125rem] font-medium text-[var(--ui-fg-dim)] hover:text-[var(--ui-fg)]" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
-          {advanced ? "Hide advanced" : "Advanced"}
-        </button>
-        {advanced ? (
+        <Collapsible title="Advanced" open={advanced} onOpenChange={setAdvanced}>
           <div className="space-y-3">
             {target.job_type === "http" ? (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -782,7 +779,7 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
               <Textarea value={draft.description} onChange={(event) => update({ description: event.target.value })} />
             </Field>
           </div>
-        ) : null}
+        </Collapsible>
         {test.data ? <TestResult outcome={test.data} /> : null}
         <ErrorText error={fieldError ? null : save.error || test.error} />
         <div className="flex justify-end gap-2 pt-2">
