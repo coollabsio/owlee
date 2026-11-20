@@ -1,4 +1,4 @@
-import { Check, ChevronDown, MoreH, Trash, X } from "reicon-react";
+import { Check, ChevronDown, MoreH, Trash9, X } from "reicon-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -518,7 +518,7 @@ export function RowActions({ label, actions }: { label: string; actions: RowActi
         disabled={action.disabled}
         onClick={action.onSelect}
       >
-        <Trash className="size-4" />
+        <Trash9 className="size-4" />
       </button>
     );
   }
