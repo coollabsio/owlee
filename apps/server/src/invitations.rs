@@ -48,7 +48,7 @@ async fn list(
     State(state): State<AppState>,
     member: Member,
 ) -> Result<Json<Vec<Invitation>>, AppError> {
-    member.require_editor()?;
+    member.require_editor_to_read()?;
     let rows = sqlx::query(&format!(
         "SELECT id, email, role, expires_at, created_at FROM workspace_invitations \
          WHERE workspace_id = $1 AND {PENDING} AND expires_at > $2 ORDER BY created_at, id"

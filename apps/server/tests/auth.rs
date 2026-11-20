@@ -358,6 +358,20 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
         denied.body["detail"],
         "Only a workspace admin can change this."
     );
+    let unread = call(
+        &app.router,
+        "GET",
+        "/api/notifications",
+        None,
+        Some(&member),
+        &app.scope(),
+    )
+    .await;
+    assert_eq!(unread.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        unread.body["detail"],
+        "Only a workspace admin can see this."
+    );
     for path in [
         "/api/monitors",
         "/api/overview",

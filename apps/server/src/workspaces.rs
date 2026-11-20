@@ -81,6 +81,15 @@ impl Member {
             ))
         }
     }
+
+    /// For lists only admins read, such as notification channels.
+    pub fn require_editor_to_read(&self) -> Result<(), AppError> {
+        if self.is_editor() {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden("Only a workspace admin can see this."))
+        }
+    }
 }
 
 impl FromRequestParts<AppState> for Member {
