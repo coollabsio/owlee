@@ -4,10 +4,9 @@ import { Button, ConfirmDialog, ErrorText, Field, FilterChips, FilterValue, Inpu
 import { ApiError, api, type Channel, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope } from "@/lib/workspace";
-import { formatTime } from "@/lib/utils";
+import { formatTime, providerLabel } from "@/lib/utils";
 
 const providers = ["email", "webhook", "slack", "discord"] as const;
-const providerLabel: Record<(typeof providers)[number], string> = { email: "Email", webhook: "Webhook", slack: "Slack", discord: "Discord" };
 
 export function NotificationsPage() {
   if (!useCanEdit()) {

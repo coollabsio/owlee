@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
-import type { DropReason, IntakeCounts } from "@/lib/api";
+import type { Channel, DropReason, IntakeCounts } from "@/lib/api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -90,8 +90,11 @@ export function fromLocalInput(value: string) {
   return new Date(value).toISOString();
 }
 
+export const providerLabel: Record<Channel["provider"], string> = { email: "Email", webhook: "Webhook", slack: "Slack", discord: "Discord" };
+
 export const stateLabel: Record<string, string> = {
   pending: "Pending",
+  paused: "Paused",
   up: "Operational",
   degraded: "Degraded",
   down: "Down",

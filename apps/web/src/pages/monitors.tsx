@@ -1,19 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
 import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { ApiError, type Agent, api, type Assertion, type Monitor } from "@/lib/api";
+import { ApiError, type Agent, api, type Assertion, type CheckOutcome, type Monitor, type MonitorDetail } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { hostOf, inferType, type JobType, normalizeTarget } from "@/lib/monitor-target";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
-import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
+import { fullTime, percent, providerLabel, stateLabel, timeAgo } from "@/lib/utils";
 
 type Draft = {
   name: string;
+  /** Until the user types a name, it follows the host. */
+  name_edited: boolean;
   description: string;
-  job_type: "http" | "tcp";
+  job_type: JobType;
+  /** Until the user picks a type, it follows the URL. */
+  type_edited: boolean;
   url: string;
   method: string;
   interval_seconds: string;
@@ -27,9 +32,11 @@ type Draft = {
 
 const emptyDraft: Draft = {
   name: "",
+  name_edited: false,
   description: "",
   job_type: "http",
-  url: "https://",
+  type_edited: false,
+  url: "",
   method: "GET",
   interval_seconds: "60",
   timeout_seconds: "30",
@@ -44,8 +51,10 @@ function draftFrom(monitor: Monitor): Draft {
   const body = monitor.assertions.find((assertion) => assertion.type === "body" && assertion.compare === "contains");
   return {
     name: monitor.name,
+    name_edited: true,
     description: monitor.description,
     job_type: monitor.job_type,
+    type_edited: true,
     url: monitor.url,
     method: monitor.method,
     interval_seconds: String(monitor.interval_seconds),
@@ -58,16 +67,24 @@ function draftFrom(monitor: Monitor): Draft {
   };
 }
 
+/** What the draft checks once the type, target, and name are filled in from the URL. */
+function resolved(draft: Draft) {
+  const job_type = draft.type_edited ? draft.job_type : inferType(draft.url);
+  const url = normalizeTarget(job_type, draft.url);
+  return { job_type, url, name: draft.name_edited ? draft.name : hostOf(job_type, url) };
+}
+
 function payload(draft: Draft) {
+  const { job_type, url, name } = resolved(draft);
   const assertions: Assertion[] = [];
-  if (draft.job_type === "http" && draft.body_contains.trim()) {
+  if (job_type === "http" && draft.body_contains.trim()) {
     assertions.push({ type: "body", compare: "contains", target: draft.body_contains.trim() });
   }
   return {
-    name: draft.name,
+    name,
     description: draft.description,
-    job_type: draft.job_type,
-    url: draft.url,
+    job_type,
+    url,
     method: draft.method,
     interval_seconds: Number(draft.interval_seconds),
     timeout_ms: Number(draft.timeout_seconds) * 1000,
@@ -86,14 +103,29 @@ function rowCover(to: string) {
   return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
 }
 
-const stateRank: Record<Monitor["state"], number> = { down: 0, degraded: 1, pending: 2, up: 3 };
+type ShownState = Monitor["state"] | "paused";
+type Tone = "neutral" | "success" | "warning" | "error";
+
+/** A paused monitor keeps its last state, but the list shows it as paused. */
+function shownState(monitor: Monitor): ShownState {
+  return monitor.active ? monitor.state : "paused";
+}
+
+const stateRank: Record<ShownState, number> = { down: 0, degraded: 1, pending: 2, up: 3, paused: 4 };
+const stateTone: Record<ShownState, Tone> = { down: "error", degraded: "warning", pending: "neutral", up: "success", paused: "neutral" };
+const checkTone: Record<string, Tone | "info"> = { success: "success", failure: "error", degraded: "warning" };
+
+function Ago({ at }: { at: string | null }) {
+  return at ? <time dateTime={at} title={fullTime(at)}>{timeAgo(at)}</time> : <>never</>;
+}
 
 function epoch(value: string | null) {
   return value ? Date.parse(value) : null;
 }
 
-function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor: Monitor; subtitle: string; stateFilter: Monitor["state"] | null; onStateFilter: (state: Monitor["state"]) => void }) {
+function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor: Monitor; subtitle: string; stateFilter: ShownState | null; onStateFilter: (state: ShownState) => void }) {
   const to = `/monitors/${monitor.id}`;
+  const state = shownState(monitor);
   return (
     <tr className="clickable-row">
       <td className="cell-link">
@@ -104,8 +136,8 @@ function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor
       </td>
       <td className="cell-link">
         {rowCover(to)}
-        <FilterValue active={stateFilter === monitor.state} label={stateLabel[monitor.state]} onToggle={() => onStateFilter(monitor.state)}>
-          <StatusBadge tone={monitor.state === "up" ? "success" : monitor.state === "down" ? "error" : monitor.state === "degraded" ? "warning" : "neutral"}>{stateLabel[monitor.state]}</StatusBadge>
+        <FilterValue active={stateFilter === state} label={stateLabel[state]} onToggle={() => onStateFilter(state)}>
+          <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
         </FilterValue>
       </td>
       <td className="cell-link hidden md:table-cell">
@@ -118,7 +150,7 @@ function MonitorRow({ monitor, subtitle, stateFilter, onStateFilter }: { monitor
       </td>
       <td className="cell-link whitespace-nowrap">
         {rowCover(to)}
-        {timeAgo(monitor.last_checked_at)}
+        <Ago at={monitor.last_checked_at} />
       </td>
     </tr>
   );
@@ -131,16 +163,18 @@ export function MonitorsPage() {
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [stateFilter, setStateFilter] = useState<Monitor["state"] | null>(null);
+  const [stateFilter, setStateFilter] = useState<ShownState | null>(null);
   const needle = search.trim().toLowerCase();
-  const filtered = (query.data ?? []).filter(
-    (monitor) =>
-      (!needle || monitor.name.toLowerCase().includes(needle) || monitor.url.toLowerCase().includes(needle)) &&
-      (!stateFilter || monitor.state === stateFilter),
-  );
+  const filtered = (query.data ?? [])
+    .filter(
+      (monitor) =>
+        (!needle || monitor.name.toLowerCase().includes(needle) || monitor.url.toLowerCase().includes(needle)) &&
+        (!stateFilter || shownState(monitor) === stateFilter),
+    )
+    .sort((a, b) => Number(b.active) - Number(a.active));
   const { rows, sort, toggle } = useSort(filtered, {
     name: (monitor) => monitor.name,
-    state: (monitor) => stateRank[monitor.state],
+    state: (monitor) => stateRank[shownState(monitor)],
     today: (monitor) => monitor.uptime_24h,
     month: (monitor) => monitor.uptime_30d,
     checked: (monitor) => epoch(monitor.last_checked_at),
@@ -154,7 +188,7 @@ export function MonitorsPage() {
         actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : null}
       />
       {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
-        <Empty title="No monitors" body="Point one at an HTTP URL or a host:port. Checks start on the next scheduler tick." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : undefined} />
+        <Empty title="No monitors" body="Paste a URL or a host:port. Owlee checks it as soon as you save." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New monitor</Button> : undefined} />
       ) : (
         <LayerCard title="All monitors" description={query.data ? `${query.data.length} total` : undefined} flush>
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--ui-divider)] p-2">
@@ -213,17 +247,17 @@ export function MonitorDetailPage() {
   const [checksPage, setChecksPage] = useState(0);
   const query = useQuery({
     queryKey: ["monitor", id],
-    queryFn: () => api<Monitor>(`/api/monitors/${id}`),
+    queryFn: () => api<MonitorDetail>(`/api/monitors/${id}`),
     refetchInterval: 10_000,
   });
   const label = useMonitorLabel();
   const run = useMutation({
-    mutationFn: () => api<Monitor>(`/api/monitors/${id}/checks`, { method: "POST" }),
+    mutationFn: () => api<MonitorDetail>(`/api/monitors/${id}/checks`, { method: "POST" }),
     onSuccess: (monitor) => client.setQueryData(["monitor", id], monitor),
   });
   const pause = useMutation({
     mutationFn: (active: boolean) =>
-      api<Monitor>(`/api/monitors/${id}/active`, { method: "POST", body: JSON.stringify({ active }) }),
+      api<MonitorDetail>(`/api/monitors/${id}/active`, { method: "POST", body: JSON.stringify({ active }) }),
     onSuccess: (monitor) => client.setQueryData(["monitor", id], monitor),
   });
   const remove = useMutation({
@@ -248,7 +282,7 @@ export function MonitorDetailPage() {
   const pages = Math.ceil(checks.length / checksPerPage);
   const pageIndex = Math.min(checksPage, Math.max(0, pages - 1));
   const shown = checks.slice(pageIndex * checksPerPage, (pageIndex + 1) * checksPerPage);
-  const stateToneName = monitor.state === "up" ? "success" : monitor.state === "down" ? "error" : monitor.state === "degraded" ? "warning" : "neutral";
+  const state = shownState(monitor);
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -257,7 +291,7 @@ export function MonitorDetailPage() {
         description={label(monitor)}
         actions={
           <>
-            <StatusBadge tone={monitor.active ? stateToneName : "neutral"}>{monitor.active ? stateLabel[monitor.state] : "Paused"}</StatusBadge>
+            <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
             {canEdit ? (
               <>
                 {monitor.agent_id ? null : <Button variant="primary" onClick={() => run.mutate()} disabled={run.isPending}>{run.isPending ? <><Spinner />Checking…</> : "Run check"}</Button>}
@@ -275,6 +309,7 @@ export function MonitorDetailPage() {
           <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">This check is defined in the agent's config file. Change it there and restart the agent.</p>
         </LayerCard>
       ) : null}
+      <SetupCard monitor={monitor} canEdit={canEdit} />
       <LayerCard title="Uptime" description="Last 90 days">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Today" value={percent(monitor.uptime_24h)} />
@@ -289,7 +324,7 @@ export function MonitorDetailPage() {
       </LayerCard>
       <LayerCard title="Recent checks" flush>
         {checks.length === 0 ? (
-          <CardText title="No checks yet" body="Results appear here after the first scheduler tick." />
+          <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : "Resume the monitor to run checks."} />
         ) : (
           <div className="overflow-x-auto">
             <table className="cool-table">
@@ -306,12 +341,12 @@ export function MonitorDetailPage() {
               <tbody>
                 {shown.map((check) => (
                   <tr key={check.id}>
-                    <td><StatusBadge tone={check.status === "success" ? "success" : check.status === "failure" ? "error" : check.status === "degraded" ? "warning" : "info"}>{stateLabel[check.status] ?? check.status}</StatusBadge></td>
+                    <td><StatusBadge tone={checkTone[check.status] ?? "info"}>{stateLabel[check.status] ?? check.status}</StatusBadge></td>
                     <td>{check.status_code ?? "-"}</td>
                     <td className="whitespace-nowrap">{check.latency_ms} ms</td>
                     <td>{check.error || "-"}</td>
                     <td>{check.region === "local" ? "This server" : check.region}</td>
-                    <td className="whitespace-nowrap">{formatTime(check.checked_at)}</td>
+                    <td className="whitespace-nowrap"><Ago at={check.checked_at} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -345,6 +380,75 @@ export function MonitorDetailPage() {
 }
 
 const checksPerPage = 20;
+
+const linkClass = "font-medium text-[var(--ui-fg)] underline-offset-2 hover:underline";
+const smallButton = "button h-7 px-2 text-xs";
+
+/** What this monitor is connected to. Editors get a link to fix each missing part. */
+function SetupCard({ monitor, canEdit }: { monitor: MonitorDetail; canEdit: boolean }) {
+  const channels = monitor.alert_channel_count;
+  const pages = monitor.status_pages;
+  return (
+    <LayerCard title="Setup" description="Who hears about a failure, and where it shows.">
+      <ul className="flex flex-col gap-4">
+        <SetupItem
+          tone={channels > 0 ? "success" : "neutral"}
+          label={channels > 0 ? "On" : "Off"}
+          title="Alerts"
+          action={canEdit && channels === 0 ? <Link className={smallButton} to="/notifications">Add a channel</Link> : null}
+        >
+          {channels === 0
+            ? "No alert channel. A failure opens an incident, but nobody is told."
+            : canEdit
+              ? `Sent to ${monitor.alert_channels.map((channel) => `${channel.name} (${providerLabel[channel.provider]})`).join(", ")}.`
+              : `Sent to ${channels} alert ${channels === 1 ? "channel" : "channels"}.`}
+        </SetupItem>
+        <SetupItem
+          tone={pages.length > 0 ? "success" : "neutral"}
+          label={pages.length > 0 ? "On" : "Off"}
+          title="Status pages"
+          action={canEdit && pages.length === 0 ? <Link className={smallButton} to="/pages">Add to a page</Link> : null}
+        >
+          {pages.length === 0 ? (
+            "Not shown on a status page."
+          ) : (
+            <>
+              Shown on{" "}
+              {pages.map((page, index) => (
+                <span key={page.id}>
+                  {index > 0 ? ", " : null}
+                  {canEdit ? <Link className={linkClass} to={`/pages/${page.id}`}>{page.title}</Link> : page.title}
+                </span>
+              ))}
+              .
+            </>
+          )}
+        </SetupItem>
+        <SetupItem
+          tone={monitor.open_incident_id ? "error" : "success"}
+          label={monitor.open_incident_id ? "Open" : "None"}
+          title="Incident"
+          action={monitor.open_incident_id ? <Link className={smallButton} to={`/incidents/${monitor.open_incident_id}`}>View incident</Link> : null}
+        >
+          {monitor.open_incident_id ? "An incident is open for this monitor." : "No open incident."}
+        </SetupItem>
+      </ul>
+    </LayerCard>
+  );
+}
+
+function SetupItem({ tone, label, title, action, children }: { tone: Tone; label: string; title: string; action: ReactNode; children: ReactNode }) {
+  return (
+    <li className="flex flex-wrap items-center gap-3">
+      <span className="w-16 shrink-0"><StatusBadge tone={tone}>{label}</StatusBadge></span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">{title}</p>
+        <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{children}</p>
+      </div>
+      {action}
+    </li>
+  );
+}
 
 function useMonitorLabel() {
   const scope = useListScope({ allProjects: true });
@@ -381,25 +485,55 @@ const intervals = [15, 30, 60, 300, 600, 1800, 3600].map((seconds) => ({
 }));
 const methods = ["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE"].map((method) => ({ value: method, label: method }));
 
-function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () => void; monitor?: Monitor }) {
+const advancedFields = ["method", "expected_status", "timeout_ms", "degraded_after_ms", "failure_threshold", "assertions", "description"];
+
+function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () => void; monitor?: MonitorDetail }) {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const [projectId, setProjectId] = useProjectChoice();
   const [draft, setDraft] = useState<Draft>(monitor ? draftFrom(monitor) : emptyDraft);
+  const [advanced, setAdvanced] = useState(Boolean(monitor));
   const [fields, setFields] = useState<Record<string, string>>({});
+  const target = resolved(draft);
+  const body = () => JSON.stringify({ ...payload(draft), project_id: monitor?.project_id ?? projectId });
+  function showFields(error: Error) {
+    const next = error instanceof ApiError ? error.fields ?? {} : {};
+    setFields(next);
+    if (advancedFields.some((field) => next[field])) setAdvanced(true);
+  }
+  const test = useMutation({
+    mutationFn: () => api<CheckOutcome>("/api/monitors/test", { method: "POST", body: body() }),
+    onError: showFields,
+  });
   const save = useMutation({
     mutationFn: () =>
-      api<Monitor>(monitor ? `/api/monitors/${monitor.id}` : "/api/monitors", {
+      api<MonitorDetail>(monitor ? `/api/monitors/${monitor.id}` : "/api/monitors", {
         method: monitor ? "PUT" : "POST",
-        body: JSON.stringify(monitor ? payload(draft) : { ...payload(draft), project_id: projectId }),
+        body: body(),
       }),
     onSuccess: async (saved) => {
+      client.setQueryData(["monitor", saved.id], saved);
       await client.invalidateQueries({ queryKey: ["monitors"] });
-      await client.invalidateQueries({ queryKey: ["monitor", saved.id] });
       await client.invalidateQueries({ queryKey: ["overview"] });
-      onClose();
+      close();
+      if (!monitor) navigate(`/monitors/${saved.id}`);
     },
-    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
+    onError: showFields,
   });
+
+  function update(patch: Partial<Draft>) {
+    setDraft((current) => ({ ...current, ...patch }));
+    test.reset();
+  }
+
+  function close() {
+    setDraft(monitor ? draftFrom(monitor) : emptyDraft);
+    setAdvanced(Boolean(monitor));
+    setFields({});
+    test.reset();
+    save.reset();
+    onClose();
+  }
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -407,72 +541,100 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
     save.mutate();
   }
 
+  const fieldError = Object.keys(fields).length > 0;
   return (
-    <Dialog
-      open={open}
-      onClose={() => {
-        setDraft(monitor ? draftFrom(monitor) : emptyDraft);
-        onClose();
-      }}
-      title={monitor ? "Edit monitor" : "New monitor"}
-      description="Failures are counted until the threshold, then Owlee opens an incident."
-    >
+    <Dialog open={open} onClose={close} title={monitor ? "Edit monitor" : "New monitor"} description="Paste what to check. Owlee fills in the rest.">
       <form className="space-y-3" onSubmit={submit}>
-        <Field label="Name" error={fields.name}>
-          <Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required />
+        <Field label="URL or host:port" error={fields.url}>
+          <Input
+            value={draft.url}
+            onChange={(event) => update({ url: event.target.value })}
+            placeholder="example.com or db.internal:5432"
+            autoFocus={!monitor}
+            required
+          />
         </Field>
-        {monitor ? null : <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />}
-        <Field label="Description">
-          <Textarea value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-        </Field>
+        {target.url && target.url !== draft.url.trim() ? (
+          <p className="-mt-1 text-[0.75rem] text-[var(--ui-fg-faint)]">Checks {target.url}</p>
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Name" error={fields.name}>
+            <Input value={target.name} onChange={(event) => update({ name: event.target.value, name_edited: true })} placeholder="Taken from the URL" required />
+          </Field>
           <Field label="Type">
             <Select
-              value={draft.job_type}
+              value={target.job_type}
               options={[{ value: "http", label: "HTTP" }, { value: "tcp", label: "TCP" }]}
-              onChange={(job_type) => setDraft({ ...draft, job_type })}
+              onChange={(job_type) => update({ job_type, type_edited: true, url: normalizeTarget(job_type, draft.url) })}
               aria-label="Type"
             />
           </Field>
-          <Field label="Interval">
-            <Select value={draft.interval_seconds} options={intervals} onChange={(interval_seconds) => setDraft({ ...draft, interval_seconds })} aria-label="Interval" />
-          </Field>
         </div>
-        <Field label={draft.job_type === "tcp" ? "Host and port" : "URL"} error={fields.url}>
-          <Input value={draft.url} onChange={(event) => setDraft({ ...draft, url: event.target.value })} placeholder={draft.job_type === "tcp" ? "db.internal:5432" : "https://example.com/health"} />
-        </Field>
-        {draft.job_type === "http" ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Method">
-              <Select value={draft.method} options={methods} onChange={(method) => setDraft({ ...draft, method })} aria-label="Method" />
-            </Field>
-            <Field label="Expected status" hint="blank = any 2xx" error={fields.expected_status}>
-              <Input value={draft.expected_status} onChange={(event) => setDraft({ ...draft, expected_status: event.target.value })} inputMode="numeric" />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Interval">
+            <Select value={draft.interval_seconds} options={intervals} onChange={(interval_seconds) => update({ interval_seconds })} aria-label="Interval" />
+          </Field>
+          {monitor ? null : <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />}
+        </div>
+        <button type="button" className="text-[0.8125rem] font-medium text-[var(--ui-fg-dim)] hover:text-[var(--ui-fg)]" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
+          {advanced ? "Hide advanced" : "Advanced"}
+        </button>
+        {advanced ? (
+          <div className="space-y-3">
+            {target.job_type === "http" ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Method">
+                  <Select value={draft.method} options={methods} onChange={(method) => update({ method })} aria-label="Method" />
+                </Field>
+                <Field label="Expected status" hint="blank = any 2xx" error={fields.expected_status}>
+                  <Input value={draft.expected_status} onChange={(event) => update({ expected_status: event.target.value })} inputMode="numeric" />
+                </Field>
+              </div>
+            ) : null}
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Timeout" hint="seconds" error={fields.timeout_ms}>
+                <Input value={draft.timeout_seconds} onChange={(event) => update({ timeout_seconds: event.target.value })} />
+              </Field>
+              <Field label="Degraded after" hint="ms" error={fields.degraded_after_ms}>
+                <Input value={draft.degraded_after_ms} onChange={(event) => update({ degraded_after_ms: event.target.value })} />
+              </Field>
+              <Field label="Failures" hint="before down" error={fields.failure_threshold}>
+                <Input value={draft.failure_threshold} onChange={(event) => update({ failure_threshold: event.target.value })} />
+              </Field>
+            </div>
+            {target.job_type === "http" ? (
+              <Field label="Body contains" error={fields.assertions}>
+                <Input value={draft.body_contains} onChange={(event) => update({ body_contains: event.target.value })} placeholder="optional assertion" />
+              </Field>
+            ) : null}
+            <Field label="Description">
+              <Textarea value={draft.description} onChange={(event) => update({ description: event.target.value })} />
             </Field>
           </div>
         ) : null}
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Field label="Timeout" hint="seconds" error={fields.timeout_ms}>
-            <Input value={draft.timeout_seconds} onChange={(event) => setDraft({ ...draft, timeout_seconds: event.target.value })} />
-          </Field>
-          <Field label="Degraded after" hint="ms" error={fields.degraded_after_ms}>
-            <Input value={draft.degraded_after_ms} onChange={(event) => setDraft({ ...draft, degraded_after_ms: event.target.value })} />
-          </Field>
-          <Field label="Failures" hint="before down" error={fields.failure_threshold}>
-            <Input value={draft.failure_threshold} onChange={(event) => setDraft({ ...draft, failure_threshold: event.target.value })} />
-          </Field>
-        </div>
-        {draft.job_type === "http" ? (
-          <Field label="Body contains" error={fields.assertions}>
-            <Input value={draft.body_contains} onChange={(event) => setDraft({ ...draft, body_contains: event.target.value })} placeholder="optional assertion" />
-          </Field>
-        ) : null}
-        <ErrorText error={fields.name ? null : save.error} />
+        {test.data ? <TestResult outcome={test.data} /> : null}
+        <ErrorText error={fieldError ? null : save.error || test.error} />
         <div className="flex justify-end gap-2 pt-2">
-          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button type="button" onClick={close}>Cancel</Button>
+          <Button type="button" onClick={() => { setFields({}); test.mutate(); }} disabled={!draft.url.trim() || test.isPending}>
+            {test.isPending ? <><Spinner />Testing…</> : "Test"}
+          </Button>
           <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save monitor"}</Button>
         </div>
       </form>
     </Dialog>
+  );
+}
+
+function TestResult({ outcome }: { outcome: CheckOutcome }) {
+  const details = [outcome.status_code == null ? null : `HTTP ${outcome.status_code}`, `${outcome.latency_ms} ms`].filter(Boolean).join(" · ");
+  return (
+    <div role="status" className="rounded-md border border-[var(--ui-divider)] px-3 py-2 text-[0.8125rem]">
+      <div className="flex items-center gap-2">
+        <StatusBadge tone={checkTone[outcome.status] ?? "neutral"}>{stateLabel[outcome.status]}</StatusBadge>
+        <span className="text-[var(--ui-fg-dim)]">{details}</span>
+      </div>
+      {outcome.error ? <p className="mt-1 text-[var(--ui-fg-dim)]">{outcome.error}</p> : null}
+    </div>
   );
 }

@@ -87,6 +87,23 @@ export type Monitor = {
   recent?: Check[];
 };
 
+/** The detail view: a monitor plus what it is connected to. */
+export type MonitorDetail = Monitor & {
+  open_incident_id: string | null;
+  /** Empty for members, who may not read channels. */
+  alert_channels: { id: string; name: string; provider: Channel["provider"] }[];
+  alert_channel_count: number;
+  status_pages: { id: string; title: string; slug: string }[];
+};
+
+/** One check run by `POST /api/monitors/test`. Nothing is stored. */
+export type CheckOutcome = {
+  status: "success" | "degraded" | "failure";
+  status_code: number | null;
+  latency_ms: number;
+  error: string | null;
+};
+
 export type Agent = {
   id: string;
   project_id: string;
