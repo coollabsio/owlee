@@ -40,6 +40,12 @@ function VerifyDomain({ domain, onDone }: { domain: InsightDomain; onDone: () =>
   );
 }
 
+function domainStatus(domain: InsightDomain) {
+  if (!domain.enabled) return { label: "Off", tone: "neutral" } as const;
+  if (!domain.verified) return { label: "Unverified", tone: "warning" } as const;
+  return { label: "Enabled", tone: "success" } as const;
+}
+
 export function LinksPage() {
   const client = useQueryClient();
   const canEdit = useCanEdit();
@@ -82,7 +88,7 @@ export function LinksPage() {
   });
   const domainSort = useSort(domains.data ?? [], {
     hostname: (domain) => domain.hostname,
-    status: (domain) => (domain.enabled ? "Enabled" : "Off"),
+    status: (domain) => domainStatus(domain).label,
   });
   const domainRows = domainSort.rows;
   const verifying = domains.data?.find((domain) => domain.id === verifyId);
@@ -154,8 +160,8 @@ export function LinksPage() {
                   <td className="font-medium text-[var(--ui-fg)]">{domain.hostname}</td>
                   <td className="text-right">
                     <span className="inline-flex items-center gap-2">
-                      {domain.verified ? null : canEdit ? <Button size="sm" onClick={() => setVerifyId(domain.id)}>Verify</Button> : <StatusBadge tone="warning">Unverified</StatusBadge>}
-                      <StatusBadge tone={domain.enabled ? "success" : "neutral"}>{domain.enabled ? "Enabled" : "Off"}</StatusBadge>
+                      {domain.verified || !canEdit ? null : <Button size="sm" onClick={() => setVerifyId(domain.id)}>Verify</Button>}
+                      <StatusBadge tone={domainStatus(domain).tone}>{domainStatus(domain).label}</StatusBadge>
                     </span>
                   </td>
                 </tr>
