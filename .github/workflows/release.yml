@@ -10,8 +10,13 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    name: ci
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: build (${{ matrix.arch }})
+    needs: ci
     strategy:
       matrix:
         include:

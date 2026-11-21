@@ -2,14 +2,15 @@
 # UI assets are architecture-independent. Build them on BUILDPLATFORM so
 # a cross-build does not emulate Bun. CI builds amd64 and arm64 on native
 # runners, where this stage is native too.
-FROM --platform=$BUILDPLATFORM oven/bun:1 AS web
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.5 AS web
 WORKDIR /src/apps/web
 COPY apps/web/package.json apps/web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY apps/web/ ./
 RUN bun run build
 
-FROM rust:1-bookworm AS server
+# Matches rust-toolchain.toml, so rustup does not download a second toolchain.
+FROM rust:1.99.1-bookworm AS server
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -20,7 +21,7 @@ COPY apps/server/ apps/server/
 COPY --from=web /src/apps/web/dist/ apps/web/dist/
 RUN cargo build --locked --release -p owlee-server
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-20261104-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -36,6 +37,8 @@ ENV OWLEE_ENV=production \
 USER 65532:65532
 VOLUME ["/var/lib/owlee"]
 EXPOSE 8080
-HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=10 CMD ["/owlee", "healthcheck"]
+# /api/health/ready also queries the database. The 2s start interval lets
+# Coolify see the first healthy result without waiting a full 30s.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --start-interval=2s --retries=3 CMD ["/owlee", "healthcheck"]
 ENTRYPOINT ["/owlee"]
 CMD ["serve"]

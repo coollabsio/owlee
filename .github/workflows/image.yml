@@ -3,6 +3,9 @@ name: Container image
 on:
   push:
     branches: [main]
+    # v0.1.0 publishes 0.1.0, 0.1, and latest. A pre-release such as
+    # v0.2.0-rc.1 publishes only 0.2.0-rc.1.
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -22,8 +25,14 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/owlee
 
 jobs:
+  # Every image, main or release tag, comes from a commit that passed the tests.
+  ci:
+    name: ci
+    uses: ./.github/workflows/ci.yml
+
   build-push:
     name: build (${{ matrix.arch }})
+    needs: ci
     strategy:
       matrix:
         include:
@@ -108,8 +117,15 @@ jobs:
             "${IMAGE}:${short}-aarch64"
             --tag "${IMAGE}:${short}"
           )
-          if [ "${GITHUB_REF_NAME}" = "${DEFAULT_BRANCH}" ]; then
-            args+=(--tag "${IMAGE}:main" --tag "${IMAGE}:latest")
+          if [ "${GITHUB_REF_TYPE}" = "branch" ] && [ "${GITHUB_REF_NAME}" = "${DEFAULT_BRANCH}" ]; then
+            args+=(--tag "${IMAGE}:main")
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            args+=(--tag "${IMAGE}:${version}")
+            # latest is the newest stable release, not the tip of main.
+            if [[ "${version}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+              args+=(--tag "${IMAGE}:${BASH_REMATCH[1]}.${BASH_REMATCH[2]}" --tag "${IMAGE}:latest")
+            fi
           fi
           docker buildx imagetools create "${args[@]}"
 

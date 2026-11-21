@@ -151,7 +151,7 @@ docker run --rm -p 8080:8080 -v owlee-data:/var/lib/owlee \
   -e OWLEE_APP_KEY="$OWLEE_APP_KEY" owlee:local
 ```
 
-Pushes to `main` publish `ghcr.io/coollabsio/owlee` (`linux/amd64` and `linux/arm64`), tagged `latest`, `main`, and the seven-character commit SHA. The same workflow can be run by hand from the Actions tab. If the package is not linked to this repository automatically, link it from the package settings.
+`.github/workflows/image.yml` runs the CI tests, then publishes `ghcr.io/coollabsio/owlee` for `linux/amd64` and `linux/arm64`. A push to `main` publishes the tags `main` and the seven-character commit SHA. A release tag such as `v0.1.0` publishes `0.1.0`, `0.1`, and `latest`. A pre-release tag such as `v0.2.0-rc.1` publishes only `0.2.0-rc.1`. So `latest` is the newest stable release, not the tip of `main`. The same workflow can be run by hand from the Actions tab. If the package is not linked to this repository automatically, link it from the package settings.
 
 ```bash
 docker pull ghcr.io/coollabsio/owlee:latest

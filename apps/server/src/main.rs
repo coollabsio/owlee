@@ -2,6 +2,11 @@ use std::process::ExitCode;
 
 use owlee_platform::{TracingFormat, init_tracing};
 
+// musl's malloc serializes threads on one lock and slows the static release binary.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let environment = std::env::var("OWLEE_ENV");
     let format = match environment.as_deref() {

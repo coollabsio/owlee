@@ -45,7 +45,7 @@ enum Command {
         #[arg(long)]
         database: Option<PathBuf>,
     },
-    /// Exit successfully when /api/health answers on the configured port.
+    /// Exit successfully when /api/health/ready answers on the configured port.
     Healthcheck,
     /// One-time setup URL for the first owner account.
     SetupToken {
@@ -167,7 +167,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Healthcheck => {
             let config = Config::from_env()?;
-            let url = format!("http://127.0.0.1:{}/api/health", config.port);
+            let url = format!("http://127.0.0.1:{}/api/health/ready", config.port);
             let response = reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .build()?

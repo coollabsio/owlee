@@ -3,6 +3,11 @@ name: ci
 on:
   push:
   pull_request:
+  # release.yml and image.yml run these jobs before they publish.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -39,3 +44,20 @@ jobs:
         run: cargo test --workspace
       - name: Frontend build
         run: cd apps/web && bun install --frozen-lockfile && bun run build
+
+  musl:
+    name: musl release build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Build static binary
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          cargo build --locked --release -p owlee-server --target x86_64-unknown-linux-musl
+      - name: Smoke-run the binary
+        run: target/x86_64-unknown-linux-musl/release/owlee --version
+

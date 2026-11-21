@@ -1,0 +1,26 @@
+name: audit
+
+# Kept out of ci.yml, which release.yml and image.yml call, so a newly
+# published advisory flags the branch without blocking a tag from publishing.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - uses: oven-sh/setup-bun@v2
+      - name: Frontend audit
+        working-directory: apps/web
+        run: bun audit
