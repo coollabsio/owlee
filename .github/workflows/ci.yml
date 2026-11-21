@@ -30,7 +30,7 @@ jobs:
       OWLEE_APP_POSTGRES_URL: postgres://status:status@127.0.0.1:5432/status_app
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt
       - uses: oven-sh/setup-bun@v2
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: x86_64-unknown-linux-musl
       - name: Build static binary
