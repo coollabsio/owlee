@@ -916,15 +916,14 @@ html.dark:not([data-nav-items="flat"]) .menu-item.menu-item-active:hover .menu-i
   inset: 0;
   z-index: 50;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
   background: rgb(0 0 0 / 0.55);
-  padding: 0;
+  padding: 1rem;
 }
 
 @media (min-width: 640px) {
   .modal-backdrop {
-    align-items: center;
     padding: 1.5rem;
   }
 }
@@ -932,11 +931,11 @@ html.dark:not([data-nav-items="flat"]) .menu-item.menu-item-active:hover .menu-i
 .modal-panel {
   position: relative;
   z-index: 1;
-  max-height: 92svh;
+  max-height: 100%;
   width: 100%;
   overflow: auto;
   border: 1px solid var(--ui-card-border);
-  border-radius: 12px 12px 0 0;
+  border-radius: 10px;
   padding: 0.375rem;
   background: var(--ui-panel);
   box-shadow: var(--ui-modal-shadow);
@@ -945,7 +944,6 @@ html.dark:not([data-nav-items="flat"]) .menu-item.menu-item-active:hover .menu-i
 @media (min-width: 640px) {
   .modal-panel {
     max-width: 32rem;
-    border-radius: 10px;
   }
 }
 
