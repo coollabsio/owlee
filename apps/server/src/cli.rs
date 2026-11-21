@@ -55,7 +55,8 @@ enum Command {
         #[command(subcommand)]
         command: SetupTokenCommand,
     },
-    /// Run the checks in a config file from this network and report them to a Owlee server.
+    /// Run checks from this network and report them to a Owlee server. Checks come from a
+    /// config file, OWLEE_AGENT_CHECK_<n>_<KEY> environment variables, or both.
     Agent {
         /// Owlee server URL, for example https://status.example.com.
         #[arg(long, env = "OWLEE_AGENT_SERVER")]
@@ -63,9 +64,9 @@ enum Command {
         /// Token shown once when the agent was created.
         #[arg(long, env = "OWLEE_AGENT_TOKEN", hide_env_values = true)]
         token: String,
-        /// TOML file with [[check]] entries.
+        /// TOML file with [[check]] entries. Optional when the checks are in environment variables.
         #[arg(long, env = "OWLEE_AGENT_CONFIG")]
-        config: PathBuf,
+        config: Option<PathBuf>,
     },
 }
 
@@ -136,7 +137,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             config,
         } => {
             let targets = Config::from_env()?.connectivity_targets;
-            agent::run(&server, token, &config, Connectivity::new(targets)).await?;
+            agent::run(&server, token, config.as_deref(), Connectivity::new(targets)).await?;
         }
         Command::SetupToken { database, command } => {
             let config = load(None, database)?;

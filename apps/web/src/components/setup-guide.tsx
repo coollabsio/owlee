@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button, useCopy } from "@/components/ui";
+import { Button, CopyButton } from "@/components/ui";
 import { type DnsRecord, downloadText, zoneFile } from "@/lib/dns";
 import type { GuideCode } from "@/lib/platform-guides";
 
@@ -18,22 +18,15 @@ export function GuideStep({ number, title, children }: { number: number; title: 
 }
 
 export function CodeBlock({ file, code }: GuideCode) {
-  const { copied, copy } = useCopy();
   return (
     <div className="min-w-0">
-      <div className="field-label">
-        <span className="truncate">{file ?? ""}</span>
-        <button
-          type="button"
-          className="ml-auto text-[0.6875rem] font-normal hover:text-[var(--ui-fg)]"
-          onClick={() => copy(code)}
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
+      <div className="field-label"><span className="truncate">{file ?? ""}</span></div>
+      <div className="relative">
+        <pre className="overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] py-3 pl-3 pr-10 font-mono text-[0.75rem] leading-5 text-[var(--ui-fg)]">
+          {code}
+        </pre>
+        <CopyButton text={code} />
       </div>
-      <pre className="overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] leading-5 text-[var(--ui-fg)]">
-        {code}
-      </pre>
     </div>
   );
 }

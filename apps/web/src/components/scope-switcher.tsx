@@ -88,7 +88,7 @@ export function ScopeSwitcher({ onNavigate }: { onNavigate?: () => void }) {
               <span className="truncate">{item.name}</span>
             </Option>
           ))}
-          <Link className="listbox-option scope-muted" to="/settings/workspace#projects" onClick={done}>
+          <Link className="listbox-option scope-muted" to="/settings/projects" onClick={done}>
             <Settings className="size-3.5 shrink-0" aria-hidden="true" />
             Manage projects
           </Link>
@@ -119,7 +119,7 @@ export function ScopeSwitcher({ onNavigate }: { onNavigate?: () => void }) {
               Create workspace
             </button>
           )}
-          <Link className="listbox-option scope-muted" to="/settings/workspace" onClick={done}>
+          <Link className="listbox-option scope-muted" to="/settings" onClick={done}>
             <Settings className="size-3.5 shrink-0" aria-hidden="true" />
             Workspace settings
           </Link>

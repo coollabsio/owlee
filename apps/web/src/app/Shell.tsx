@@ -2,13 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Search4 as Search, X } from "reicon-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { dashboard, manage, type NavLinkItem, type Product, products } from "@/app/nav";
+import { type Access, account, admin, allowed, dashboard, manage, type NavLinkItem, type Product, products, settings } from "@/app/nav";
 import { CommandPalette, modKeyLabel } from "@/components/command-palette";
 import { IconTooltips } from "@/components/icon-tooltips";
 import { ProfileMenu } from "@/components/profile-menu";
 import { ScopeSwitcher } from "@/components/scope-switcher";
 import { api, type Meta, signOut } from "@/lib/api";
-import { useCanEdit, useMe } from "@/lib/me";
+import { useAccess, useMe } from "@/lib/me";
 import { cn } from "@/lib/utils";
 
 function linkActive(pathname: string, link: NavLinkItem) {
@@ -33,9 +33,9 @@ function NavItems({
   onOpenProduct,
   onBack,
   onNavigate,
-  canEdit,
+  access,
 }: {
-  canEdit: boolean;
+  access: Access;
   pathname: string;
   shown: Product | null;
   swap: "" | "forward" | "back";
@@ -47,7 +47,7 @@ function NavItems({
     <ul
       key={`${shown?.id ?? "root"}-${swap}`}
       className={cn(
-        "flex flex-col gap-0.5",
+        "flex flex-1 flex-col gap-0.5",
         swap === "forward" && "nav-swap-forward",
         swap === "back" && "nav-swap-back",
       )}
@@ -72,7 +72,7 @@ function NavItems({
             <li key={group.label ?? index}>
               {group.label ? <div className={cn("nav-section", index > 0 && "mt-3")}>{group.label}</div> : null}
               <ul className="flex flex-col gap-0.5">
-                {group.links.filter((link) => canEdit || !link.editorOnly).map((link) => (
+                {group.links.filter((link) => allowed(link, access)).map((link) => (
                   <li key={link.to}>
                     <NavLink
                       to={link.to}
@@ -145,6 +145,20 @@ function NavItems({
               ))}
             </ul>
           </li>
+          {access.admin ? (
+            /* The install, not the workspace: it sits apart at the bottom. */
+            <li className="mt-auto pt-3">
+              <NavLink
+                to="/admin"
+                title={admin.label}
+                onClick={onNavigate}
+                className={({ isActive }) => cn("menu-item", isActive && "menu-item-active")}
+              >
+                <admin.icon className="menu-item-icon" />
+                <span className="menu-item-label">{admin.label}</span>
+              </NavLink>
+            </li>
+          ) : null}
         </>
       )}
     </ul>
@@ -155,7 +169,7 @@ export function Shell() {
   const navigate = useNavigate();
   const location = useLocation();
   const me = useMe();
-  const canEdit = useCanEdit();
+  const access = useAccess();
   const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState<string | "root" | null>(null);
@@ -180,11 +194,12 @@ export function Shell() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-  const routeProduct = products.find((product) =>
+  const views = [...products, settings, account, admin];
+  const routeProduct = views.find((product) =>
     productLinks(product).some((link) => linkActive(location.pathname, link)),
   );
   const shownId = pinned === "root" ? null : (pinned ?? routeProduct?.id ?? null);
-  const shown = products.find((product) => product.id === shownId) ?? null;
+  const shown = views.find((product) => product.id === shownId) ?? null;
 
   useEffect(() => {
     setPinned(null);
@@ -241,7 +256,7 @@ export function Shell() {
       onOpenProduct={openProduct}
       onBack={backToProducts}
       onNavigate={onNavigate}
-      canEdit={canEdit}
+      access={access}
     />
   );
 

@@ -5,7 +5,7 @@ import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, GuideStep } from "@/components/setup-guide";
-import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
+import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
@@ -341,21 +341,12 @@ function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
 }
 
 function DsnCard({ dsn }: { dsn: string }) {
-  const { copied, copy } = useCopy();
   return (
     <LayerCard
       title="Sentry DSN"
       description="Use this with any official Sentry SDK. The public key identifies the app. It is not a secret, which is why browser SDKs can ship it."
-      actions={
-        <Button
-          variant="highlighted"
-          onClick={() => copy(dsn)}
-        >
-          {copied ? "Copied" : "Copy DSN"}
-        </Button>
-      }
     >
-      <Input readOnly value={dsn} className="font-mono text-[0.8125rem]" onFocus={(event) => event.currentTarget.select()} />
+      <CopyInput value={dsn} label="Copy DSN" className="text-[0.8125rem]" />
     </LayerCard>
   );
 }
@@ -398,7 +389,7 @@ function AppQuota({ app }: { app: ErrorApp }) {
   return (
     <LayerCard
       title="Daily cap"
-      description={inherited ? (canEdit ? "Empty inherits the number from Settings → Ingest quotas." : "This app uses the instance default cap.") : "This app uses its own cap instead of the instance default."}
+      description={inherited ? (canEdit ? "Empty inherits the number from Admin → Ingest quotas." : "This app uses the instance default cap.") : "This app uses its own cap instead of the instance default."}
       actions={app.quotaExceeded ? <StatusBadge tone="error">Cap reached</StatusBadge> : null}
     >
       <p className="mb-3 text-[0.8125rem] text-[var(--ui-fg-faint)]">

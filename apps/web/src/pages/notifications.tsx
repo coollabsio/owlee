@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, SkeletonRows, SortHeader, Spinner, StatusBadge, Switch, useSort } from "@/components/ui";
 import { ApiError, api, type Channel, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope } from "@/lib/workspace";
@@ -23,6 +23,7 @@ function NotificationChannels() {
   const client = useQueryClient();
   const query = useQuery({ queryKey: ["notifications"], queryFn: () => api<Channel[]>("/api/notifications") });
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Channel | null>(null);
   const [deleting, setDeleting] = useState<Channel | null>(null);
   const [providerFilter, setProviderFilter] = useState<Channel["provider"] | null>(null);
   const test = useMutation({
@@ -117,6 +118,7 @@ function NotificationChannels() {
                         <RowActions
                           label={channel.name}
                           actions={[
+                            { label: "Edit", onSelect: () => setEditing(channel) },
                             { label: "Send test", onSelect: () => test.mutate(channel.id), disabled: test.isPending },
                             { label: "Delete", danger: true, onSelect: () => setDeleting(channel) },
                           ]}
@@ -131,7 +133,10 @@ function NotificationChannels() {
         )}
       </LayerCard>
       <Dialog open={open} title="New channel" description="Alerts fire when a monitor changes state." onClose={() => setOpen(false)}>
-        {open ? <NewChannelForm onDone={() => setOpen(false)} /> : null}
+        {open ? <ChannelForm onDone={() => setOpen(false)} /> : null}
+      </Dialog>
+      <Dialog open={editing !== null} title="Edit channel" description={editing?.name} onClose={() => setEditing(null)}>
+        {editing ? <ChannelForm key={editing.id} channel={editing} onDone={() => setEditing(null)} /> : null}
       </Dialog>
       <ConfirmDialog
         open={deleting !== null}
@@ -149,26 +154,31 @@ function NotificationChannels() {
   );
 }
 
-function NewChannelForm({ onDone }: { onDone: () => void }) {
+const keepMonitors = "__keep";
+
+function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => void }) {
   const client = useQueryClient();
   const workspaceWide = useListScope({ allProjects: true });
   const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
-  const [name, setName] = useState("");
-  const [provider, setProvider] = useState<(typeof providers)[number]>("email");
-  const [target, setTarget] = useState("");
-  const [secret, setSecret] = useState("");
-  const [monitorId, setMonitorId] = useState("");
+  const [name, setName] = useState(channel?.name ?? "");
+  const [provider, setProvider] = useState<(typeof providers)[number]>(channel?.provider ?? "email");
+  const [target, setTarget] = useState(channel ? channel.config.to || channel.config.url || "" : "");
+  const [secret, setSecret] = useState(channel?.config.secret ?? "");
+  // The form picks one monitor. Keep a wider set made through the API until the user picks another.
+  const initialMonitors = channel?.monitor_ids ?? [];
+  const [monitorId, setMonitorId] = useState(initialMonitors.length > 1 ? keepMonitors : (initialMonitors[0] ?? ""));
+  const [enabled, setEnabled] = useState(channel?.enabled ?? true);
   const [fields, setFields] = useState<Record<string, string>>({});
   const save = useMutation({
     mutationFn: () =>
-      api<Channel>("/api/notifications", {
-        method: "POST",
+      api<Channel>(channel ? `/api/notifications/${channel.id}` : "/api/notifications", {
+        method: channel ? "PUT" : "POST",
         body: JSON.stringify({
           name,
           provider,
           config: provider === "email" ? { to: target } : { url: target, secret },
-          monitor_ids: monitorId ? [monitorId] : [],
-          enabled: true,
+          monitor_ids: monitorId === keepMonitors ? initialMonitors : monitorId ? [monitorId] : [],
+          enabled,
         }),
       }),
     onSuccess: async () => {
@@ -198,17 +208,27 @@ function NewChannelForm({ onDone }: { onDone: () => void }) {
           <Input value={secret} onChange={(event) => setSecret(event.target.value)} />
         </Field>
       ) : null}
-      <Field label="Monitor" hint="blank = all">
+      <Field label="Monitor">
         <Select
           value={monitorId}
-          options={[{ value: "", label: "All monitors" }, ...(monitors.data ?? []).map((monitor) => ({ value: monitor.id, label: monitor.name }))]}
+          options={[
+            { value: "", label: "All monitors" },
+            ...(initialMonitors.length > 1 ? [{ value: keepMonitors, label: `Keep current ${initialMonitors.length} monitors` }] : []),
+            ...(monitors.data ?? []).map((monitor) => ({ value: monitor.id, label: monitor.name })),
+          ]}
           onChange={setMonitorId}
           aria-label="Monitor"
         />
       </Field>
+      {channel ? (
+        <div className="flex items-center justify-between">
+          <span className="text-[0.8125rem] text-[var(--ui-fg)]">Enabled</span>
+          <Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enabled" />
+        </div>
+      ) : null}
       <ErrorText error={save.error} />
       <div className="flex justify-end pt-1">
-        <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Add channel"}</Button>
+        <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : channel ? "Save" : "Add channel"}</Button>
       </div>
     </form>
   );

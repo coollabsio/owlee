@@ -1429,6 +1429,57 @@ pub async fn workspace_incident(
     row.as_ref().map(map_incident).transpose()
 }
 
+pub async fn edit_incident(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+    title: &str,
+    impact: IncidentImpact,
+    now: TimestampMillis,
+) -> Result<bool, sqlx::Error> {
+    let sql = format!(
+        "UPDATE incidents SET title = $1, impact = $2, updated_at = $3 WHERE id = $4 AND {}",
+        in_scope("project_id", 5, None)
+    );
+    let result = sqlx::query(&sql)
+        .bind(title)
+        .bind(impact.as_str())
+        .bind(now.as_millis())
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The caller checks that `incident_id` is in its workspace.
+pub async fn edit_update(
+    db: &Database,
+    incident_id: Id,
+    update_id: Id,
+    message: &str,
+    now: TimestampMillis,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let result =
+        sqlx::query("UPDATE incident_updates SET message = $1 WHERE id = $2 AND incident_id = $3")
+            .bind(message)
+            .bind(update_id.to_string())
+            .bind(incident_id.to_string())
+            .execute(tx.deref_mut())
+            .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE incidents SET updated_at = $1 WHERE id = $2")
+        .bind(now.as_millis())
+        .bind(incident_id.to_string())
+        .execute(tx.deref_mut())
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub async fn delete_incident(db: &Database, workspace_id: Id, id: Id) -> Result<bool, sqlx::Error> {
     let sql = format!(
         "DELETE FROM incidents WHERE id = $1 AND {}",
@@ -1607,6 +1658,63 @@ pub async fn insert_maintenance(
     .bind(maintenance.created_at.as_millis())
     .execute(tx.deref_mut())
     .await?;
+    for monitor_id in &maintenance.monitor_ids {
+        sqlx::query(
+            "INSERT INTO maintenance_monitors (maintenance_id, monitor_id) VALUES ($1, $2)",
+        )
+        .bind(maintenance.id.to_string())
+        .bind(monitor_id.to_string())
+        .execute(tx.deref_mut())
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn workspace_maintenance(
+    db: &Database,
+    workspace_id: Id,
+    id: Id,
+) -> Result<Option<Maintenance>, sqlx::Error> {
+    let sql = format!(
+        "SELECT id, project_id, page_id, title, message, starts_at, ends_at, created_at FROM maintenances \
+         WHERE id = $1 AND {}",
+        in_scope("project_id", 2, None)
+    );
+    let row = sqlx::query(&sql)
+        .bind(id.to_string())
+        .bind(workspace_id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
+    match row {
+        Some(row) => Ok(Some(map_maintenance(db, &row).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn update_maintenance(
+    db: &Database,
+    maintenance: &Maintenance,
+    now: TimestampMillis,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "UPDATE maintenances SET page_id = $1, title = $2, message = $3, starts_at = $4, ends_at = $5, updated_at = $6 \
+         WHERE id = $7",
+    )
+    .bind(maintenance.page_id.map(|id| id.to_string()))
+    .bind(&maintenance.title)
+    .bind(&maintenance.message)
+    .bind(maintenance.starts_at.as_millis())
+    .bind(maintenance.ends_at.as_millis())
+    .bind(now.as_millis())
+    .bind(maintenance.id.to_string())
+    .execute(tx.deref_mut())
+    .await?;
+    sqlx::query("DELETE FROM maintenance_monitors WHERE maintenance_id = $1")
+        .bind(maintenance.id.to_string())
+        .execute(tx.deref_mut())
+        .await?;
     for monitor_id in &maintenance.monitor_ids {
         sqlx::query(
             "INSERT INTO maintenance_monitors (maintenance_id, monitor_id) VALUES ($1, $2)",

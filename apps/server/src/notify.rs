@@ -73,7 +73,7 @@ async fn send(
         "email" => {
             let Some(smtp) = effective_smtp(state).await else {
                 return Ok(SendOutcome::Skipped(
-                    "SMTP is not configured. Save a mail server in Settings, or set OWLEE_SMTP_HOST and OWLEE_SMTP_FROM.".to_owned(),
+                    "SMTP is not configured. Save a mail server in Admin, or set OWLEE_SMTP_HOST and OWLEE_SMTP_FROM.".to_owned(),
                 ));
             };
             let to = config

@@ -3,7 +3,7 @@
 //! A fresh database gets a single opaque token (hash stored, 30 minute lifetime).
 //! Completing setup creates the root user with a first workspace and project, marks
 //! `installation_state` initialized, and deletes every setup token. Setup cannot run again. Public registration stays closed
-//! until the root user opens it in Settings, and only after a mail server is saved.
+//! until the root user opens it in Admin, and only after a mail server is saved.
 
 use std::ops::DerefMut;
 

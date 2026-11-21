@@ -59,7 +59,7 @@ export function RegisterPage() {
         }
       >
         <p className="text-sm text-[var(--ui-fg-faint)]">
-          The first account is created from the one-time setup link printed by the server. The root user can open registration in Settings after a mail server is saved.
+          The first account is created from the one-time setup link printed by the server. The root user can open registration in Admin after a mail server is saved.
         </p>
       </AuthShell>
     );

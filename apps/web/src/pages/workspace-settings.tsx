@@ -2,16 +2,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { useNavigate } from "react-router";
 import { ProjectDot } from "@/components/project";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, StatusBadge, useCopy } from "@/components/ui";
+import { SettingsView } from "@/components/settings-view";
+import { Button, ConfirmDialog, CopyInput, Dialog, ErrorText, Field, Input, LayerCard, Select, Spinner, StatusBadge } from "@/components/ui";
 import {
   ApiError,
   api,
   type CreatedInvitation,
+  deleteUserErrors,
+  exportUserErrors,
   type Invitation,
   type InviteRole,
   type Member,
   type Project,
 } from "@/lib/api";
+import { downloadText } from "@/lib/dns";
 import { useCanEdit, useMe } from "@/lib/me";
 import { formatTime } from "@/lib/utils";
 import { resetWorkspace, useWorkspace, workspaceRoleLabel } from "@/lib/workspace";
@@ -24,18 +28,47 @@ const roleOptions: { value: InviteRole; label: string }[] = [
 /** Stored lowercase `#rrggbb`, as the server expects. */
 const projectColors = ["#6366f1", "#0ea5e9", "#10b981", "#84cc16", "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#a855f7", "#64748b"];
 
-export function WorkspaceSettingsPage() {
+export function WorkspaceGeneralPage() {
   const { workspace } = useWorkspace();
+  return (
+    <SettingsView title="General" description="This workspace and your role in it.">
+      <NameCard key={workspace.name} />
+    </SettingsView>
+  );
+}
+
+export function WorkspaceProjectsPage() {
+  return (
+    <SettingsView title="Projects" description="The projects that group the records of this workspace.">
+      <ProjectsCard />
+    </SettingsView>
+  );
+}
+
+export function WorkspaceMembersPage() {
   const canEdit = useCanEdit();
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <PageHeader title="Workspace" description="Its name, its people, and the projects that group its records." />
-      <NameCard key={workspace.name} />
-      <ProjectsCard />
+    <SettingsView title="Members" description="The people in this workspace and the invitations sent to new ones.">
       <MembersCard />
       {canEdit ? <InvitationsCard /> : null}
-      {workspace.role === "owner" ? <DeleteCard /> : null}
-    </div>
+    </SettingsView>
+  );
+}
+
+export function WorkspacePrivacyPage() {
+  const { workspace } = useWorkspace();
+  return (
+    <SettingsView title="Privacy requests" description="Requests from the people your apps track." requires="editor">
+      <PrivacyCard workspaceName={workspace.name} />
+    </SettingsView>
+  );
+}
+
+export function WorkspaceDangerZonePage() {
+  return (
+    <SettingsView title="Danger zone" description="Actions that cannot be undone." requires="owner">
+      <DeleteCard />
+    </SettingsView>
   );
 }
 
@@ -53,7 +86,7 @@ function NameCard() {
     save.mutate();
   }
   return (
-    <LayerCard title="General" description={`You are ${workspaceRoleLabel[workspace.role].toLowerCase()} of this workspace.`}>
+    <LayerCard title="Name" description={`You are ${workspaceRoleLabel[workspace.role].toLowerCase()} of this workspace.`}>
       <form className="flex flex-col gap-3 sm:flex-row sm:items-end" onSubmit={submit}>
         <div className="flex-1">
           <Field label="Name" error={save.error instanceof ApiError ? save.error.fields?.name : undefined}>
@@ -82,7 +115,7 @@ function ProjectsCard() {
     onSuccess: () => client.invalidateQueries({ queryKey: ["projects"] }),
   });
   return (
-    <div id="projects" className="scroll-mt-20">
+    <div>
       <LayerCard
         title="Projects"
         description="Monitors, pages, incidents, apps, sites, and links each belong to one project. Notification channels and link domains are shared by the whole workspace."
@@ -309,17 +342,11 @@ function InvitationsCard() {
 }
 
 function InviteLink({ invitation }: { invitation: CreatedInvitation }) {
-  const { copied, copy } = useCopy();
   const url = new URL(invitation.url, window.location.origin).toString();
   return (
     <div className="mt-4">
-      <div className="field-label">
-        <span>Invite link for {invitation.email}</span>
-        <button type="button" className="ml-auto text-[11px] font-normal hover:text-[var(--ui-fg)]" onClick={() => void copy(url)}>
-          {copied ? "Copied" : "Copy"}
-        </button>
-      </div>
-      <Input readOnly value={url} className="font-mono text-[12px]" onFocus={(event) => event.currentTarget.select()} />
+      <div className="field-label">Invite link for {invitation.email}</div>
+      <CopyInput value={url} label="Copy invite link" className="text-[12px]" />
       <p className="mt-1 text-xs text-[var(--ui-fg-faint)]">Owlee shows this link once. Send it to them directly if mail is not set up.</p>
     </div>
   );
@@ -355,6 +382,61 @@ function DeleteCard() {
       >
         <ErrorText error={remove.error} />
       </Dialog>
+    </LayerCard>
+  );
+}
+
+function PrivacyCard({ workspaceName }: { workspaceName: string }) {
+  const [user, setUser] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const exported = useMutation({
+    mutationFn: () => exportUserErrors(user.trim()),
+    onSuccess: (data) => {
+      downloadText("owlee-error-events.json", JSON.stringify(data, null, 2), "application/json");
+    },
+  });
+  const removed = useMutation({
+    mutationFn: () => deleteUserErrors(user.trim()),
+    onSuccess: () => setConfirming(false),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    exported.mutate();
+  }
+  return (
+    <LayerCard
+      title="Error events"
+      description={`Export or erase the error events stored for one person in the apps of ${workspaceName}. Analytics data cannot be tied to a person, so it needs no request.`}
+    >
+      <form className="flex flex-col gap-3" onSubmit={submit}>
+        <Field label="User" hint="Id, email, username, or IP address">
+          <Input required value={user} onChange={(event) => setUser(event.target.value)} />
+        </Field>
+        <div className="flex gap-2">
+          <Button type="submit" disabled={!user.trim() || exported.isPending}>
+            {exported.isPending ? <><Spinner />Exporting…</> : "Export JSON"}
+          </Button>
+          <Button type="button" variant="danger" disabled={!user.trim()} onClick={() => setConfirming(true)}>
+            Delete events
+          </Button>
+        </div>
+        {exported.isSuccess ? (
+          <p className="text-xs text-[var(--ui-fg-faint)]">Exported {exported.data.events.length} events.</p>
+        ) : null}
+        {removed.isSuccess ? (
+          <p className="text-xs text-[var(--ui-fg-faint)]">Deleted {removed.data.deleted} events.</p>
+        ) : null}
+        <ErrorText error={exported.error} />
+      </form>
+      <ConfirmDialog
+        open={confirming}
+        title="Delete error events?"
+        description={`Every stored error event for ${user.trim()} is deleted. This cannot be undone.`}
+        pending={removed.isPending}
+        error={removed.error}
+        onConfirm={() => removed.mutate()}
+        onClose={() => setConfirming(false)}
+      />
     </LayerCard>
   );
 }

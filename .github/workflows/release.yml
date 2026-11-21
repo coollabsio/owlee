@@ -1,0 +1,65 @@
+name: Release binaries
+
+# Push a tag like v0.1.0 to publish static Linux binaries. The agent setup in
+# the dashboard downloads them from releases/latest/download/owlee-<arch>-linux.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build UI
+        working-directory: apps/web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Build static binary
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --locked --release -p owlee-server --target ${{ matrix.arch }}-unknown-linux-musl
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/owlee owlee-${{ matrix.arch }}-linux
+          strip owlee-${{ matrix.arch }}-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: owlee-${{ matrix.arch }}-linux
+          path: owlee-${{ matrix.arch }}-linux
+
+  release:
+    name: publish release
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --generate-notes

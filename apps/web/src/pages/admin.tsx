@@ -1,57 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useState } from "react";
-import { Button, ConfirmDialog, ErrorText, Field, Input, LayerCard, PageHeader, Spinner, StatusBadge, Switch } from "@/components/ui";
+import { type FormEvent, useState } from "react";
+import { Button, ConfirmDialog, ErrorText, Field, Input, LayerCard, Spinner, StatusBadge, Switch } from "@/components/ui";
 import {
   ApiError,
   api,
   type AdminUser,
-  type AuthSession,
-  changePassword,
-  deleteUserErrors,
-  exportUserErrors,
   type InstanceSettings,
-  listSessions,
   type Meta,
-  revokeSession,
-  type User,
 } from "@/lib/api";
-import { downloadText } from "@/lib/dns";
-import { useCanEdit, useMe } from "@/lib/me";
-import { useWorkspace, workspaceRoleLabel } from "@/lib/workspace";
-import { formatTime, timeAgo } from "@/lib/utils";
+import { useAccess } from "@/lib/me";
+import { Item, SettingsView } from "@/components/settings-view";
 
-export function SettingsPage() {
-  const me = useMe();
-  const { workspace } = useWorkspace();
-  const canEdit = useCanEdit();
-  const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
-  const root = me.data?.root === true;
-  const installationAdmin = me.data?.installation_admin === true;
-  const settings = useQuery({
+function useInstanceSettings(enabled: boolean) {
+  return useQuery({
     queryKey: ["instance-settings"],
     queryFn: () => api<InstanceSettings>("/api/admin/settings"),
-    enabled: root,
+    enabled,
   });
-  const users = useQuery({
-    queryKey: ["admin-users"],
-    queryFn: () => api<AdminUser[]>("/api/admin/users"),
-    enabled: installationAdmin,
-  });
+}
 
+export function AdminGeneralPage() {
+  const { root } = useAccess();
+  const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
+  const settings = useInstanceSettings(root);
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <PageHeader title="Settings" description="This Owlee install and the signed-in operator." />
-      <LayerCard title="Account" description="The operator signed in to this browser.">
-        <dl className="grid gap-4 sm:grid-cols-2">
-          <Item label="Name">{me.data?.display_name ?? "…"}</Item>
-          <Item label="Email">{me.data?.email ?? "…"}</Item>
-          <Item label={`Role in ${workspace.name}`}>{workspaceRoleLabel[workspace.role]}</Item>
-          <Item label="Instance access">{instanceAccess(me.data)}</Item>
-        </dl>
-      </LayerCard>
-      <PasswordCard />
-      <SessionsCard />
-      <LayerCard title="Instance" description="The server this dashboard talks to.">
+    <SettingsView title="General" description="The server this dashboard talks to." requires="admin">
+      <LayerCard title="Overview">
         <dl className="grid gap-4 sm:grid-cols-2">
           <Item label="Version">{meta.data?.version ?? "…"}</Item>
           <Item label="Database"><span className="capitalize">{meta.data?.database ?? "…"}</span></Item>
@@ -67,100 +41,41 @@ export function SettingsPage() {
         {root ? <RegistrationRow settings={settings.data} error={settings.error} /> : null}
         {settings.error && root ? <ErrorText error={settings.error} /> : null}
       </LayerCard>
-      {root ? <EmailCard settings={settings.data} /> : null}
-      {root ? <QuotaCard settings={settings.data} /> : null}
-      {installationAdmin ? <UsersCard users={users.data} error={users.error} canChange={root} /> : null}
-      {canEdit ? <PrivacyCard workspaceName={workspace.name} /> : null}
-    </div>
+    </SettingsView>
   );
 }
 
-function PasswordCard() {
-  const client = useQueryClient();
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [fields, setFields] = useState<Record<string, string>>({});
-  const save = useMutation({
-    mutationFn: () => changePassword({ current_password: current, new_password: next }),
-    onSuccess: () => {
-      setCurrent("");
-      setNext("");
-      setFields({});
-      void client.invalidateQueries({ queryKey: ["auth-sessions"] });
-    },
-    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
-  });
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    setFields({});
-    save.mutate();
-  }
+export function AdminEmailPage() {
+  const settings = useInstanceSettings(useAccess().root);
   return (
-    <LayerCard title="Password" description="Changing it signs out every other device.">
-      <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
-        <Field label="Current password" error={fields.current_password}>
-          <Input type="password" required autoComplete="current-password" value={current} onChange={(event) => setCurrent(event.target.value)} />
-        </Field>
-        <Field label="New password" hint="12+ characters" error={fields.new_password}>
-          <Input type="password" required autoComplete="new-password" value={next} onChange={(event) => setNext(event.target.value)} />
-        </Field>
-        <div className="sm:col-span-2">
-          <Button variant="primary" type="submit" disabled={save.isPending}>
-            {save.isPending ? <><Spinner />Saving…</> : "Change password"}
-          </Button>
-          {save.isSuccess ? <p className="mt-2 text-xs text-[var(--ui-fg-faint)]">Password changed. Other devices are signed out.</p> : null}
-          {Object.keys(fields).length === 0 ? <ErrorText error={save.error} /> : null}
-        </div>
-      </form>
-    </LayerCard>
+    <SettingsView title="Email" description="The mail server Owlee sends from." requires="root">
+      <ErrorText error={settings.error} />
+      <EmailCard settings={settings.data} />
+    </SettingsView>
   );
 }
 
-function SessionsCard() {
-  const client = useQueryClient();
-  const sessions = useQuery({ queryKey: ["auth-sessions"], queryFn: listSessions });
-  const [revoking, setRevoking] = useState<AuthSession | null>(null);
-  const revoke = useMutation({
-    mutationFn: revokeSession,
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["auth-sessions"] });
-      setRevoking(null);
-    },
+export function AdminQuotasPage() {
+  const settings = useInstanceSettings(useAccess().root);
+  return (
+    <SettingsView title="Ingest quotas" description="Daily caps on the events each app or site can send." requires="root">
+      <ErrorText error={settings.error} />
+      <QuotaCard settings={settings.data} />
+    </SettingsView>
+  );
+}
+
+export function AdminUsersPage() {
+  const { admin, root } = useAccess();
+  const users = useQuery({
+    queryKey: ["admin-users"],
+    queryFn: () => api<AdminUser[]>("/api/admin/users"),
+    enabled: admin,
   });
   return (
-    <LayerCard title="Sessions" description="Browsers signed in to your account.">
-      <ErrorText error={sessions.error} />
-      <ul className="divide-y divide-[var(--ui-well-border)]">
-        {(sessions.data ?? []).map((session: AuthSession) => (
-          <li key={session.id} className="flex items-center gap-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[0.8125rem] text-[var(--ui-fg)]">Signed in {formatTime(session.created_at)}</div>
-              <div className="truncate text-xs text-[var(--ui-fg-faint)]">Last active {timeAgo(session.last_activity_at)}</div>
-            </div>
-            {session.current ? (
-              <StatusBadge tone="info">This device</StatusBadge>
-            ) : (
-              <Button type="button" size="sm" onClick={() => setRevoking(session)}>
-                Sign out
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
-      <ConfirmDialog
-        open={revoking !== null}
-        title="Sign out session?"
-        description={`The browser signed in ${revoking ? formatTime(revoking.created_at) : ""} is signed out and has to sign in again.`}
-        confirmLabel="Sign out"
-        pending={revoke.isPending}
-        error={revoke.error}
-        onConfirm={() => revoking && revoke.mutate(revoking.id)}
-        onClose={() => {
-          setRevoking(null);
-          revoke.reset();
-        }}
-      />
-    </LayerCard>
+    <SettingsView title="Users" description="Every account on this Owlee install." requires="admin">
+      <UsersCard users={users.data} error={users.error} canChange={root} />
+    </SettingsView>
   );
 }
 
@@ -193,7 +108,7 @@ function QuotaForm({ settings }: { settings?: InstanceSettings }) {
   });
   return (
     <LayerCard
-      title="Ingest quotas"
+      title="Default caps"
       description="A safety valve so a runaway client cannot fill the disk. Each error app and site uses this number unless that app or site sets its own cap. Normal traffic should not reach it."
     >
       <form
@@ -228,12 +143,6 @@ function QuotaForm({ settings }: { settings?: InstanceSettings }) {
       </form>
     </LayerCard>
   );
-}
-
-function instanceAccess(user: User | undefined) {
-  if (!user) return "…";
-  if (user.root) return "Root";
-  return user.installation_admin ? "Installation admin" : "None";
 }
 
 function RegistrationRow({ settings, error }: { settings?: InstanceSettings; error: unknown }) {
@@ -325,7 +234,7 @@ function EmailForm({ settings }: { settings?: InstanceSettings }) {
   }
   return (
     <LayerCard
-      title="Email"
+      title="Mail server"
       description="Registration can open only after a mail server is available."
     >
       <form className="space-y-3" onSubmit={submit}>
@@ -407,7 +316,7 @@ function UsersCard({
   });
   return (
     <LayerCard
-      title="Users"
+      title="Accounts"
       description="The root user is created at setup and cannot be changed. Only the root user can make or remove an installation admin."
     >
       <ErrorText error={error || (demoting ? null : mutation.error)} />
@@ -452,66 +361,3 @@ function UsersCard({
   );
 }
 
-function PrivacyCard({ workspaceName }: { workspaceName: string }) {
-  const [user, setUser] = useState("");
-  const [confirming, setConfirming] = useState(false);
-  const exported = useMutation({
-    mutationFn: () => exportUserErrors(user.trim()),
-    onSuccess: (data) => {
-      downloadText("owlee-error-events.json", JSON.stringify(data, null, 2), "application/json");
-    },
-  });
-  const removed = useMutation({
-    mutationFn: () => deleteUserErrors(user.trim()),
-    onSuccess: () => setConfirming(false),
-  });
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    exported.mutate();
-  }
-  return (
-    <LayerCard
-      title="Privacy requests"
-      description={`Export or erase the error events stored for one person in the apps of ${workspaceName}. Analytics data cannot be tied to a person, so it needs no request.`}
-    >
-      <form className="flex flex-col gap-3" onSubmit={submit}>
-        <Field label="User" hint="Id, email, username, or IP address">
-          <Input required value={user} onChange={(event) => setUser(event.target.value)} />
-        </Field>
-        <div className="flex gap-2">
-          <Button type="submit" disabled={!user.trim() || exported.isPending}>
-            {exported.isPending ? <><Spinner />Exporting…</> : "Export JSON"}
-          </Button>
-          <Button type="button" variant="danger" disabled={!user.trim()} onClick={() => setConfirming(true)}>
-            Delete events
-          </Button>
-        </div>
-        {exported.isSuccess ? (
-          <p className="text-xs text-[var(--ui-fg-faint)]">Exported {exported.data.events.length} events.</p>
-        ) : null}
-        {removed.isSuccess ? (
-          <p className="text-xs text-[var(--ui-fg-faint)]">Deleted {removed.data.deleted} events.</p>
-        ) : null}
-        <ErrorText error={exported.error} />
-      </form>
-      <ConfirmDialog
-        open={confirming}
-        title="Delete error events?"
-        description={`Every stored error event for ${user.trim()} is deleted. This cannot be undone.`}
-        pending={removed.isPending}
-        error={removed.error}
-        onConfirm={() => removed.mutate()}
-        onClose={() => setConfirming(false)}
-      />
-    </LayerCard>
-  );
-}
-
-function Item({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)]">{label}</dt>
-      <dd className="mt-1 truncate text-[0.8125rem] text-[var(--ui-fg)]">{children}</dd>
-    </div>
-  );
-}

@@ -27,11 +27,18 @@ import { NotificationsPage } from "@/pages/notifications";
 import { PageEditor, PagesPage } from "@/pages/pages";
 import { PublicStatusPage } from "@/pages/public";
 import { SharePage } from "@/pages/share";
-import { SettingsPage } from "@/pages/settings";
+import { ProfilePage, SecurityPage, SessionsPage } from "@/pages/profile";
 import { AppearancePage } from "@/pages/appearance";
 import { InvitePage } from "@/pages/invite";
 import { OnboardingPage } from "@/pages/onboarding";
-import { WorkspaceSettingsPage } from "@/pages/workspace-settings";
+import { AdminEmailPage, AdminGeneralPage, AdminQuotasPage, AdminUsersPage } from "@/pages/admin";
+import {
+  WorkspaceDangerZonePage,
+  WorkspaceGeneralPage,
+  WorkspaceMembersPage,
+  WorkspacePrivacyPage,
+  WorkspaceProjectsPage,
+} from "@/pages/workspace-settings";
 
 function RequireAuth() {
   // A workspace switch clears the cache; re-rendering here refetches `me` and remounts the app.
@@ -109,9 +116,19 @@ export function App() {
           <Route path="errors/:id/events/:eventId" element={<IssueDetailPage />} />
           <Route path="errors/apps" element={<ErrorAppsPage />} />
           <Route path="errors/apps/:id" element={<ErrorAppDetailPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="settings/appearance" element={<AppearancePage />} />
-          <Route path="settings/workspace" element={<WorkspaceSettingsPage />} />
+          <Route path="profile" element={<ProfilePage />} />
+          <Route path="profile/security" element={<SecurityPage />} />
+          <Route path="profile/sessions" element={<SessionsPage />} />
+          <Route path="profile/appearance" element={<AppearancePage />} />
+          <Route path="settings" element={<WorkspaceGeneralPage />} />
+          <Route path="settings/projects" element={<WorkspaceProjectsPage />} />
+          <Route path="settings/members" element={<WorkspaceMembersPage />} />
+          <Route path="settings/privacy" element={<WorkspacePrivacyPage />} />
+          <Route path="settings/danger-zone" element={<WorkspaceDangerZonePage />} />
+          <Route path="admin" element={<AdminGeneralPage />} />
+          <Route path="admin/users" element={<AdminUsersPage />} />
+          <Route path="admin/email" element={<AdminEmailPage />} />
+          <Route path="admin/quotas" element={<AdminQuotasPage />} />
         </Route>
         </Route>
       </Route>

@@ -156,6 +156,8 @@ export function IncidentDetailPage() {
   const [message, setMessage] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editingUpdate, setEditingUpdate] = useState<Incident["updates"][number] | null>(null);
   const update = useMutation({
     mutationFn: () =>
       api<Incident>(`/api/incidents/${id}/updates`, {
@@ -193,8 +195,21 @@ export function IncidentDetailPage() {
         title={incident.title}
         keepTitle
         description={`Opened ${formatTime(incident.started_at)}${incident.auto ? " by the scheduler" : ""}`}
-        actions={canEdit ? <Button variant="danger" onClick={() => setDeleting(true)}>Delete</Button> : null}
+        actions={
+          canEdit ? (
+            <>
+              <Button onClick={() => setEditing(true)}>Edit</Button>
+              <Button variant="danger" onClick={() => setDeleting(true)}>Delete</Button>
+            </>
+          ) : null
+        }
       />
+      <Dialog open={editing} title="Edit incident" description="Fixes the wording. Nobody is alerted." onClose={() => setEditing(false)}>
+        {editing ? <EditIncidentForm incident={incident} onDone={() => setEditing(false)} /> : null}
+      </Dialog>
+      <Dialog open={editingUpdate !== null} title="Edit update" description="Fixes the wording. The status and time stay the same." onClose={() => setEditingUpdate(null)}>
+        {editingUpdate ? <EditUpdateForm key={editingUpdate.id} incidentId={incident.id} update={editingUpdate} onDone={() => setEditingUpdate(null)} /> : null}
+      </Dialog>
       <ConfirmDialog
         open={deleting}
         title="Delete incident?"
@@ -218,7 +233,14 @@ export function IncidentDetailPage() {
             {incident.updates.map((item) => (
               <li key={item.id} className="relative">
                 <span className="absolute -left-[1.4rem] top-1.5 size-2.5 rounded-full bg-[var(--ui-accent)]" />
-                <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(item.created_at)} · {stateLabel[item.status]}</div>
+                <div className="flex items-center gap-2 text-[0.6875rem] text-[var(--ui-fg-faint)]">
+                  {formatTime(item.created_at)} · {stateLabel[item.status]}
+                  {canEdit ? (
+                    <button type="button" className="text-[var(--ui-fg-faint)] underline-offset-2 hover:text-[var(--ui-fg)] hover:underline" onClick={() => setEditingUpdate(item)}>
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
                 <p className="mt-1 text-[0.8125rem] text-[var(--ui-fg-dim)]">{item.message}</p>
               </li>
             ))}
@@ -242,6 +264,61 @@ export function IncidentDetailPage() {
         </LayerCard> : null}
       </div>
     </div>
+  );
+}
+
+function useSaveIncident(path: string, onDone: () => void) {
+  const client = useQueryClient();
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const save = useMutation({
+    mutationFn: (body: object) => api<Incident>(path, { method: "PUT", body: JSON.stringify(body) }),
+    onSuccess: async (incident) => {
+      client.setQueryData(["incident", incident.id], incident);
+      await client.invalidateQueries({ queryKey: ["incidents"] });
+      onDone();
+    },
+    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
+  });
+  return { save, fields };
+}
+
+function EditIncidentForm({ incident, onDone }: { incident: Incident; onDone: () => void }) {
+  const [title, setTitle] = useState(incident.title);
+  const [impact, setImpact] = useState<string>(incident.impact);
+  const { save, fields } = useSaveIncident(`/api/incidents/${incident.id}`, onDone);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    save.mutate({ title, impact });
+  }
+  return (
+    <form className="space-y-3" onSubmit={submit}>
+      <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
+      <Field label="Impact">
+        <Select value={impact} options={impacts} onChange={setImpact} aria-label="Impact" />
+      </Field>
+      <ErrorText error={save.error} />
+      <div className="flex justify-end pt-1">
+        <Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save"}</Button>
+      </div>
+    </form>
+  );
+}
+
+function EditUpdateForm({ incidentId, update, onDone }: { incidentId: string; update: Incident["updates"][number]; onDone: () => void }) {
+  const [message, setMessage] = useState(update.message);
+  const { save, fields } = useSaveIncident(`/api/incidents/${incidentId}/updates/${update.id}`, onDone);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    save.mutate({ message });
+  }
+  return (
+    <form className="space-y-3" onSubmit={submit}>
+      <Field label="Message" error={fields.message}><Textarea value={message} onChange={(event) => setMessage(event.target.value)} required /></Field>
+      <ErrorText error={save.error} />
+      <div className="flex justify-end pt-1">
+        <Button type="submit" variant="primary" disabled={save.isPending || message.trim().length === 0}>{save.isPending ? <><Spinner />Saving…</> : "Save"}</Button>
+      </div>
+    </form>
   );
 }
 

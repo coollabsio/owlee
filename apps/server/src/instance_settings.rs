@@ -102,7 +102,7 @@ pub async fn load(db: &Database, key: &AppKey) -> Result<InstanceView, sqlx::Err
         let opened = crate::secret_box::open(key, SMTP_PASSWORD_AAD, &stored);
         if opened.is_none() {
             tracing::warn!(
-                "the saved SMTP password does not open with OWLEE_APP_KEY; the root user must enter it again in Settings"
+                "the saved SMTP password does not open with OWLEE_APP_KEY; the root user must enter it again in Admin"
             );
         }
         opened

@@ -1,6 +1,6 @@
-import { Activity, Check, ChartLine, Copy, Global, Home, TickCircle } from "reicon-react";
+import { Activity, ChartLine, Global, Home, TickCircle } from "reicon-react";
 import { useState, type ReactNode } from "react";
-import { Button, Dialog, Input, LayerCard, PageHeader } from "@/components/ui";
+import { Button, CopyButton, Dialog, Input, LayerCard, PageHeader } from "@/components/ui";
 import {
   type Appearance,
   type CustomTheme,
@@ -292,7 +292,6 @@ const colorFields: { key: keyof CustomTheme; label: string; description: string 
 function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; onClose: () => void }) {
   const [draft, setDraft] = useState<CustomTheme | null>(appearance.theme === "custom" ? appearance.customTheme : null);
   const [code, setCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const colors = draft ?? defaultCustomColors;
   const shareCode = serializeCustomTheme(colors);
   const codeInvalid = code !== null && code.trim() !== "" && !parseCustomTheme(code);
@@ -312,12 +311,6 @@ function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; on
     if (draft) setAppearance({ theme: "custom", customTheme: draft });
     else setAppearance({ theme: "dark" });
     onClose();
-  }
-
-  async function copy() {
-    await navigator.clipboard?.writeText(shareCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
   }
 
   return (
@@ -452,14 +445,14 @@ function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; on
             <label htmlFor="custom-theme-share-code" className="mb-2 block text-xs font-medium text-[var(--ui-fg-faint)]">
               Share code
             </label>
-            <div className="flex gap-2">
+            <div className="relative">
               <Input
                 id="custom-theme-share-code"
                 value={code ?? shareCode}
                 spellCheck={false}
                 autoComplete="off"
                 aria-invalid={codeInvalid}
-                className={cn("min-w-0 flex-1 font-mono text-sm", codeInvalid && "border-[var(--ui-error)]")}
+                className={cn("pr-9 font-mono text-sm", codeInvalid && "border-[var(--ui-error)]")}
                 onChange={(event) => {
                   setCode(event.target.value);
                   const theme = parseCustomTheme(event.target.value);
@@ -467,9 +460,7 @@ function CustomThemeDialog({ appearance, onClose }: { appearance: Appearance; on
                 }}
                 onBlur={() => setCode(null)}
               />
-              <Button type="button" onClick={() => void copy()} aria-label="Copy share code">
-                {copied ? <Check className="size-4 text-[var(--ui-success)]" /> : <Copy className="size-4" />}
-              </Button>
+              <CopyButton text={shareCode} label="Copy share code" />
             </div>
             <p className={cn("mt-1.5 text-xs", codeInvalid ? "text-[var(--ui-error)]" : "text-[var(--ui-fg-faint)]")}>
               {codeInvalid ? "Enter four hex colors, separated by commas." : "Paste a code that someone shared, or copy yours."}

@@ -241,6 +241,35 @@ async fn sqlite_flow_covers_checks_incidents_and_the_public_page() {
     assert_eq!(status, StatusCode::OK, "{updated}");
     assert_eq!(updated["updates"].as_array().unwrap().len(), 2);
 
+    let (status, edited, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/incidents/{incident_id}"),
+        Some(serde_json::json!({ "title": "Worker offline", "impact": "minor" })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["title"], "Worker offline");
+    assert_eq!(edited["impact"], "minor");
+    assert_eq!(edited["status"], "identified");
+    let first_update = updated["updates"][1]["id"].as_str().unwrap();
+    let (status, edited, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/incidents/{incident_id}/updates/{first_update}"),
+        Some(serde_json::json!({ "message": "The worker process exited." })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(
+        edited["updates"][1]["message"],
+        "The worker process exited."
+    );
+    assert_eq!(edited["updates"][1]["status"], "identified");
+    assert_eq!(edited["updates"].as_array().unwrap().len(), 2);
+
     let (status, page, _) = call(
         &app,
         "POST",
@@ -283,6 +312,25 @@ async fn sqlite_flow_covers_checks_incidents_and_the_public_page() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{maintenance}");
+    let (status, edited, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/maintenances/{}", maintenance["id"].as_str().unwrap()),
+        Some(serde_json::json!({
+            "title": "API restart, part 2",
+            "message": "Rolling the API again.",
+            "page_id": page["id"],
+            "monitor_ids": [api_id],
+            "starts_at": starts,
+            "ends_at": ends
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["title"], "API restart, part 2");
+    assert_eq!(edited["project_id"], maintenance["project_id"]);
+    assert_eq!(edited["monitor_ids"], serde_json::json!([api_id]));
     let (status, checked, _) = call(
         &app,
         "POST",
@@ -789,8 +837,23 @@ async fn another_workspace_cannot_read_change_or_link_records() {
     )
     .await;
 
+    let starts = owlee_platform::TimestampMillis::now();
+    let window = |page_id: &str| {
+        json!({
+            "project_id": ada.project, "title": "Drill", "message": "Failover", "page_id": page_id,
+            "monitor_ids": [], "starts_at": starts,
+            "ends_at": owlee_platform::TimestampMillis::from_millis(starts.as_millis() + 3_600_000)
+        })
+    };
+    let maintenance_id = create(&app, &ada, "/api/maintenances", window(&page_id)).await;
+
     let page = json!({"title": "Mine", "slug": "mine", "monitor_ids": []});
     let foreign: Vec<(&str, String, Option<Value>)> = vec![
+        (
+            "PUT",
+            format!("/api/maintenances/{maintenance_id}"),
+            Some(window(&page_id)),
+        ),
         ("GET", format!("/api/monitors/{monitor_id}"), None),
         ("PUT", format!("/api/monitors/{monitor_id}"), Some(monitor)),
         ("POST", format!("/api/monitors/{monitor_id}/checks"), None),
@@ -810,6 +873,16 @@ async fn another_workspace_cannot_read_change_or_link_records() {
             Some(json!({"status": "resolved", "message": "Mine now"})),
         ),
         ("DELETE", format!("/api/incidents/{incident_id}"), None),
+        (
+            "PUT",
+            format!("/api/incidents/{incident_id}"),
+            Some(json!({"title": "Mine", "impact": "none"})),
+        ),
+        (
+            "PUT",
+            format!("/api/incidents/{incident_id}/updates/{incident_id}"),
+            Some(json!({"message": "Mine"})),
+        ),
         (
             "PUT",
             format!("/api/notifications/{ada_channel}"),

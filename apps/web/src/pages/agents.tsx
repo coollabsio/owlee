@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { Button, CopyButton, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent } from "@/lib/api";
+import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent, rotateAgentToken } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { timeAgo } from "@/lib/utils";
@@ -17,6 +17,7 @@ export function AgentsPage() {
   const [search, setSearch] = useState("");
   const [onlineFilter, setOnlineFilter] = useState<boolean | null>(null);
   const [deleting, setDeleting] = useState<Agent | null>(null);
+  const [viewing, setViewing] = useState<Agent | null>(null);
   const remove = useMutation({
     mutationFn: deleteAgent,
     onSuccess: async () => {
@@ -77,7 +78,10 @@ export function AgentsPage() {
                     <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
                     {canEdit ? (
                       <td className="text-right">
-                        <RowActions label={agent.name} actions={[{ label: "Delete", danger: true, onSelect: () => setDeleting(agent) }]} />
+                        <RowActions label={agent.name} actions={[
+                            { label: "Details", onSelect: () => setViewing(agent) },
+                            { label: "Delete", danger: true, onSelect: () => setDeleting(agent) },
+                          ]} />
                       </td>
                     ) : null}
                   </tr>
@@ -99,7 +103,16 @@ export function AgentsPage() {
         description={created ? "Copy the token now. Owlee stores only its hash and cannot show it again." : "The name is shown as the check region."}
         onClose={closeNew}
       >
-        {created ? <AgentToken agent={created} onDone={closeNew} /> : open ? <NewAgentForm onCreated={setCreated} /> : null}
+        {created ? <AgentSetup token={created.token} onDone={closeNew} /> : open ? <NewAgentForm onCreated={setCreated} /> : null}
+      </Dialog>
+      <Dialog
+        open={canEdit && viewing !== null}
+        wide
+        title={viewing?.name ?? "Agent"}
+        description="Owlee stores only a hash of the token, so it cannot show it again. Regenerate the token to get a new one."
+        onClose={() => setViewing(null)}
+      >
+        {viewing ? <AgentDetails key={viewing.id} agent={viewing} onDone={() => setViewing(null)} /> : null}
       </Dialog>
       <ConfirmDialog
         open={deleting !== null}
@@ -151,26 +164,59 @@ function NewAgentForm({ onCreated }: { onCreated: (agent: CreatedAgent) => void 
   );
 }
 
-const configPath = "/etc/owlee/agent.toml";
+const exampleChecks = [
+  "OWLEE_AGENT_CHECK_1_NAME='Main DB'",
+  "OWLEE_AGENT_CHECK_1_TYPE=postgres",
+  "OWLEE_AGENT_CHECK_1_TARGET=localhost:5432",
+  "OWLEE_AGENT_CHECK_1_USER=status",
+  "OWLEE_AGENT_CHECK_1_PASSWORD=...",
+  "OWLEE_AGENT_CHECK_1_DATABASE=app",
+  "OWLEE_AGENT_CHECK_1_INTERVAL=30",
+];
 
-const exampleConfig = `[[check]]
-name = "Main DB"
-type = "postgres"          # http, tcp, postgres, mysql, redis
-target = "localhost:5432"
-user = "status"
-password_env = "PG_PASSWORD"
-database = "app"
-interval = 30`;
-
-function AgentToken({ agent, onDone }: { agent: CreatedAgent; onDone: () => void }) {
-  const origin = window.location.origin;
-  const docker = `docker run -d --name owlee-agent --restart unless-stopped --no-healthcheck -e OWLEE_AGENT_SERVER=${origin} -e OWLEE_AGENT_TOKEN=${agent.token} -e OWLEE_AGENT_CONFIG=${configPath} -e PG_PASSWORD=... -v ${configPath}:${configPath}:ro ghcr.io/coollabsio/owlee:latest agent`;
-  const binary = `PG_PASSWORD=... owlee agent --server ${origin} --token ${agent.token} --config ${configPath}`;
+function AgentDetails({ agent, onDone }: { agent: Agent; onDone: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const rotate = useMutation({ mutationFn: () => rotateAgentToken(agent.id), onSuccess: () => setConfirming(false) });
+  const token = rotate.data?.token ?? null;
   return (
     <div className="flex flex-col gap-4">
-      <Snippet label="Token" value={agent.token} />
-      <Snippet label={configPath} value={exampleConfig} multiline />
-      <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">Passwords stay on the agent host. The config names an environment variable, not the password.</p>
+      <dl className="grid grid-cols-3 gap-2 text-[0.8125rem]">
+        <div><dt className="field-label">Status</dt><dd><StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge></dd></div>
+        <div><dt className="field-label">Monitors</dt><dd>{agent.monitor_count}</dd></div>
+        <div><dt className="field-label">Last seen</dt><dd>{timeAgo(agent.last_seen_at)}</dd></div>
+      </dl>
+      {token ? (
+        <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">Copy the new token now. The old token no longer works, so update the agent host.</p>
+      ) : confirming ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--ui-control-border)] p-2.5 text-[0.75rem]">
+          <span className="mr-auto">The current token stops working at once. The agent cannot report until you give it the new token.</span>
+          <Button onClick={() => setConfirming(false)}>Cancel</Button>
+          <Button variant="danger" disabled={rotate.isPending} onClick={() => rotate.mutate()}>{rotate.isPending ? <><Spinner />Regenerating…</> : "Regenerate"}</Button>
+        </div>
+      ) : (
+        <div>
+          <Button onClick={() => setConfirming(true)}>Regenerate token</Button>
+        </div>
+      )}
+      <ErrorText error={rotate.error} />
+      <AgentSetup token={token} onDone={onDone} />
+    </div>
+  );
+}
+
+function AgentSetup({ token, onDone }: { token: string | null; onDone: () => void }) {
+  const origin = window.location.origin;
+  const shown = token ?? "<token>";
+  const docker = `docker run -d --name owlee-agent --restart unless-stopped --no-healthcheck -e OWLEE_AGENT_SERVER=${origin} -e OWLEE_AGENT_TOKEN=${shown} ${exampleChecks.map((variable) => `-e ${variable}`).join(" ")} ghcr.io/coollabsio/owlee:latest agent`;
+  const binary = [
+    "curl -fsSL -o owlee https://github.com/coollabsio/owlee/releases/latest/download/owlee-$(uname -m)-linux",
+    "chmod +x owlee",
+    `${exampleChecks.join(" ")} ./owlee agent --server ${origin} --token ${shown}`,
+  ].join("\n");
+  return (
+    <div className="flex flex-col gap-4">
+      {token ? <Snippet label="Token" value={token} /> : null}
+      <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">Each check is a set of OWLEE_AGENT_CHECK_&lt;n&gt;_&lt;KEY&gt; variables. TYPE is http, tcp, postgres, mysql, or redis. Add more checks with 2, 3, and so on. Passwords stay on the agent host.</p>
       <Snippet label="Docker" value={docker} />
       <Snippet label="Binary" value={binary} />
       <div className="flex justify-end">
@@ -180,26 +226,16 @@ function AgentToken({ agent, onDone }: { agent: CreatedAgent; onDone: () => void
   );
 }
 
-function Snippet({ label, value, multiline = false }: { label: string; value: string; multiline?: boolean }) {
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    await navigator.clipboard.writeText(value);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
-
+function Snippet({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="field-label">
-        <span>{label}</span>
-        <button type="button" className="ml-auto text-[0.6875rem] font-normal hover:text-[var(--ui-fg)]" onClick={() => void copy()}>
-          {copied ? "Copied" : "Copy"}
-        </button>
+      <div className="field-label">{label}</div>
+      <div className="relative">
+        <code className="block select-all whitespace-pre-wrap break-all rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] py-2 pl-2.5 pr-9 font-mono text-[0.75rem] text-[var(--ui-fg)]">
+          {value}
+        </code>
+        <CopyButton text={value} label={`Copy ${label.toLowerCase()}`} />
       </div>
-      <code className={`block select-all ${multiline ? "whitespace-pre overflow-x-auto" : "break-all"} rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] px-2.5 py-2 font-mono text-[0.75rem] text-[var(--ui-fg)]`}>
-        {value}
-      </code>
     </div>
   );
 }

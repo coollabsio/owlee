@@ -84,7 +84,7 @@ export function ProfileMenu({
           <div className="profile-menu-divider" />
           <Link
             className="listbox-option"
-            to="/settings"
+            to="/profile"
             onClick={() => {
               close();
               onNavigate?.();
@@ -97,7 +97,7 @@ export function ProfileMenu({
           </Link>
           <Link
             className="listbox-option"
-            to="/settings/appearance"
+            to="/profile/appearance"
             onClick={() => {
               close();
               onNavigate?.();

@@ -1,8 +1,8 @@
-//! `owlee agent` runs the checks in its own config file from inside a private network. It
-//! tells the server which checks exist, judges each result itself, and sends only the outcome.
+//! `owlee agent` runs the checks in its own config (a TOML file, `OWLEE_AGENT_CHECK_<n>_<KEY>`
+//! environment variables, or both) from inside a private network. It tells the server which checks exist, judges each result itself, and sends only the outcome.
 //! The server never tells an agent what to connect to, and secrets never leave the agent host.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ use crate::state::HttpClients;
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 const RETRY_EVERY: Duration = Duration::from_secs(10);
+const ENV_PREFIX: &str = "OWLEE_AGENT_CHECK_";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,21 +78,80 @@ struct Check {
     rules: Rules,
 }
 
-fn load(path: &Path) -> Result<Vec<Check>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    parse(&text, |name| std::env::var(name).ok())
+fn load(path: Option<&Path>) -> Result<Vec<Check>, String> {
+    let text = path
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))
+        })
+        .transpose()?;
+    parse(text.as_deref(), std::env::vars(), |name| std::env::var(name).ok())
 }
 
-fn parse(text: &str, env: impl Fn(&str) -> Option<String>) -> Result<Vec<Check>, String> {
-    let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
-    if config.checks.is_empty() {
-        return Err("the config has no [[check]] entries".to_owned());
+/// Reads the checks from the config file text and from `OWLEE_AGENT_CHECK_<n>_<KEY>` variables.
+fn parse(
+    text: Option<&str>,
+    vars: impl IntoIterator<Item = (String, String)>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<Check>, String> {
+    let mut checks = match text {
+        Some(text) => {
+            let config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
+            config.checks
+        }
+        None => Vec::new(),
+    };
+    checks.extend(env_checks(vars)?);
+    if checks.is_empty() {
+        return Err(format!(
+            "no checks: set {ENV_PREFIX}1_NAME, {ENV_PREFIX}1_TYPE, and {ENV_PREFIX}1_TARGET, \
+             or a config file with [[check]] entries"
+        ));
     }
-    config
-        .checks
+    checks
         .into_iter()
         .map(|check| resolve(check, &env))
+        .collect()
+}
+
+/// Groups `OWLEE_AGENT_CHECK_<n>_<KEY>` variables into one check for each `<n>`, in number
+/// order. `<KEY>` is a config key in upper case. `PASSWORD` holds the password itself.
+fn env_checks(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<CheckConfig>, String> {
+    let mut tables: BTreeMap<u32, toml::Table> = BTreeMap::new();
+    for (key, value) in vars {
+        let Some(rest) = key.strip_prefix(ENV_PREFIX) else {
+            continue;
+        };
+        let (index, field) = rest
+            .split_once('_')
+            .and_then(|(index, field)| Some((index.parse::<u32>().ok()?, field)))
+            .ok_or_else(|| format!("{key}: use {ENV_PREFIX}<number>_<KEY>"))?;
+        let field = field.to_ascii_lowercase();
+        let (field, value) = match field.as_str() {
+            "password" => ("password_env".to_owned(), toml::Value::String(key.clone())),
+            "interval" | "timeout" | "failure_threshold" | "degraded_after_ms"
+            | "expected_status" => {
+                let number = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("{key} must be a whole number"))?;
+                (field, toml::Value::Integer(number))
+            }
+            _ => (field, toml::Value::String(value)),
+        };
+        if tables.entry(index).or_default().insert(field, value).is_some() {
+            return Err(format!("{key} sets a key that another variable already sets"));
+        }
+    }
+    tables
+        .into_iter()
+        .map(|(index, table)| {
+            table
+                .try_into()
+                .map_err(|error| format!("{ENV_PREFIX}{index}_*: {error}"))
+        })
         .collect()
 }
 
@@ -179,7 +239,7 @@ struct RegisteredCheck {
 pub async fn run(
     server: &str,
     token: String,
-    config: &Path,
+    config: Option<&Path>,
     connectivity: Connectivity,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let checks = load(config)?;
@@ -277,7 +337,7 @@ impl Server {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
             return Err(Rejected::Final(
-                "the server rejected the agent token; create a new agent".to_owned(),
+                "the server rejected the agent token; regenerate it in the dashboard".to_owned(),
             ));
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
@@ -357,7 +417,7 @@ body_contains = "ok"
 
     #[test]
     fn reads_checks_and_resolves_passwords_from_the_environment() {
-        let checks = parse(CONFIG, |name| {
+        let checks = parse(Some(CONFIG), [], |name| {
             (name == "PG_PASSWORD").then(|| "secret".to_owned())
         })
         .unwrap();
@@ -379,7 +439,7 @@ body_contains = "ok"
 
     #[test]
     fn rejects_a_missing_password_variable() {
-        let error = parse(CONFIG, |_| None).err().unwrap();
+        let error = parse(Some(CONFIG), [], |_| None).err().unwrap();
         assert_eq!(
             error,
             "check \"Main DB\": environment variable PG_PASSWORD is not set"
@@ -413,11 +473,70 @@ body_contains = "ok"
     #[test]
     fn rejects_unknown_keys() {
         let error = parse(
-            "[[check]]\nname = \"x\"\ntype = \"tcp\"\ntarget = \"a:1\"\npasword_env = \"X\"\n",
+            Some("[[check]]\nname = \"x\"\ntype = \"tcp\"\ntarget = \"a:1\"\npasword_env = \"X\"\n"),
+            [],
             |_| None,
         )
         .err()
         .unwrap();
         assert!(error.contains("unknown field `pasword_env`"), "{error}");
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn reads_checks_from_environment_variables_only() {
+        let vars = vars(&[
+            ("OWLEE_AGENT_CHECK_2_NAME", "API"),
+            ("OWLEE_AGENT_CHECK_2_TYPE", "http"),
+            ("OWLEE_AGENT_CHECK_2_TARGET", "http://api.internal/health"),
+            ("OWLEE_AGENT_CHECK_2_EXPECTED_STATUS", "204"),
+            ("OWLEE_AGENT_CHECK_1_NAME", "Main DB"),
+            ("OWLEE_AGENT_CHECK_1_TYPE", "postgres"),
+            ("OWLEE_AGENT_CHECK_1_TARGET", "localhost:5432"),
+            ("OWLEE_AGENT_CHECK_1_USER", "status"),
+            ("OWLEE_AGENT_CHECK_1_PASSWORD", "secret"),
+            ("OWLEE_AGENT_CHECK_1_DATABASE", "app"),
+            ("OWLEE_AGENT_CHECK_1_INTERVAL", "30"),
+            ("OWLEE_AGENT_TOKEN", "ignored"),
+        ]);
+        let lookup = vars.clone();
+        let checks = parse(None, vars, |name| {
+            lookup.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
+        })
+        .unwrap();
+        assert_eq!(checks[0].name, "Main DB");
+        let Probe::Database(Database::Postgres, login) = &checks[0].probe else {
+            panic!("first check is a postgres probe");
+        };
+        assert_eq!(login.password.as_deref(), Some("secret"));
+        assert_eq!(login.database.as_deref(), Some("app"));
+        assert_eq!(checks[0].interval, Duration::from_secs(30));
+        assert_eq!(checks[1].name, "API");
+        assert_eq!(checks[1].rules.expected_status, Some(204));
+    }
+
+    #[test]
+    fn rejects_bad_check_variables() {
+        let error = |pairs: &[(&str, &str)]| parse(None, vars(pairs), |_| None).err().unwrap();
+        assert!(error(&[]).starts_with("no checks"));
+        assert_eq!(
+            error(&[("OWLEE_AGENT_CHECK_X_NAME", "a")]),
+            "OWLEE_AGENT_CHECK_X_NAME: use OWLEE_AGENT_CHECK_<number>_<KEY>"
+        );
+        assert_eq!(
+            error(&[("OWLEE_AGENT_CHECK_1_INTERVAL", "soon")]),
+            "OWLEE_AGENT_CHECK_1_INTERVAL must be a whole number"
+        );
+        let missing = error(&[
+            ("OWLEE_AGENT_CHECK_1_NAME", "a"),
+            ("OWLEE_AGENT_CHECK_1_TYPE", "tcp"),
+        ]);
+        assert!(missing.contains("missing field `target`"), "{missing}");
     }
 }

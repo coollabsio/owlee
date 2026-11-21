@@ -3,7 +3,7 @@ import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
 import { ArrowRight, Search4 as Search } from "reicon-react";
-import { manage, products } from "@/app/nav";
+import { account, admin, allowed, products, settings } from "@/app/nav";
 import {
   type Agent,
   api,
@@ -14,7 +14,7 @@ import {
   type Monitor,
   type StatusPage,
 } from "@/lib/api";
-import { useCanEdit } from "@/lib/me";
+import { useAccess } from "@/lib/me";
 import { useListScope } from "@/lib/workspace";
 import { cn } from "@/lib/utils";
 
@@ -42,17 +42,16 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const links = useQuery(scopedList<InsightLink>("links", "/api/links"));
   const apps = useQuery(scopedList<ErrorApp>("apps", "/api/error-apps"));
   const agents = useQuery(scopedList<Agent>("agents", "/api/agents"));
-  const canEdit = useCanEdit();
+  const access = useAccess();
 
   const items = useMemo<Item[]>(() => {
     const pagesNav = [
       { group: "Go to", label: "Dashboard", to: "/" },
-      ...products.flatMap((product) =>
+      ...[...products, settings, account, admin].flatMap((product) =>
         product.groups.flatMap((group) =>
-          group.links.filter((link) => canEdit || !link.editorOnly).map((link) => ({ group: "Go to", label: link.label, meta: product.label, to: link.to })),
+          group.links.filter((link) => allowed(link, access)).map((link) => ({ group: "Go to", label: link.label, meta: product.label, to: link.to })),
         ),
       ),
-      ...manage.map((link) => ({ group: "Go to", label: link.label, to: link.to })),
     ];
     return [
       ...pagesNav,
@@ -64,7 +63,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       ...(sites.data ?? []).map((s) => ({ group: "Sites", label: s.name, meta: s.domain, to: `/analytics/${s.id}` })),
       ...(links.data ?? []).map((l) => ({ group: "Links", label: `/${l.slug}`, meta: l.destination, to: `/links/${l.id}` })),
     ];
-  }, [canEdit, monitors.data, pages.data, incidents.data, agents.data, apps.data, sites.data, links.data]);
+  }, [access, monitors.data, pages.data, incidents.data, agents.data, apps.data, sites.data, links.data]);
 
   const results = useMemo(() => {
     const needle = query.trim().toLowerCase();

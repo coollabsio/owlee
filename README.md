@@ -98,13 +98,13 @@ owlee setup-token rotate
 
 `setup-token init` prints a URL only when setup is unfinished and no unused token is stored. Rotation invalidates the previous unused token.
 
-The root user opens registration in Settings. It stays closed until a mail server is saved there, or `OWLEE_SMTP_HOST` and `OWLEE_SMTP_FROM` are set, and the root user turns Open registration on. Clearing the saved mail server closes registration again. `OWLEE_OPEN_SIGNUP` is ignored. A person who opens `/register` enters an email address, and Owlee mails a link that works once, for 24 hours. The link opens a page where they choose a password. If the address already has an account, the mail says so instead, and the page shows the same message in both cases. `/forgot-password` mails a reset link that works once, for 1 hour, and the reset signs out every session of that account. Without a mail server, no reset mail is sent and the server logs a warning. Each address gets at most about 3 of these mails an hour.
+The root user opens registration in Admin. It stays closed until a mail server is saved there, or `OWLEE_SMTP_HOST` and `OWLEE_SMTP_FROM` are set, and the root user turns Open registration on. Clearing the saved mail server closes registration again. `OWLEE_OPEN_SIGNUP` is ignored. A person who opens `/register` enters an email address, and Owlee mails a link that works once, for 24 hours. The link opens a page where they choose a password. If the address already has an account, the mail says so instead, and the page shows the same message in both cases. `/forgot-password` mails a reset link that works once, for 1 hour, and the reset signs out every session of that account. Without a mail server, no reset mail is sent and the server logs a warning. Each address gets at most about 3 of these mails an hour.
 
-New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings. The root account itself cannot be changed. Every account can change its own password in Settings, which signs out its other sessions, and can sign out any of its sessions there.
+New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings. The root account itself cannot be changed. Every account can change its own password in Account settings, which signs out its other sessions, and can sign out any of its sessions there.
 
 Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
 
-Secrets saved in the database are encrypted with `OWLEE_APP_KEY`, base64 of 32 bytes (`openssl rand -base64 32`). Production does not start without it. Development uses a fixed public key and logs a warning. Keep the key with your backups. With another key, Owlee cannot read the saved SMTP password; it logs a warning, and the root user must enter the password again in Settings. A password saved by an older Owlee in plain text is treated the same way.
+Secrets saved in the database are encrypted with `OWLEE_APP_KEY`, base64 of 32 bytes (`openssl rand -base64 32`). Production does not start without it. Development uses a fixed public key and logs a warning. Keep the key with your backups. With another key, Owlee cannot read the saved SMTP password; it logs a warning, and the root user must enter the password again in Admin. A password saved by an older Owlee in plain text is treated the same way.
 
 When a check cannot connect (DNS, connect, or timeout error), Owlee first tries a TCP connection to `1.1.1.1:443`, `8.8.8.8:443` and `9.9.9.9:443`. If none of them answer, the problem is the Owlee host's own network. Owlee then does not record the check, does not change the monitor state, and sends no alert. The result is cached for 10 seconds. If the host cannot reach the internet by design, set hosts that it can always reach, or turn the check off:
 
@@ -183,40 +183,50 @@ docker compose -f deploy/compose.yaml start owlee
 
 An agent checks targets that the Owlee server cannot reach, for example a database on a private Docker network or a host in a VPC. The agent is the same binary. You start it on the target server or in the same network. It makes only outbound HTTPS requests to the server, so you do not need to open a port into the private network.
 
-The checks are in a config file on the agent host. The server cannot add or change agent checks, so a compromised dashboard cannot make an agent connect to other hosts. Passwords stay on the agent host. The agent judges each check and sends only the status, the status code, the latency, and the error. It never sends a response body.
+The checks are in environment variables or a config file on the agent host. The server cannot add or change agent checks, so a compromised dashboard cannot make an agent connect to other hosts. Passwords stay on the agent host. The agent judges each check and sends only the status, the status code, the latency, and the error. It never sends a response body.
 
 1. In the web app, open **Agents** and create an agent. Copy the token. The token is shown once.
-2. Write the config file, for example `/etc/owlee/agent.toml`:
+2. Start the agent. Set each check as `OWLEE_AGENT_CHECK_<n>_<KEY>` environment variables, where `<n>` is a number and `<KEY>` is a key from the table in upper case:
+
+   ```bash
+   docker run -d --name owlee-agent --restart unless-stopped --no-healthcheck \
+     -e OWLEE_AGENT_SERVER=https://status.example.com \
+     -e OWLEE_AGENT_TOKEN=<token> \
+     -e OWLEE_AGENT_CHECK_1_NAME="Main DB" \
+     -e OWLEE_AGENT_CHECK_1_TYPE=postgres \
+     -e OWLEE_AGENT_CHECK_1_TARGET=localhost:5432 \
+     -e OWLEE_AGENT_CHECK_1_USER=status \
+     -e OWLEE_AGENT_CHECK_1_PASSWORD=... \
+     -e OWLEE_AGENT_CHECK_1_DATABASE=app \
+     -e OWLEE_AGENT_CHECK_1_INTERVAL=30 \
+     ghcr.io/coollabsio/owlee:latest agent
+   ```
+
+   Attach the container to the network of the targets. For more checks, use `OWLEE_AGENT_CHECK_2_...`, `OWLEE_AGENT_CHECK_3_...`, and so on. Without Docker, download the static Linux binary with `curl -fsSL -o owlee https://github.com/coollabsio/owlee/releases/latest/download/owlee-$(uname -m)-linux && chmod +x owlee`, set the same variables, and run `./owlee agent --server https://status.example.com --token <token>`. Pushing a `v*` tag publishes these binaries (`.github/workflows/release.yml`).
+
+   | Key | Types | Default |
+   |---|---|---|
+   | `name`, `type` (`http`, `tcp`, `postgres`, `mysql`, `redis`), `target` (a URL for http) | all | required |
+   | `interval` (seconds, 15 or more), `timeout` (seconds), `failure_threshold` | all | 60, 10, 3 |
+   | `degraded_after_ms` | all | none |
+   | `user`, `password` (env only), `password_env`, `database` | postgres, mysql (`user` required); redis (`user` and password optional) | none |
+   | `expected_status`, `body_contains` | http | 2xx, none |
+
+   A `postgres` or `mysql` check logs in and runs `SELECT 1`. A `redis` check sends `AUTH` when a password is set, then `PING`. Redis over TLS is not supported.
+3. Optional: put checks in a TOML file instead, and pass it with `--config` or `OWLEE_AGENT_CONFIG`. With Docker, mount the file. The agent uses the checks from the file and from the environment variables together.
 
    ```toml
    [[check]]
    name = "Main DB"
-   type = "postgres"            # http, tcp, postgres, mysql, redis
-   target = "localhost:5432"    # a URL for http
+   type = "postgres"
+   target = "localhost:5432"
    user = "status"
    password_env = "PG_PASSWORD" # the name of an environment variable, not the password
    database = "app"
-   interval = 30                # seconds, 15 or more, default 60
+   interval = 30
    ```
 
-   | Key | Types | Default |
-   |---|---|---|
-   | `name`, `type`, `target` | all | required |
-   | `interval`, `timeout` (seconds), `failure_threshold` | all | 60, 10, 3 |
-   | `degraded_after_ms` | all | none |
-   | `user`, `password_env`, `database` | postgres, mysql (`user` required); redis (`user` and `password_env` optional) | none |
-   | `expected_status`, `body_contains` | http | 2xx, none |
-
-   A `postgres` or `mysql` check logs in and runs `SELECT 1`. A `redis` check sends `AUTH` when a password is set, then `PING`. Redis over TLS is not supported.
-3. Start the agent:
-
-   ```bash
-   PG_PASSWORD=... owlee agent --server https://status.example.com --token <token> --config /etc/owlee/agent.toml
-   ```
-
-   The command also reads `OWLEE_AGENT_SERVER`, `OWLEE_AGENT_TOKEN`, and `OWLEE_AGENT_CONFIG`. With Docker, run the image with the `agent` command and `--no-healthcheck`, mount the config file, and attach the container to the network of the targets.
-
-When the agent starts, it sends its list of checks to the server, without secrets. The server creates a monitor for each new check name, updates the monitors that already exist, and pauses the monitors of checks that are no longer in the file. History stays. To change a check, edit the file and restart the agent. The agent stops at once when the server rejects the token or the config, and it shows the reason.
+When the agent starts, it sends its list of checks to the server, without secrets. The server creates a monitor for each new check name, updates the monitors that already exist, and pauses the monitors of checks that are no longer in the config. History stays. To change a check, change the config and restart the agent. The agent stops at once when the server rejects the token or the config, and it shows the reason.
 
 The server records each result with the agent name as the region, and opens or resolves incidents as it does for its own checks. In the dashboard you can pause, resume, and delete agent monitors, and add them to status pages, but you cannot edit them or run them. The agent sends a heartbeat every 15 seconds. It shows as offline when the server has not heard from it for 30 seconds. While an agent is offline, its monitors keep their last state. The agent uses `OWLEE_CONNECTIVITY_TARGETS` in the same way as the server: when its own host has no network, it does not send failed checks.
 
@@ -236,7 +246,7 @@ An envelope is rejected with `413` above `OWLEE_ERROR_MAX_BODY_BYTES` (1 MiB). S
 
 Issues still group on a fingerprint. `event_count` increases for every accepted event. The full payload is kept for the first `OWLEE_ERROR_KEEP_FIRST` events (5), then one more per `OWLEE_ERROR_SAMPLE_WINDOW_SECS` (1 hour). The issue row is the aggregate the feed shows. A background pass deletes raw `events` older than `OWLEE_ERROR_RETENTION_DAYS` (30) in batches of 500. The issue, including `event_count`, stays until it has no events left and its `last_seen` is older than the same cutoff. Then the same pass deletes it. `events(timestamp)` is indexed for that delete and for the 24-hour trend query.
 
-Each project may accept `OWLEE_ERROR_DAILY_QUOTA` events per UTC day (100,000) until the root user sets another number under Settings → Ingest quotas, or the project sets its own cap. One error a second all day is about 86,400, so normal use does not reach 100,000. The projects list and the dashboard show when today's counter has hit that cap, and when it resets (00:00 UTC).
+Each project may accept `OWLEE_ERROR_DAILY_QUOTA` events per UTC day (100,000) until the root user sets another number under Admin → Ingest quotas, or the project sets its own cap. One error a second all day is about 86,400, so normal use does not reach 100,000. The projects list and the dashboard show when today's counter has hit that cap, and when it resets (00:00 UTC).
 
 The daily cap panel of a project also shows how many events were stored and dropped since the server started, and the reason for the last drop (rate limit, daily cap, invalid event, or a storage error). Owlee counts only requests with a valid project key. The counts are kept in memory.
 
@@ -294,7 +304,7 @@ Owlee follows [Orbit](https://github.com/coollabsio/orbit)'s layout and leaves o
 | SQLite file, or Postgres via `ORBIT_DATABASE_URL` | SQLite file, or Postgres via `OWLEE_DATABASE_URL` |
 | `MigrationRunner`, checksums in `schema_migrations` | same |
 | Argon2id passwords, random session tokens | same, sessions stored in the database |
-| Initial setup URL, `setup-token rotate`, closed registration | same: one-time `/setup?token=`, then the root user opens registration in Settings after SMTP |
+| Initial setup URL, `setup-token rotate`, closed registration | same: one-time `/setup?token=`, then the root user opens registration in Admin after SMTP |
 | `platform::jobs` worker | `scheduler`: a lease row plus the check loop |
 | `justfile`, multi-stage Dockerfile, `deploy/compose.yaml` | same roles |
 

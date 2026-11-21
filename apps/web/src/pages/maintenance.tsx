@@ -13,6 +13,7 @@ export function MaintenancePage() {
   const scope = useListScope();
   const query = useQuery({ queryKey: scope.key("maintenances"), queryFn: () => api<Maintenance[]>(scope.path("/api/maintenances")) });
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Maintenance | null>(null);
   const [deleting, setDeleting] = useState<Maintenance | null>(null);
   const [activeFilter, setActiveFilter] = useState<boolean | null>(null);
   const remove = useMutation({
@@ -79,7 +80,10 @@ export function MaintenancePage() {
                     </td>
                     {canEdit ? (
                       <td className="text-right">
-                        <RowActions label={item.title} actions={[{ label: "Delete", danger: true, onSelect: () => setDeleting(item) }]} />
+                        <RowActions label={item.title} actions={[
+                            { label: "Edit", onSelect: () => setEditing(item) },
+                            { label: "Delete", danger: true, onSelect: () => setDeleting(item) },
+                          ]} />
                       </td>
                     ) : null}
                   </tr>
@@ -90,7 +94,10 @@ export function MaintenancePage() {
         )}
       </LayerCard>
       <Dialog open={canEdit && open} title="Schedule a window" description="Shown on the status page while it runs." onClose={() => setOpen(false)}>
-        {open ? <NewWindowForm onDone={() => setOpen(false)} /> : null}
+        {open ? <WindowForm onDone={() => setOpen(false)} /> : null}
+      </Dialog>
+      <Dialog open={canEdit && editing !== null} title="Edit window" description={editing?.title} onClose={() => setEditing(null)}>
+        {editing ? <WindowForm key={editing.id} item={editing} onDone={() => setEditing(null)} /> : null}
       </Dialog>
       <ConfirmDialog
         open={deleting !== null}
@@ -108,28 +115,32 @@ export function MaintenancePage() {
   );
 }
 
-function NewWindowForm({ onDone }: { onDone: () => void }) {
+const keepMonitors = "__keep";
+
+function WindowForm({ item, onDone }: { item?: Maintenance; onDone: () => void }) {
   const client = useQueryClient();
   const workspaceWide = useListScope({ allProjects: true });
   const pages = useQuery({ queryKey: workspaceWide.key("pages"), queryFn: () => api<StatusPage[]>(workspaceWide.path("/api/pages")) });
   const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
   const [projectId, setProjectId] = useProjectChoice();
-  const [title, setTitle] = useState("");
-  const [message, setMessage] = useState("");
-  const [pageId, setPageId] = useState("");
-  const [monitorId, setMonitorId] = useState("");
-  const [starts, setStarts] = useState(toLocalInput());
-  const [ends, setEnds] = useState(toLocalInput(new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()));
+  const [title, setTitle] = useState(item?.title ?? "");
+  const [message, setMessage] = useState(item?.message ?? "");
+  const [pageId, setPageId] = useState(item?.page_id ?? "");
+  // The form picks one monitor. Keep a wider set made through the API until the user picks another.
+  const initialMonitors = item?.monitor_ids ?? [];
+  const [monitorId, setMonitorId] = useState(initialMonitors.length > 1 ? keepMonitors : (initialMonitors[0] ?? ""));
+  const [starts, setStarts] = useState(toLocalInput(item?.starts_at));
+  const [ends, setEnds] = useState(toLocalInput(item?.ends_at ?? new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()));
   const [fields, setFields] = useState<Record<string, string>>({});
   const save = useMutation({
     mutationFn: () =>
-      api<Maintenance>("/api/maintenances", {
-        method: "POST",
+      api<Maintenance>(item ? `/api/maintenances/${item.id}` : "/api/maintenances", {
+        method: item ? "PUT" : "POST",
         body: JSON.stringify({
           title,
           message,
           page_id: pageId,
-          monitor_ids: monitorId ? [monitorId] : [],
+          monitor_ids: monitorId === keepMonitors ? initialMonitors : monitorId ? [monitorId] : [],
           starts_at: fromLocalInput(starts),
           ends_at: fromLocalInput(ends),
           project_id: projectId,
@@ -152,7 +163,7 @@ function NewWindowForm({ onDone }: { onDone: () => void }) {
     <form className="space-y-3" onSubmit={submit}>
       <Field label="Title" error={fields.title}><Input value={title} onChange={(event) => setTitle(event.target.value)} required /></Field>
       <Field label="Message" error={fields.message}><Textarea value={message} onChange={(event) => setMessage(event.target.value)} required /></Field>
-      <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />
+      {item ? null : <ProjectField value={projectId} onChange={setProjectId} error={fields.project_id} />}
       <Field label="Status page" error={fields.page_id}>
         <Select
           value={pageId}
@@ -161,10 +172,14 @@ function NewWindowForm({ onDone }: { onDone: () => void }) {
           aria-label="Status page"
         />
       </Field>
-      <Field label="Monitor" hint="blank = whole page">
+      <Field label="Monitor">
         <Select
           value={monitorId}
-          options={[{ value: "", label: "Every monitor on the page" }, ...(monitors.data ?? []).map((monitor) => ({ value: monitor.id, label: monitor.name }))]}
+          options={[
+            { value: "", label: "Every monitor on the page" },
+            ...(initialMonitors.length > 1 ? [{ value: keepMonitors, label: `Keep current ${initialMonitors.length} monitors` }] : []),
+            ...(monitors.data ?? []).map((monitor) => ({ value: monitor.id, label: monitor.name })),
+          ]}
           onChange={setMonitorId}
           aria-label="Monitor"
         />
@@ -173,7 +188,7 @@ function NewWindowForm({ onDone }: { onDone: () => void }) {
       <Field label="Ends" error={fields.ends_at}><Input type="datetime-local" value={ends} onChange={(event) => setEnds(event.target.value)} required /></Field>
       <ErrorText error={save.error} />
       <div className="flex justify-end pt-1">
-        <Button type="submit" variant="primary" disabled={save.isPending || !pageId}>{save.isPending ? <><Spinner />Saving…</> : "Schedule"}</Button>
+        <Button type="submit" variant="primary" disabled={save.isPending || !pageId}>{save.isPending ? <><Spinner />Saving…</> : item ? "Save" : "Schedule"}</Button>
       </div>
     </form>
   );

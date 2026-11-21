@@ -1,4 +1,4 @@
-import { Check, ChevronDown, MoreH, Trash9, X } from "reicon-react";
+import { Check, ChevronDown, Copy, MoreH, Trash9, X } from "reicon-react";
 import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -61,6 +61,26 @@ export function Switch({
 
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cn("input", props.className)} />;
+}
+
+/** Copy icon that sits inside the top-right corner of a `relative` field. */
+export function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
+  const { copied, copy } = useCopy();
+  return (
+    <button type="button" className="icon-button absolute right-0.5 top-0.5 size-7" aria-label={copied ? "Copied" : label} onClick={() => void copy(text)}>
+      {copied ? <Check className="size-3.5 text-[var(--ui-success)]" /> : <Copy className="size-3.5" />}
+    </button>
+  );
+}
+
+/** Read-only input with the copy button inside it. */
+export function CopyInput({ value, label, className }: { value: string; label?: string; className?: string }) {
+  return (
+    <div className="relative">
+      <Input readOnly value={value} className={cn("pr-9 font-mono", className)} onFocus={(event) => event.currentTarget.select()} />
+      <CopyButton text={value} label={label} />
+    </div>
+  );
 }
 
 export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {

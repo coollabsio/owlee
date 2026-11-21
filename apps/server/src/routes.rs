@@ -86,13 +86,20 @@ pub fn router(state: AppState) -> Router {
             get(get_page).put(update_page).delete(delete_page),
         )
         .route("/incidents", get(list_incidents).post(create_incident))
-        .route("/incidents/{id}", get(get_incident).delete(delete_incident))
+        .route(
+            "/incidents/{id}",
+            get(get_incident).put(edit_incident).delete(delete_incident),
+        )
         .route("/incidents/{id}/updates", post(add_update))
+        .route("/incidents/{id}/updates/{update_id}", put(edit_update))
         .route(
             "/maintenances",
             get(list_maintenances).post(create_maintenance),
         )
-        .route("/maintenances/{id}", delete(delete_maintenance))
+        .route(
+            "/maintenances/{id}",
+            put(update_maintenance).delete(delete_maintenance),
+        )
         .route("/notifications", get(list_channels).post(create_channel))
         .route(
             "/notifications/{id}",
@@ -1626,6 +1633,17 @@ struct UpdateBody {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct IncidentEditBody {
+    title: String,
+    impact: IncidentImpact,
+}
+
+#[derive(Deserialize)]
+struct UpdateEditBody {
+    message: String,
+}
+
 async fn list_incidents(
     State(state): State<AppState>,
     member: Member,
@@ -1710,13 +1728,7 @@ async fn add_update(
     let incident = repo::workspace_incident(&state.db, member.workspace_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let message = body.message.trim().to_owned();
-    if message.is_empty() || message.chars().count() > 5_000 {
-        return Err(AppError::field(
-            "message",
-            "Write an update between 1 and 5000 characters.",
-        ));
-    }
+    let message = validate_update_message(&body.message)?;
     let now = TimestampMillis::now();
     let resolved = resolved_at_after_update(
         incident.resolved_at.map(TimestampMillis::as_millis),
@@ -1749,6 +1761,85 @@ async fn add_update(
     notify_incident(&state, &updated, &message).await;
     let updates = repo::updates_for(&state.db, &[id]).await?;
     Ok(Json(present::incident_response(&updated, &updates)))
+}
+
+/// Corrects the wording. It sends no alerts; status changes go through `add_update`.
+async fn edit_incident(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<Id>,
+    Json(body): Json<IncidentEditBody>,
+) -> Result<Json<present::IncidentResponse>, AppError> {
+    member.require_editor()?;
+    let title = body.title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        return Err(AppError::field("title", "Use 1 to 200 characters."));
+    }
+    let now = TimestampMillis::now();
+    if !repo::edit_incident(&state.db, member.workspace_id, id, title, body.impact, now).await? {
+        return Err(AppError::NotFound);
+    }
+    audit(
+        &state.db,
+        &member,
+        "incident.edited",
+        "incident",
+        Some(id),
+        now,
+    )
+    .await;
+    incident_view(&state, &member, id).await
+}
+
+/// Corrects one timeline message. Its status and time stay as posted.
+async fn edit_update(
+    State(state): State<AppState>,
+    member: Member,
+    Path((id, update_id)): Path<(Id, Id)>,
+    Json(body): Json<UpdateEditBody>,
+) -> Result<Json<present::IncidentResponse>, AppError> {
+    member.require_editor()?;
+    let message = validate_update_message(&body.message)?;
+    repo::workspace_incident(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let now = TimestampMillis::now();
+    if !repo::edit_update(&state.db, id, update_id, &message, now).await? {
+        return Err(AppError::NotFound);
+    }
+    audit(
+        &state.db,
+        &member,
+        "incident.edited",
+        "incident",
+        Some(id),
+        now,
+    )
+    .await;
+    incident_view(&state, &member, id).await
+}
+
+async fn incident_view(
+    state: &AppState,
+    member: &Member,
+    id: Id,
+) -> Result<Json<present::IncidentResponse>, AppError> {
+    let incident = repo::workspace_incident(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let updates = repo::updates_for(&state.db, &[id]).await?;
+    Ok(Json(present::incident_response(&incident, &updates)))
+}
+
+fn validate_update_message(message: &str) -> Result<String, AppError> {
+    let message = message.trim();
+    if message.is_empty() || message.chars().count() > 5_000 {
+        return Err(AppError::field(
+            "message",
+            "Write an update between 1 and 5000 characters.",
+        ));
+    }
+    Ok(message.to_owned())
 }
 
 async fn delete_incident(
@@ -1805,27 +1896,7 @@ async fn create_maintenance(
 ) -> Result<(StatusCode, Json<present::MaintenanceResponse>), AppError> {
     member.require_editor()?;
     let project_id = body_project(&state, &member, body.project_id).await?;
-    let title = body.title.trim().to_owned();
-    let message = body.message.trim().to_owned();
-    let mut fields = BTreeMap::new();
-    if title.is_empty() || title.chars().count() > 160 {
-        fields.insert("title".to_owned(), "Use 1 to 160 characters.".to_owned());
-    }
-    if message.is_empty() || message.chars().count() > 5_000 {
-        fields.insert(
-            "message".to_owned(),
-            "Describe the window in 1 to 5000 characters.".to_owned(),
-        );
-    }
-    if body.ends_at.as_millis() <= body.starts_at.as_millis() {
-        fields.insert(
-            "ends_at".to_owned(),
-            "The window must end after it starts.".to_owned(),
-        );
-    }
-    if !fields.is_empty() {
-        return Err(AppError::Validation(fields));
-    }
+    let (title, message) = validate_maintenance(&body)?;
     ensure_links(&state, &member, Some(body.page_id), None).await?;
     ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
@@ -1854,6 +1925,70 @@ async fn create_maintenance(
         StatusCode::CREATED,
         Json(present::maintenance_response(&maintenance, now)),
     ))
+}
+
+/// The project stays fixed after creation, like a status page's.
+async fn update_maintenance(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<Id>,
+    Json(body): Json<MaintenanceBody>,
+) -> Result<Json<present::MaintenanceResponse>, AppError> {
+    member.require_editor()?;
+    let existing = repo::workspace_maintenance(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let (title, message) = validate_maintenance(&body)?;
+    ensure_links(&state, &member, Some(body.page_id), None).await?;
+    ensure_monitors(&state, &member, &body.monitor_ids).await?;
+    let now = TimestampMillis::now();
+    let maintenance = Maintenance {
+        id,
+        project_id: existing.project_id,
+        page_id: Some(body.page_id),
+        title,
+        message,
+        starts_at: body.starts_at,
+        ends_at: body.ends_at,
+        monitor_ids: body.monitor_ids,
+        created_at: existing.created_at,
+    };
+    repo::update_maintenance(&state.db, &maintenance, now).await?;
+    audit(
+        &state.db,
+        &member,
+        "maintenance.updated",
+        "maintenance",
+        Some(id),
+        now,
+    )
+    .await;
+    Ok(Json(present::maintenance_response(&maintenance, now)))
+}
+
+fn validate_maintenance(body: &MaintenanceBody) -> Result<(String, String), AppError> {
+    let title = body.title.trim().to_owned();
+    let message = body.message.trim().to_owned();
+    let mut fields = BTreeMap::new();
+    if title.is_empty() || title.chars().count() > 160 {
+        fields.insert("title".to_owned(), "Use 1 to 160 characters.".to_owned());
+    }
+    if message.is_empty() || message.chars().count() > 5_000 {
+        fields.insert(
+            "message".to_owned(),
+            "Describe the window in 1 to 5000 characters.".to_owned(),
+        );
+    }
+    if body.ends_at.as_millis() <= body.starts_at.as_millis() {
+        fields.insert(
+            "ends_at".to_owned(),
+            "The window must end after it starts.".to_owned(),
+        );
+    }
+    if !fields.is_empty() {
+        return Err(AppError::Validation(fields));
+    }
+    Ok((title, message))
 }
 
 async fn delete_maintenance(

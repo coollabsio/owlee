@@ -1,7 +1,6 @@
 import {
   Activity,
   Bell,
-  Briefcase,
   Bug,
   Category,
   CalendarDays,
@@ -9,9 +8,21 @@ import {
   Element3,
   Global,
   Home,
+  Brush,
+  Danger,
+  Data,
+  Devices,
+  Folder,
+  Gauge,
+  InfoCircle,
+  Lock,
+  People,
+  Profile,
+  SecurityUser,
+  Sms,
   Link,
-  Setting2,
   Siren,
+  Setting2,
   Sitemap,
   type IconComponent,
 } from "reicon-react";
@@ -21,8 +32,15 @@ export type NavLinkItem = {
   label: string;
   icon: IconComponent;
   end?: boolean;
-  editorOnly?: boolean;
+  /** Who sees the link; the server still enforces the access. */
+  requires?: keyof Access;
 };
+
+export type Access = { editor: boolean; owner: boolean; admin: boolean; root: boolean };
+
+export function allowed(link: NavLinkItem, access: Access) {
+  return !link.requires || access[link.requires];
+}
 
 export type NavGroup = {
   label?: string;
@@ -60,7 +78,7 @@ export const products: Product[] = [
         links: [
           { to: "/incidents", label: "Incidents", icon: Siren },
           { to: "/maintenance", label: "Maintenance", icon: CalendarDays },
-          { to: "/notifications", label: "Notifications", icon: Bell, editorOnly: true },
+          { to: "/notifications", label: "Notifications", icon: Bell, requires: "editor" },
         ],
       },
     ],
@@ -95,7 +113,76 @@ export const products: Product[] = [
   },
 ];
 
-export const manage: NavLinkItem[] = [
-  { to: "/settings/workspace", label: "Workspace", icon: Briefcase },
-  { to: "/settings", label: "Settings", icon: Setting2, end: true },
-];
+export const manage: NavLinkItem[] = [{ to: "/settings", label: "Settings", icon: Setting2 }];
+
+/** The workspace: shown in the sidebar instead of the main menu on its own pages. */
+export const settings: Product = {
+  id: "settings",
+  label: "Settings",
+  description: "This workspace.",
+  icon: Setting2,
+  groups: [
+    {
+      label: "Workspace",
+      links: [
+        { to: "/settings", label: "General", icon: Setting2, end: true },
+        { to: "/settings/projects", label: "Projects", icon: Folder },
+        { to: "/settings/members", label: "Members", icon: People },
+      ],
+    },
+    {
+      label: "Data",
+      links: [{ to: "/settings/privacy", label: "Privacy requests", icon: Data, requires: "editor" }],
+    },
+    {
+      label: "Advanced",
+      links: [{ to: "/settings/danger-zone", label: "Danger zone", icon: Danger, requires: "owner" }],
+    },
+  ],
+};
+
+/** The signed-in user, opened from the profile menu. */
+export const account: Product = {
+  id: "account",
+  label: "Account settings",
+  description: "Your account and this browser.",
+  icon: Profile,
+  groups: [
+    {
+      label: "Account",
+      links: [
+        { to: "/profile", label: "Profile", icon: Profile, end: true },
+        { to: "/profile/security", label: "Security", icon: Lock },
+        { to: "/profile/sessions", label: "Sessions", icon: Devices },
+      ],
+    },
+    {
+      label: "Preferences",
+      links: [{ to: "/profile/appearance", label: "Appearance", icon: Brush }],
+    },
+  ],
+};
+
+/** The Owlee install, not the workspace: root and installation admins only. */
+export const admin: Product = {
+  id: "admin",
+  label: "Admin",
+  description: "This Owlee install.",
+  icon: SecurityUser,
+  groups: [
+    {
+      label: "Instance",
+      links: [
+        { to: "/admin", label: "General", icon: InfoCircle, end: true, requires: "admin" },
+        { to: "/admin/users", label: "Users", icon: People, requires: "admin" },
+      ],
+    },
+    {
+      label: "Configuration",
+      links: [
+        { to: "/admin/email", label: "Email", icon: Sms, requires: "root" },
+        { to: "/admin/quotas", label: "Ingest quotas", icon: Gauge, requires: "root" },
+      ],
+    },
+  ],
+};
