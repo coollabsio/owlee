@@ -78,6 +78,11 @@ impl Database {
             .acquire_timeout(Duration::from_secs(10))
             .after_connect(|connection, _metadata| {
                 Box::pin(async move {
+                    // Takes effect only before the first table exists, so new databases
+                    // can return freed pages; older files keep auto_vacuum off.
+                    sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+                        .execute(&mut *connection)
+                        .await?;
                     sqlx::query("PRAGMA foreign_keys = ON")
                         .execute(&mut *connection)
                         .await?;
@@ -113,6 +118,17 @@ impl Database {
 
     pub async fn begin(&self) -> Result<sqlx::Transaction<'_, Any>, sqlx::Error> {
         self.pool.begin().await
+    }
+
+    /// Returns free SQLite pages to the file system. A no-op on Postgres and on
+    /// SQLite files created before incremental auto_vacuum was set.
+    pub async fn reclaim_free_pages(&self) -> Result<(), sqlx::Error> {
+        if self.backend == Backend::Sqlite {
+            sqlx::query("PRAGMA incremental_vacuum")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     /// A write transaction. SQLite takes `BEGIN IMMEDIATE` so two setup attempts cannot both pass
@@ -426,6 +442,43 @@ CREATE TABLE widgets (
             .await
             .unwrap();
         assert_round_trip(&database).await;
+    }
+
+    async fn pragma(database: &Database, name: &str) -> i64 {
+        sqlx::query(&format!("PRAGMA {name}"))
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+            .get::<i64, _>(0)
+    }
+
+    #[tokio::test]
+    async fn new_sqlite_files_return_freed_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.sqlite");
+        let database = Database::connect(&DatabaseConfig::sqlite(&path))
+            .await
+            .unwrap();
+        MigrationRunner::new("test", vec![Migration::new(1, "widgets", WIDGETS)])
+            .run(&database)
+            .await
+            .unwrap();
+        assert_eq!(pragma(&database, "auto_vacuum").await, 2);
+        for n in 0..2000_i64 {
+            sqlx::query("INSERT INTO widgets (id, n) VALUES ($1, $2)")
+                .bind(format!("{n:0>200}"))
+                .bind(n)
+                .execute(database.pool())
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM widgets")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        assert!(pragma(&database, "freelist_count").await > 50);
+        database.reclaim_free_pages().await.unwrap();
+        assert_eq!(pragma(&database, "freelist_count").await, 0);
     }
 
     #[test]

@@ -34,6 +34,7 @@ const ANALYTICS_RATE_SITE: &str = "OWLEE_ANALYTICS_RATE_SITE_PER_MIN";
 const ANALYTICS_BURST_SITE: &str = "OWLEE_ANALYTICS_RATE_SITE_BURST";
 const ANALYTICS_RATE_IP: &str = "OWLEE_ANALYTICS_RATE_IP_PER_MIN";
 const ANALYTICS_BURST_IP: &str = "OWLEE_ANALYTICS_RATE_IP_BURST";
+const CHECK_RETENTION: &str = "OWLEE_CHECK_RETENTION_DAYS";
 const ERROR_RETENTION: &str = "OWLEE_ERROR_RETENTION_DAYS";
 const ANALYTICS_RETENTION: &str = "OWLEE_ANALYTICS_RETENTION_DAYS";
 const ERROR_KEEP_FIRST: &str = "OWLEE_ERROR_KEEP_FIRST";
@@ -62,6 +63,8 @@ pub struct IngestConfig {
     pub analytics_rate_site_burst: u32,
     pub analytics_rate_ip_per_min: u32,
     pub analytics_rate_ip_burst: u32,
+    /// Days of monitor check results to keep (`OWLEE_CHECK_RETENTION_DAYS`).
+    pub check_retention_days: i64,
     pub error_retention_days: i64,
     pub analytics_retention_days: i64,
     pub error_keep_first: i64,
@@ -118,6 +121,7 @@ impl Default for IngestConfig {
             analytics_rate_site_burst: 60,
             analytics_rate_ip_per_min: 60,
             analytics_rate_ip_burst: 30,
+            check_retention_days: 14,
             error_retention_days: 30,
             analytics_retention_days: 90,
             error_keep_first: 5,
@@ -583,6 +587,9 @@ fn apply_ingest_env(config: &mut Config) -> Result<(), ConfigError> {
     }
     if let Some(value) = optional(ANALYTICS_BURST_IP) {
         ingest.analytics_rate_ip_burst = parse_u32(ANALYTICS_BURST_IP, &value)?;
+    }
+    if let Some(value) = optional(CHECK_RETENTION) {
+        ingest.check_retention_days = parse_i64(CHECK_RETENTION, &value)?;
     }
     if let Some(value) = optional(ERROR_RETENTION) {
         ingest.error_retention_days = parse_i64(ERROR_RETENTION, &value)?;

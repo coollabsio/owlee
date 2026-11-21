@@ -8,7 +8,6 @@ use crate::repo;
 use crate::state::AppState;
 
 const PRUNE_EVERY_MS: i64 = 3_600_000;
-const RETENTION_MS: i64 = 14 * 86_400_000;
 
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
@@ -68,9 +67,17 @@ async fn tick(
         });
     }
     if now - *last_pruned >= PRUNE_EVERY_MS {
-        repo::prune(&state.db, now - RETENTION_MS).await?;
+        let retention_ms = state
+            .config
+            .ingest
+            .check_retention_days
+            .saturating_mul(86_400_000);
+        repo::prune(&state.db, now - retention_ms).await?;
         if let Err(error) = crate::retention::prune_expired(state).await {
             tracing::error!(%error, "ingest retention failed");
+        }
+        if let Err(error) = state.db.reclaim_free_pages().await {
+            tracing::error!(%error, "incremental vacuum failed");
         }
         *last_pruned = now;
     }

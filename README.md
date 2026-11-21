@@ -206,6 +206,55 @@ docker compose -f deploy/compose.yaml run --rm owlee setup-token rotate
 docker compose -f deploy/compose.yaml start owlee
 ```
 
+## Back up and restore
+
+`owlee backup <path>` copies the SQLite database to a new file while Owlee keeps running. It uses SQLite's `VACUUM INTO`, which reads one consistent snapshot, including writes that are still in the `-wal` file. It refuses to replace an existing file, and it prints the size of the copy.
+
+```bash
+owlee backup /var/backups/owlee-$(date +%Y%m%d-%H%M%S).sqlite
+```
+
+In Docker, write the copy inside the volume, then copy it out of the container:
+
+```bash
+name="backup-$(date +%Y%m%d-%H%M%S).sqlite"
+docker exec owlee /owlee backup "/var/lib/owlee/$name"
+docker cp "owlee:/var/lib/owlee/$name" .
+docker exec owlee rm "/var/lib/owlee/$name"
+```
+
+With Compose, use `docker compose -f deploy/compose.yaml exec owlee /owlee backup ...` for the second line.
+
+Keep `OWLEE_APP_KEY` with every backup. Owlee encrypts the saved SMTP password, the notification channel settings, and the monitor request headers and bodies with that key. With another key, Owlee cannot read them. It logs a warning, and someone must enter them again.
+
+To restore a SQLite backup:
+
+1. Stop Owlee.
+2. Replace `owlee.sqlite` with the backup file.
+3. Delete `owlee.sqlite-wal` and `owlee.sqlite-shm` if they exist. They belong to the replaced file.
+4. Start Owlee with the same `OWLEE_APP_KEY`.
+
+In Docker, a short-lived container with the same volume does steps 2 and 3. It runs as the image's `owlee` user, so the restored file keeps the right owner. Run it from the directory that holds `backup.sqlite`:
+
+```bash
+docker stop owlee
+docker run --rm -v owlee-data:/var/lib/owlee -v "$PWD:/restore:ro" --entrypoint sh \
+  ghcr.io/coollabsio/owlee:0.1.0 -c \
+  'cp /restore/backup.sqlite /var/lib/owlee/owlee.sqlite && rm -f /var/lib/owlee/owlee.sqlite-wal /var/lib/owlee/owlee.sqlite-shm'
+docker start owlee
+```
+
+On Postgres, `owlee backup` exits with an error that names `pg_dump`. Use the Postgres tools. Stop Owlee before a restore:
+
+```bash
+pg_dump --format=custom --file=owlee.dump "$OWLEE_DATABASE_URL"
+pg_restore --clean --if-exists --no-owner --dbname="$OWLEE_DATABASE_URL" owlee.dump
+```
+
+### Disk space
+
+Every hour, Owlee deletes monitor check results older than `OWLEE_CHECK_RETENTION_DAYS` (14, at least 1), and error and analytics rows older than their own retention settings. After that pass, SQLite returns the freed pages to the file system with `PRAGMA incremental_vacuum`, so the file shrinks. This works on a database file that Owlee 0.1.0 or later created. An older file keeps its size and reuses the free pages for new rows. On Postgres, autovacuum makes the space of deleted rows reusable.
+
 ## Agents
 
 An agent checks targets that the Owlee server cannot reach, for example a database on a private Docker network or a host in a VPC. The agent is the same binary. You start it on the target server or in the same network. It makes only outbound HTTPS requests to the server, so you do not need to open a port into the private network.

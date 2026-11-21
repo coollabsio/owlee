@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use owlee_platform::{Config, TimestampMillis};
+use owlee_platform::{Config, Database, DatabaseConfig, TimestampMillis};
 
 use crate::accounts;
 use crate::agent;
@@ -48,6 +48,15 @@ enum Command {
     Seed {
         #[arg(long)]
         database: Option<PathBuf>,
+    },
+    /// Copy the SQLite database to a new file. Safe while Owlee is running.
+    /// Keep OWLEE_APP_KEY with the copy: saved SMTP and channel secrets need it.
+    Backup {
+        /// SQLite database file. Defaults to OWLEE_DATABASE_PATH.
+        #[arg(long)]
+        database: Option<PathBuf>,
+        /// File to write. Must not exist yet.
+        path: PathBuf,
     },
     /// Exit successfully when /api/health/ready answers on the configured port.
     Healthcheck,
@@ -226,6 +235,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let state = state::boot(config).await?;
             println!("{}", user_command(&state, command).await?);
         }
+        Command::Backup { database, path } => {
+            let config = load(None, database)?;
+            let bytes = backup(&config, &path).await?;
+            println!(
+                "backed up {} to {} ({})",
+                config.database_path.display(),
+                path.display(),
+                human_size(bytes)
+            );
+        }
         Command::Healthcheck => {
             let config = Config::from_env()?;
             let url = format!("http://127.0.0.1:{}/api/health/ready", config.port);
@@ -241,6 +260,49 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// `VACUUM INTO` reads one consistent snapshot, WAL included, so the server
+/// keeps running and no ownership lock is taken.
+async fn backup(config: &Config, target: &Path) -> Result<u64, Box<dyn std::error::Error>> {
+    if config.database_url.is_some() {
+        return Err(
+            "owlee backup copies SQLite only. For Postgres, use pg_dump, for example \
+             `pg_dump --format=custom --file=owlee.dump \"$OWLEE_DATABASE_URL\"`"
+                .into(),
+        );
+    }
+    let source = &config.database_path;
+    if !source.is_file() {
+        return Err(format!("no SQLite database at {}", source.display()).into());
+    }
+    if target.symlink_metadata().is_ok() {
+        return Err(format!("{} already exists; choose a new file", target.display()).into());
+    }
+    let target_text = target
+        .to_str()
+        .ok_or("the backup path must be valid UTF-8")?;
+    let database = Database::connect(&DatabaseConfig {
+        max_connections: 1,
+        ..DatabaseConfig::sqlite(source)
+    })
+    .await?;
+    sqlx::query("VACUUM INTO $1")
+        .bind(target_text)
+        .execute(database.pool())
+        .await?;
+    database.pool().close().await;
+    Ok(std::fs::metadata(target)?.len())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn human_size(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
 }
 
 async fn user_command(
