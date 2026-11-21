@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 base64.workspace = true
 chacha20poly1305 = "0.10"
 chrono.workspace = true
