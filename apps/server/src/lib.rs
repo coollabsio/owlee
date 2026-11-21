@@ -40,6 +40,7 @@ mod workspaces;
 
 pub use cli::run;
 pub use dns::MapResolver;
+pub use engine::{AGENT_GRACE_MS, reconcile_agents};
 pub use errors::seed_demo as seed_errors;
 pub use instance_settings::permit_signup;
 pub use notify::{Outbox, SentMail};

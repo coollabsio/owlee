@@ -74,6 +74,8 @@ export type Monitor = {
   failure_threshold: number;
   active: boolean;
   agent_id: string | null;
+  /** Down because the agent is silent. No check failed. */
+  agent_offline: boolean;
   state: "pending" | "up" | "degraded" | "down";
   consecutive_failures: number;
   last_checked_at: string | null;
@@ -126,6 +128,8 @@ export type CreatedAgent = Agent & { token: string };
 
 export const createAgent = (input: { name: string; project_id: string }) =>
   api<CreatedAgent>("/api/agents", { method: "POST", body: JSON.stringify(input) });
+
+export const renameAgent = (id: string, name: string) => api<Agent>(`/api/agents/${id}`, { method: "PUT", body: JSON.stringify({ name }) });
 
 export const rotateAgentToken = (id: string) => api<CreatedAgent>(`/api/agents/${id}/token`, { method: "POST" });
 

@@ -1,12 +1,12 @@
 use std::ops::DerefMut;
 
 use owlee_domain::{
-    CheckStatus, IncidentImpact, IncidentStatus, NotificationEvent, NotificationPayload,
-    PayloadCheck, PayloadIncident, Probe, Rules, apply_outcome, judge,
+    CheckStatus, IncidentImpact, IncidentStatus, MonitorState, NotificationEvent,
+    NotificationPayload, PayloadCheck, PayloadIncident, Probe, Rules, apply_outcome, judge,
 };
 use owlee_platform::{Id, TimestampMillis};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Any, Row, Transaction};
 
 use crate::checker::{self, Job};
 use crate::error::AppError;
@@ -97,12 +97,16 @@ pub async fn submit(
     outcome: Outcome,
     region: &str,
 ) -> Result<(), AppError> {
-    let monitor = active_monitor(state, id).await?;
+    let mut monitor = active_monitor(state, id).await?;
     let _guard = state
         .inflight
         .try_acquire(&id.to_string())
         .ok_or(AppError::Busy)?;
     let now = TimestampMillis::now();
+    if monitor.agent_lost_at.is_some() {
+        agent_returned(state, &monitor, region, now).await?;
+        monitor = active_monitor(state, id).await?;
+    }
     let outcome = if repo::in_maintenance(&state.db, id, now.as_millis()).await? {
         Outcome::maintenance()
     } else {
@@ -172,79 +176,19 @@ async fn record(
 
     let mut notify_event = None;
     if transition.open_incident {
-        let open = sqlx::query(
-            "SELECT id FROM incidents WHERE monitor_id = $1 AND auto = 1 AND status != 'resolved' LIMIT 1",
-        )
-        .bind(id.to_string())
-        .fetch_optional(tx.deref_mut())
-        .await?;
-        if open.is_none() {
-            let incident_id = Id::new();
-            let detail = error.unwrap_or_else(|| "The check failed.".to_owned());
-            let message = format!(
-                "{AUTO_DOWN_PREFIX}{} consecutive failed checks for {}. {detail}",
-                transition.consecutive_failures, monitor.name
-            );
-            let incident = Incident {
-                id: incident_id,
-                project_id: monitor.project_id,
-                page_id: None,
-                monitor_id: Some(id),
-                title: auto_title(&monitor.name),
-                status: IncidentStatus::Investigating,
-                impact: IncidentImpact::Major,
-                auto: true,
-                started_at: now,
-                resolved_at: None,
-                created_at: now,
-                updated_at: now,
-            };
-            let update = IncidentUpdate {
-                id: Id::new(),
-                incident_id,
-                status: IncidentStatus::Investigating,
-                message: message.clone(),
-                created_at: now,
-            };
-            repo::insert_incident(&mut tx, &incident, &update).await?;
+        let detail = error.unwrap_or_else(|| "The check failed.".to_owned());
+        let message = format!(
+            "{AUTO_DOWN_PREFIX}{} consecutive failed checks for {}. {detail}",
+            transition.consecutive_failures, monitor.name
+        );
+        let title = auto_title(&monitor.name);
+        if let Some(incident_id) = open_incident(&mut tx, monitor, &title, &message, now).await? {
             notify_event = Some((NotificationEvent::MonitorDown, incident_id, message));
         }
     } else if transition.resolve_incident {
-        let open = sqlx::query(
-            "SELECT id FROM incidents WHERE monitor_id = $1 AND auto = 1 AND status != 'resolved' \
-             ORDER BY started_at DESC LIMIT 1",
-        )
-        .bind(id.to_string())
-        .fetch_optional(tx.deref_mut())
-        .await?;
-        if let Some(row) = open {
-            let incident_id = row
-                .try_get::<String, _>("id")
-                .ok()
-                .and_then(|value| value.parse().ok());
-            if let Some(incident_id) = incident_id {
-                let message = format!("Checks for {}{AUTO_RECOVERED_SUFFIX}", monitor.name);
-                repo::apply_incident_status(
-                    &mut tx,
-                    incident_id,
-                    IncidentStatus::Resolved,
-                    Some(now.as_millis()),
-                    now.as_millis(),
-                )
-                .await?;
-                repo::insert_update(
-                    &mut tx,
-                    &IncidentUpdate {
-                        id: Id::new(),
-                        incident_id,
-                        status: IncidentStatus::Resolved,
-                        message: message.clone(),
-                        created_at: now,
-                    },
-                )
-                .await?;
-                notify_event = Some((NotificationEvent::MonitorRecovered, incident_id, message));
-            }
+        let message = format!("Checks for {}{AUTO_RECOVERED_SUFFIX}", monitor.name);
+        if let Some(incident_id) = resolve_incident(&mut tx, id, &message, now).await? {
+            notify_event = Some((NotificationEvent::MonitorRecovered, incident_id, message));
         }
     }
     tx.commit().await?;
@@ -258,37 +202,264 @@ async fn record(
         );
     }
     if let Some((event, incident_id, message)) = notify_event {
-        let recovered = event == NotificationEvent::MonitorRecovered;
-        let payload = NotificationPayload {
-            event: event.as_str().to_owned(),
-            sent_at: now.to_string(),
-            monitor: Some(notify::payload_monitor(&monitor, transition.state)),
+        let announcement = Announcement {
+            event,
+            incident_id,
+            title: auto_title(&monitor.name),
+            message,
+            state: transition.state,
             check: Some(PayloadCheck {
                 status,
                 status_code,
                 latency_ms,
                 error: check.error.clone(),
             }),
-            incident: Some(PayloadIncident {
-                id: incident_id.to_string(),
-                title: auto_title(&monitor.name),
-                status: if recovered {
-                    IncidentStatus::Resolved
-                } else {
-                    IncidentStatus::Investigating
-                },
-                impact: IncidentImpact::Major,
-            }),
-            message: Some(message),
         };
-        notify::fanout(
-            state,
-            &payload,
-            monitor.project_id,
-            Some(id),
-            Some(incident_id),
-        )
-        .await;
+        announce(state, monitor, announcement, now).await;
+    }
+    Ok(())
+}
+
+/// Opens the automatic incident of a monitor. Returns `None` when one is already open.
+async fn open_incident(
+    tx: &mut Transaction<'_, Any>,
+    monitor: &Monitor,
+    title: &str,
+    message: &str,
+    now: TimestampMillis,
+) -> Result<Option<Id>, sqlx::Error> {
+    let open = sqlx::query(
+        "SELECT id FROM incidents WHERE monitor_id = $1 AND auto = 1 AND status != 'resolved' LIMIT 1",
+    )
+    .bind(monitor.id.to_string())
+    .fetch_optional(tx.deref_mut())
+    .await?;
+    if open.is_some() {
+        return Ok(None);
+    }
+    let incident_id = Id::new();
+    let incident = Incident {
+        id: incident_id,
+        project_id: monitor.project_id,
+        page_id: None,
+        monitor_id: Some(monitor.id),
+        title: title.to_owned(),
+        status: IncidentStatus::Investigating,
+        impact: IncidentImpact::Major,
+        auto: true,
+        started_at: now,
+        resolved_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let update = IncidentUpdate {
+        id: Id::new(),
+        incident_id,
+        status: IncidentStatus::Investigating,
+        message: message.to_owned(),
+        created_at: now,
+    };
+    repo::insert_incident(tx, &incident, &update).await?;
+    Ok(Some(incident_id))
+}
+
+/// Resolves the open automatic incident of a monitor. Returns `None` when none is open.
+async fn resolve_incident(
+    tx: &mut Transaction<'_, Any>,
+    monitor_id: Id,
+    message: &str,
+    now: TimestampMillis,
+) -> Result<Option<Id>, sqlx::Error> {
+    let open = sqlx::query(
+        "SELECT id FROM incidents WHERE monitor_id = $1 AND auto = 1 AND status != 'resolved' \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(monitor_id.to_string())
+    .fetch_optional(tx.deref_mut())
+    .await?;
+    let Some(incident_id) = open
+        .and_then(|row| row.try_get::<String, _>("id").ok())
+        .and_then(|value| value.parse::<Id>().ok())
+    else {
+        return Ok(None);
+    };
+    repo::apply_incident_status(
+        tx,
+        incident_id,
+        IncidentStatus::Resolved,
+        Some(now.as_millis()),
+        now.as_millis(),
+    )
+    .await?;
+    repo::insert_update(
+        tx,
+        &IncidentUpdate {
+            id: Id::new(),
+            incident_id,
+            status: IncidentStatus::Resolved,
+            message: message.to_owned(),
+            created_at: now,
+        },
+    )
+    .await?;
+    Ok(Some(incident_id))
+}
+
+/// What the notification channels hear about an automatic incident.
+struct Announcement {
+    event: NotificationEvent,
+    incident_id: Id,
+    title: String,
+    message: String,
+    /// The monitor state after the change.
+    state: MonitorState,
+    /// `None` when no check caused the change.
+    check: Option<PayloadCheck>,
+}
+
+async fn announce(
+    state: &AppState,
+    monitor: &Monitor,
+    announcement: Announcement,
+    now: TimestampMillis,
+) {
+    let Announcement {
+        event,
+        incident_id,
+        title,
+        message,
+        state: monitor_state,
+        check,
+    } = announcement;
+    let recovered = event == NotificationEvent::MonitorRecovered;
+    let payload = NotificationPayload {
+        event: event.as_str().to_owned(),
+        sent_at: now.to_string(),
+        monitor: Some(notify::payload_monitor(monitor, monitor_state)),
+        check,
+        incident: Some(PayloadIncident {
+            id: incident_id.to_string(),
+            title,
+            status: if recovered {
+                IncidentStatus::Resolved
+            } else {
+                IncidentStatus::Investigating
+            },
+            impact: IncidentImpact::Major,
+        }),
+        message: Some(message),
+    };
+    notify::fanout(
+        state,
+        &payload,
+        monitor.project_id,
+        Some(monitor.id),
+        Some(incident_id),
+    )
+    .await;
+}
+
+/// How long an agent may be silent before its monitors stop counting as checked. An agent
+/// sends a heartbeat every 15 s, so this is eight missed heartbeats in a row. A restart of
+/// the agent or of its host, or a short network fault, ends well inside this time.
+pub const AGENT_GRACE_MS: i64 = 120_000;
+
+pub const AGENT_LOST_PREFIX: &str = "Owlee has not heard from agent ";
+pub const AGENT_BACK_PREFIX: &str = "Owlee hears from agent ";
+
+pub fn agent_lost_title(monitor: &str, agent: &str) -> String {
+    format!("{monitor} is not checked: agent {agent} is offline")
+}
+
+/// Makes the monitors of every agent match whether the agent still reports.
+///
+/// A monitor of an agent that is silent for longer than `AGENT_GRACE_MS` goes down with an
+/// incident that names the agent. It comes back when the agent is heard again. Every step
+/// is a conditional update, so more ticks or more processes change nothing.
+///
+/// `watching_since` is when this process started. Agents cannot report while no server
+/// runs, so that time does not count as silence.
+pub async fn reconcile_agents(
+    state: &AppState,
+    now: TimestampMillis,
+    watching_since: TimestampMillis,
+) -> Result<(), AppError> {
+    let cutoff = now.as_millis() - AGENT_GRACE_MS;
+    for back in repo::monitors_of_returned_agents(&state.db, cutoff).await? {
+        agent_returned(state, &back.monitor, &back.agent_name, now).await?;
+    }
+    if watching_since.as_millis() > cutoff {
+        return Ok(());
+    }
+    for lost in repo::monitors_of_silent_agents(&state.db, cutoff, now.as_millis()).await? {
+        agent_lost(state, &lost.monitor, &lost.agent_name, cutoff, now).await?;
+    }
+    Ok(())
+}
+
+async fn agent_lost(
+    state: &AppState,
+    monitor: &Monitor,
+    agent: &str,
+    cutoff: i64,
+    now: TimestampMillis,
+) -> Result<(), AppError> {
+    let mut tx = state.db.begin().await?;
+    if !repo::mark_agent_lost(&mut tx, monitor.id, cutoff, now.as_millis()).await? {
+        return Ok(());
+    }
+    let title = agent_lost_title(&monitor.name, agent);
+    let message = format!(
+        "{AGENT_LOST_PREFIX}{agent} for {} minutes. Nothing checks {} until the agent \
+         reports again, so its real state is unknown.",
+        AGENT_GRACE_MS / 60_000,
+        monitor.name
+    );
+    let incident_id = open_incident(&mut tx, monitor, &title, &message, now).await?;
+    tx.commit().await?;
+    tracing::warn!(monitor = %monitor.name, agent, "agent is silent, monitor marked down");
+    if let Some(incident_id) = incident_id {
+        let announcement = Announcement {
+            event: NotificationEvent::MonitorDown,
+            incident_id,
+            title,
+            message,
+            state: MonitorState::Down,
+            check: None,
+        };
+        announce(state, monitor, announcement, now).await;
+    }
+    Ok(())
+}
+
+async fn agent_returned(
+    state: &AppState,
+    monitor: &Monitor,
+    agent: &str,
+    now: TimestampMillis,
+) -> Result<(), AppError> {
+    let mut tx = state.db.begin().await?;
+    if !repo::clear_agent_lost(&mut tx, monitor.id, now.as_millis()).await? {
+        return Ok(());
+    }
+    let message = format!(
+        "{AGENT_BACK_PREFIX}{agent} again. Checks for {} continue. \
+         This incident was resolved automatically.",
+        monitor.name
+    );
+    let incident_id = resolve_incident(&mut tx, monitor.id, &message, now).await?;
+    tx.commit().await?;
+    tracing::info!(monitor = %monitor.name, agent, "agent is back");
+    if let Some(incident_id) = incident_id {
+        let announcement = Announcement {
+            event: NotificationEvent::MonitorRecovered,
+            incident_id,
+            title: agent_lost_title(&monitor.name, agent),
+            message,
+            state: MonitorState::Pending,
+            check: None,
+        };
+        announce(state, monitor, announcement, now).await;
     }
     Ok(())
 }

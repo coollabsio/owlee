@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, CopyButton, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent, rotateAgentToken } from "@/lib/api";
+import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent, renameAgent, rotateAgentToken } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { timeAgo } from "@/lib/utils";
@@ -112,7 +112,7 @@ export function AgentsPage() {
         description="Owlee stores only a hash of the token, so it cannot show it again. Regenerate the token to get a new one."
         onClose={() => setViewing(null)}
       >
-        {viewing ? <AgentDetails key={viewing.id} agent={viewing} onDone={() => setViewing(null)} /> : null}
+        {viewing ? <AgentDetails key={viewing.id} agent={viewing} onRenamed={setViewing} onDone={() => setViewing(null)} /> : null}
       </Dialog>
       <ConfirmDialog
         open={deleting !== null}
@@ -174,12 +174,46 @@ const exampleChecks = [
   "OWLEE_AGENT_CHECK_1_INTERVAL=30",
 ];
 
-function AgentDetails({ agent, onDone }: { agent: Agent; onDone: () => void }) {
+function RenameAgentForm({ agent, onRenamed }: { agent: Agent; onRenamed: (agent: Agent) => void }) {
+  const client = useQueryClient();
+  const [name, setName] = useState(agent.name);
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const save = useMutation({
+    mutationFn: () => renameAgent(agent.id, name),
+    onSuccess: async (renamed) => {
+      onRenamed(renamed);
+      setName(renamed.name);
+      await client.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (error) => setFields(error instanceof ApiError ? error.fields ?? {} : {}),
+  });
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    save.mutate();
+  }
+
+  return (
+    <form className="flex flex-col gap-2" onSubmit={submit}>
+      <Field label="Name" hint="New checks use the new name as their region. Old checks keep the old name." error={fields.name}>
+        <div className="flex gap-2">
+          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={60} required />
+          <Button type="submit" disabled={save.isPending || name.trim() === agent.name || name.trim() === ""}>{save.isPending ? <><Spinner />Saving…</> : "Rename"}</Button>
+        </div>
+      </Field>
+      <ErrorText error={fields.name ? null : save.error} />
+    </form>
+  );
+}
+
+function AgentDetails({ agent, onRenamed, onDone }: { agent: Agent; onRenamed: (agent: Agent) => void; onDone: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const rotate = useMutation({ mutationFn: () => rotateAgentToken(agent.id), onSuccess: () => setConfirming(false) });
   const token = rotate.data?.token ?? null;
   return (
     <div className="flex flex-col gap-4">
+      <RenameAgentForm agent={agent} onRenamed={onRenamed} />
       <dl className="grid grid-cols-3 gap-2 text-[0.8125rem]">
         <div><dt className="field-label">Status</dt><dd><StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge></dd></div>
         <div><dt className="field-label">Monitors</dt><dd>{agent.monitor_count}</dd></div>

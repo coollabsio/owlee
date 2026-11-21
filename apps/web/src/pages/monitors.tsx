@@ -497,11 +497,20 @@ function ProblemBanner({ monitor }: { monitor: MonitorDetail }) {
       )}
     >
       <div className="min-w-0 flex-1 space-y-1">
-        <p className="font-medium text-[var(--ui-fg)]">{error?.error ?? (down ? "The checks are failing." : "The checks are slow.")}</p>
-        <p className="text-[var(--ui-fg-dim)]">
-          {monitor.consecutive_failures} of {monitor.failure_threshold} failed checks in a row mark it down.
-          {error ? <> Last error <Ago at={error.checked_at} />.</> : null}
-        </p>
+        {monitor.agent_offline ? (
+          <>
+            <p className="font-medium text-[var(--ui-fg)]">The agent is offline.</p>
+            <p className="text-[var(--ui-fg-dim)]">Nothing checks this monitor until the agent reports again, so its real state is unknown. No check failed.</p>
+          </>
+        ) : (
+          <>
+            <p className="font-medium text-[var(--ui-fg)]">{error?.error ?? (down ? "The checks are failing." : "The checks are slow.")}</p>
+            <p className="text-[var(--ui-fg-dim)]">
+              {monitor.consecutive_failures} of {monitor.failure_threshold} failed checks in a row mark it down.
+              {error ? <> Last error <Ago at={error.checked_at} />.</> : null}
+            </p>
+          </>
+        )}
       </div>
       {monitor.open_incident_id ? <Link className={smallButton} to={`/incidents/${monitor.open_incident_id}`}>View incident</Link> : null}
     </div>

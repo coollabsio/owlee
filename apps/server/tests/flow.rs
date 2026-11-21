@@ -6,8 +6,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use owlee_platform::TimestampMillis;
 use owlee_server::{
-    AppState, DEMO_PASSWORD, TestSession, boot, editor_session, initialize_setup_token,
-    member_session, router, testing_config,
+    AGENT_GRACE_MS, AppState, DEMO_PASSWORD, TestSession, boot, editor_session,
+    initialize_setup_token, member_session, reconcile_agents, router, testing_config,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -2010,4 +2010,265 @@ async fn agent_errors_are_cut_to_1_kib_and_agent_calls_are_capped() {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = agent_call(&app, "/api/agent/checks", checks(1), &token).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "3 a minute at once");
+}
+
+async fn agent_with_checks(
+    app: &Router,
+    who: &Who,
+    name: &str,
+    checks: &[&str],
+) -> (String, String, Vec<String>) {
+    let (status, agent, _) = call(
+        app,
+        "POST",
+        "/api/agents",
+        Some(json!({ "project_id": who.project, "name": name })),
+        Some(who),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{agent}");
+    let token = agent["token"].as_str().unwrap().to_owned();
+    let body = json!({
+        "checks": checks.iter().map(|name| json!({
+            "name": name,
+            "check_type": "postgres",
+            "target": "10.0.0.5:5432",
+            "interval_seconds": 30,
+            "timeout_ms": 10000,
+            "failure_threshold": 1,
+        })).collect::<Vec<_>>()
+    });
+    let (status, registered) = agent_call(app, "/api/agent/checks", body, &token).await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let monitors = registered["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["monitor_id"].as_str().unwrap().to_owned())
+        .collect();
+    (agent["id"].as_str().unwrap().to_owned(), token, monitors)
+}
+
+async fn agent_success(app: &Router, token: &str, monitor_id: &str) {
+    let outcome = json!({
+        "monitor_id": monitor_id, "status": "success", "status_code": null,
+        "latency_ms": 4, "error": null
+    });
+    let (status, body) = agent_call(app, "/api/agent/results", outcome, token).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+}
+
+#[tokio::test]
+async fn silent_agent_takes_its_monitors_down_after_the_grace_and_recovers() {
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let hook = json!({
+        "name": "Hooks", "provider": "webhook", "monitor_ids": [],
+        "config": { "url": "http://127.0.0.1:9/hook" }
+    });
+    create(&app, &ada, "/api/notifications", hook).await;
+    let (_, token, monitors) =
+        agent_with_checks(&app, &ada, "vpc-eu", &["Main DB", "Cache", "Replica"]).await;
+    let [main, cache, replica] = monitors.as_slice() else {
+        panic!("three monitors: {monitors:?}");
+    };
+    for monitor in [main, cache, replica] {
+        agent_success(&app, &token, monitor).await;
+    }
+    let (status, _, _) = call(
+        &app,
+        "POST",
+        &format!("/api/monitors/{cache}/active"),
+        Some(json!({"active": false})),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let page = json!({
+        "project_id": ada.project, "title": "Data", "slug": "data", "published": true,
+        "monitor_ids": [main, replica]
+    });
+    let page_id = create(&app, &ada, "/api/pages", page).await;
+    let stopped = TimestampMillis::now();
+    let at = |after_ms: i64| TimestampMillis::from_millis(stopped.as_millis() + after_ms);
+    let window = json!({
+        "project_id": ada.project, "title": "Replica move", "message": "Moving.",
+        "page_id": page_id, "monitor_ids": [replica],
+        "starts_at": stopped, "ends_at": at(3_600_000)
+    });
+    create(&app, &ada, "/api/maintenances", window).await;
+
+    let long_ago = TimestampMillis::from_millis(0);
+    let states = || async {
+        let mut states = Vec::new();
+        for monitor in [main, cache, replica] {
+            let uri = format!("/api/monitors/{monitor}");
+            let (_, detail, _) = call(&app, "GET", &uri, None, Some(&ada)).await;
+            states.push((
+                detail["state"].as_str().unwrap().to_owned(),
+                detail["agent_offline"].as_bool().unwrap(),
+            ));
+        }
+        states
+    };
+    let incidents = || async {
+        let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+        incidents
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|incident| {
+                (
+                    incident["title"].as_str().unwrap().to_owned(),
+                    incident["status"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let events = || async {
+        let (_, channels, _) = call(&app, "GET", "/api/notifications", None, Some(&ada)).await;
+        channels[0]["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|delivery| delivery["event"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let all_up = [
+        ("up".to_owned(), false),
+        ("up".to_owned(), false),
+        ("up".to_owned(), false),
+    ];
+
+    reconcile_agents(&state, at(20_000), long_ago)
+        .await
+        .unwrap();
+    assert_eq!(
+        states().await,
+        all_up,
+        "one missed heartbeat changes nothing"
+    );
+    assert_eq!(incidents().await, []);
+    assert_eq!(events().await, [] as [String; 0]);
+
+    let after_grace = at(AGENT_GRACE_MS + 1_000);
+    reconcile_agents(&state, after_grace, after_grace)
+        .await
+        .unwrap();
+    assert_eq!(
+        states().await,
+        all_up,
+        "a server that just started has not watched the agent for the grace time"
+    );
+
+    reconcile_agents(&state, after_grace, long_ago)
+        .await
+        .unwrap();
+    reconcile_agents(&state, after_grace, long_ago)
+        .await
+        .unwrap();
+    assert_eq!(
+        states().await,
+        [
+            ("down".to_owned(), true),
+            ("up".to_owned(), false),
+            ("up".to_owned(), false),
+        ],
+        "the paused monitor and the monitor in maintenance stay"
+    );
+    let offline = "Main DB is not checked: agent vpc-eu is offline".to_owned();
+    assert_eq!(
+        incidents().await,
+        [(offline.clone(), "investigating".to_owned())],
+        "a second tick opens no second incident"
+    );
+    assert_eq!(events().await, ["monitor.down"]);
+    let (_, public, _) = call(&app, "GET", "/api/public/data", None, None).await;
+    assert_eq!(public["banner"], "partial_outage", "{public}");
+    assert_eq!(
+        public["incidents"][0]["title"],
+        "Main DB is not being checked"
+    );
+    assert!(!public.to_string().contains("vpc-eu"), "{public}");
+
+    agent_success(&app, &token, main).await;
+    assert_eq!(states().await, all_up, "a result ends the offline state");
+    assert_eq!(
+        incidents().await,
+        [(offline.clone(), "resolved".to_owned())]
+    );
+    assert_eq!(events().await, ["monitor.recovered", "monitor.down"]);
+
+    let silence = format!("UPDATE agents SET last_seen_at = {}", stopped.as_millis());
+    exec(&state, &silence, &[]).await;
+    reconcile_agents(&state, after_grace, long_ago)
+        .await
+        .unwrap();
+    assert_eq!(states().await[0], ("down".to_owned(), true));
+    let (status, _) = agent_call(&app, "/api/agent/heartbeat", Value::Null, &token).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    reconcile_agents(&state, TimestampMillis::now(), long_ago)
+        .await
+        .unwrap();
+    assert_eq!(
+        states().await[0],
+        ("pending".to_owned(), false),
+        "a heartbeat ends the offline state before the next result"
+    );
+    assert_eq!(
+        incidents().await,
+        [
+            (offline.clone(), "resolved".to_owned()),
+            (offline, "resolved".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn editor_renames_an_agent_inside_the_workspace() {
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let eve = Who::from(editor_session(&state).await.unwrap());
+    let (agent_id, token, monitors) = agent_with_checks(&app, &ada, "vpc-eu", &["Main DB"]).await;
+    agent_with_checks(&app, &ada, "vpc-us", &[]).await;
+    let uri = format!("/api/agents/{agent_id}");
+    let rename = |name: &str| Some(json!({ "name": name }));
+
+    let (status, _, _) = call(&app, "PUT", &uri, rename("stolen"), Some(&eve)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another workspace");
+    let (status, problem, _) = call(&app, "PUT", &uri, rename("VPC-US"), Some(&ada)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    let (status, _, _) = call(&app, "PUT", &uri, rename("  "), Some(&ada)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, renamed, _) = call(&app, "PUT", &uri, rename(" VPC-EU "), Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["name"], "VPC-EU", "a change of case is allowed");
+    let (status, renamed, _) = call(&app, "PUT", &uri, rename("frankfurt"), Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["monitor_count"], 1);
+    let (_, agents, _) = call(&app, "GET", "/api/agents", None, Some(&ada)).await;
+    let names = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| agent["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["frankfurt", "vpc-us"]);
+
+    agent_success(&app, &token, &monitors[0]).await;
+    let monitor_uri = format!("/api/monitors/{}", monitors[0]);
+    let (_, monitor, _) = call(&app, "GET", &monitor_uri, None, Some(&ada)).await;
+    assert_eq!(
+        monitor["recent"][0]["region"], "frankfurt",
+        "the token still works"
+    );
+
+    let member = Who::from(
+        member_session(&state, ada.workspace.parse().unwrap())
+            .await
+            .unwrap(),
+    );
+    let (status, _, _) = call(&app, "PUT", &uri, rename("mine"), Some(&member)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

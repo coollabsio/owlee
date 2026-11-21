@@ -15,7 +15,8 @@ const MONITOR_COLUMNS: &str = "\
 m.id, m.project_id, m.name, m.description, m.job_type, m.url, m.method, m.headers_json, m.body, \
 m.timeout_ms, m.interval_seconds, m.degraded_after_ms, m.expected_status, m.assertions_json, \
 m.follow_redirects, m.failure_threshold, m.active, m.state, m.consecutive_failures, m.last_checked_at, \
-m.next_check_at, m.created_at, m.updated_at, m.agent_id, m.check_type, m.state_changed_at";
+m.next_check_at, m.created_at, m.updated_at, m.agent_id, m.check_type, m.state_changed_at, \
+m.agent_lost_at";
 
 /// `column` names a project inside the workspace bound at `$n`, and the project
 /// bound at `$n + 1` when `project` is set. Bind them with `bind_scope`.
@@ -83,6 +84,8 @@ pub struct Monitor {
     pub agent_id: Option<Id>,
     /// Set only for agent checks. `None` means `job_type` says it all.
     pub check_type: Option<CheckType>,
+    /// Set while the monitor is down because its agent is silent. No check failed.
+    pub agent_lost_at: Option<TimestampMillis>,
 }
 
 #[derive(Clone, Debug)]
@@ -789,17 +792,21 @@ pub async fn workspace_agent(
     row.as_ref().map(map_agent).transpose()
 }
 
+/// `except` is the agent that is being renamed, so it does not collide with itself.
 pub async fn agent_name_taken(
     db: &Database,
     project_id: Id,
     name: &str,
+    except: Option<Id>,
 ) -> Result<bool, sqlx::Error> {
-    let row =
-        sqlx::query("SELECT id FROM agents WHERE project_id = $1 AND lower(name) = lower($2)")
-            .bind(project_id.to_string())
-            .bind(name)
-            .fetch_optional(db.pool())
-            .await?;
+    let row = sqlx::query(
+        "SELECT id FROM agents WHERE project_id = $1 AND lower(name) = lower($2) AND id != $3",
+    )
+    .bind(project_id.to_string())
+    .bind(name)
+    .bind(except.map(|id| id.to_string()).unwrap_or_default())
+    .fetch_optional(db.pool())
+    .await?;
     Ok(row.is_some())
 }
 
@@ -891,6 +898,7 @@ pub async fn sync_agent_checks(
             state_changed_at: previous.map_or(now, |monitor| monitor.state_changed_at),
             agent_id: Some(agent.id),
             check_type: Some(check.check_type),
+            agent_lost_at: previous.and_then(|monitor| monitor.agent_lost_at),
         };
         if previous.is_some() {
             sqlx::query(
@@ -927,6 +935,107 @@ pub async fn sync_agent_checks(
         }
     }
     Ok(ids)
+}
+
+pub async fn rename_agent(db: &Database, id: Id, name: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE agents SET name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
+/// A monitor with the name of the agent that runs it.
+pub struct AgentMonitor {
+    pub monitor: Monitor,
+    pub agent_name: String,
+}
+
+fn map_agent_monitors(rows: &[sqlx::any::AnyRow]) -> Result<Vec<AgentMonitor>, sqlx::Error> {
+    rows.iter()
+        .map(|row| {
+            Ok(AgentMonitor {
+                monitor: map_monitor(row)?,
+                agent_name: row.try_get("agent_name")?,
+            })
+        })
+        .collect()
+}
+
+/// Active monitors that still count as checked although their agent was last seen before
+/// `cutoff`. Monitors that are already down, or in a maintenance window at `now`, are left out.
+pub async fn monitors_of_silent_agents(
+    db: &Database,
+    cutoff: i64,
+    now: i64,
+) -> Result<Vec<AgentMonitor>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT {MONITOR_COLUMNS}, a.name AS agent_name FROM monitors m \
+         JOIN agents a ON a.id = m.agent_id \
+         WHERE m.active = 1 AND m.agent_lost_at IS NULL AND m.state != 'down' \
+         AND a.last_seen_at < $1 AND NOT ({IN_MAINTENANCE})"
+    ))
+    .bind(cutoff)
+    .bind(now)
+    .fetch_all(db.pool())
+    .await?;
+    map_agent_monitors(&rows)
+}
+
+/// Monitors marked as lost whose agent was seen at or after `cutoff`.
+pub async fn monitors_of_returned_agents(
+    db: &Database,
+    cutoff: i64,
+) -> Result<Vec<AgentMonitor>, sqlx::Error> {
+    let rows = sqlx::query(&format!(
+        "SELECT {MONITOR_COLUMNS}, a.name AS agent_name FROM monitors m \
+         JOIN agents a ON a.id = m.agent_id \
+         WHERE m.agent_lost_at IS NOT NULL AND a.last_seen_at >= $1"
+    ))
+    .bind(cutoff)
+    .fetch_all(db.pool())
+    .await?;
+    map_agent_monitors(&rows)
+}
+
+/// Moves the monitor to down because its agent is silent. Returns false when another tick or
+/// process did it first, or when the agent, the monitor, or a pause changed in the meantime.
+pub async fn mark_agent_lost(
+    tx: &mut Transaction<'_, Any>,
+    id: Id,
+    cutoff: i64,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE monitors SET state = 'down', agent_lost_at = $1, state_changed_at = $1, updated_at = $1 \
+         WHERE id = $2 AND active = 1 AND agent_lost_at IS NULL AND state != 'down' \
+         AND EXISTS (SELECT 1 FROM agents a WHERE a.id = monitors.agent_id AND a.last_seen_at < $3)",
+    )
+    .bind(now)
+    .bind(id.to_string())
+    .bind(cutoff)
+    .execute(tx.deref_mut())
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Ends the lost mark. The monitor is pending until the agent sends the next result.
+/// Returns false when the mark was already gone.
+pub async fn clear_agent_lost(
+    tx: &mut Transaction<'_, Any>,
+    id: Id,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE monitors SET state = 'pending', consecutive_failures = 0, agent_lost_at = NULL, \
+         state_changed_at = $1, updated_at = $1 WHERE id = $2 AND agent_lost_at IS NOT NULL",
+    )
+    .bind(now)
+    .bind(id.to_string())
+    .execute(tx.deref_mut())
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Deletes an agent that no monitor uses. Returns false when it is missing or in use.
@@ -1753,20 +1862,23 @@ pub async fn delete_maintenance(
     Ok(result.rows_affected() > 0)
 }
 
+/// True for monitor `m` when a maintenance window covers the time bound at `$2`.
+const IN_MAINTENANCE: &str = "\
+EXISTS (SELECT 1 FROM maintenances w WHERE w.starts_at <= $2 AND w.ends_at >= $2 AND ( \
+    EXISTS (SELECT 1 FROM maintenance_monitors mm WHERE mm.maintenance_id = w.id AND mm.monitor_id = m.id) \
+    OR ( \
+        NOT EXISTS (SELECT 1 FROM maintenance_monitors mm WHERE mm.maintenance_id = w.id) \
+        AND w.page_id IS NOT NULL \
+        AND EXISTS (SELECT 1 FROM page_components pc WHERE pc.page_id = w.page_id AND pc.monitor_id = m.id) \
+    ) \
+))";
+
 pub async fn in_maintenance(db: &Database, monitor_id: Id, now: i64) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT COUNT(*) AS n FROM maintenances m \
-         WHERE m.starts_at <= $1 AND m.ends_at >= $1 AND ( \
-            EXISTS (SELECT 1 FROM maintenance_monitors mm WHERE mm.maintenance_id = m.id AND mm.monitor_id = $2) \
-            OR ( \
-                NOT EXISTS (SELECT 1 FROM maintenance_monitors mm WHERE mm.maintenance_id = m.id) \
-                AND m.page_id IS NOT NULL \
-                AND EXISTS (SELECT 1 FROM page_components pc WHERE pc.page_id = m.page_id AND pc.monitor_id = $2) \
-            ) \
-         )",
-    )
-    .bind(now)
+    let row = sqlx::query(&format!(
+        "SELECT COUNT(*) AS n FROM monitors m WHERE m.id = $1 AND {IN_MAINTENANCE}"
+    ))
     .bind(monitor_id.to_string())
+    .bind(now)
     .fetch_one(db.pool())
     .await?;
     let count: i64 = row.try_get("n")?;
@@ -2114,6 +2226,7 @@ fn map_monitor(row: &sqlx::any::AnyRow) -> Result<Monitor, sqlx::Error> {
                 CheckType::parse(&value).ok_or_else(|| corrupt(format!("check type {value}")))
             })
             .transpose()?,
+        agent_lost_at: optional_millis(row, "agent_lost_at")?,
     })
 }
 

@@ -246,6 +246,7 @@ fn monitor(
         ),
         agent_id: None,
         check_type: None,
+        agent_lost_at: None,
     }
 }
 

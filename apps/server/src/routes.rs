@@ -77,7 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/monitors/{id}/checks", post(run_check))
         .route("/monitors/{id}/active", post(set_active))
         .route("/agents", get(list_agents).post(create_agent))
-        .route("/agents/{id}", delete(delete_agent))
+        .route("/agents/{id}", put(rename_agent).delete(delete_agent))
         .route("/agents/{id}/token", post(rotate_agent_token))
         .route("/pages", get(list_pages).post(create_page))
         .route(
@@ -1202,20 +1202,11 @@ async fn create_agent(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     member.require_editor()?;
     let project_id = body_project(&state, &member, body.project_id).await?;
-    let name = body.name.trim();
-    if name.is_empty() || name.chars().count() > 60 {
-        return Err(AppError::field("name", "Use 1 to 60 characters."));
-    }
-    if repo::agent_name_taken(&state.db, project_id, name).await? {
-        return Err(AppError::field(
-            "name",
-            "An agent with this name already exists in this project.",
-        ));
-    }
+    let name = agent_name(&state, project_id, &body.name, None).await?;
     let id = Id::new();
     let token = generate_token();
     let now = TimestampMillis::now();
-    repo::insert_agent(&state.db, id, project_id, name, &hash_token(&token), now).await?;
+    repo::insert_agent(&state.db, id, project_id, &name, &hash_token(&token), now).await?;
     audit(&state.db, &member, "agent.created", "agent", Some(id), now).await;
     let agent = repo::workspace_agent(&state.db, member.workspace_id, id)
         .await?
@@ -1223,6 +1214,60 @@ async fn create_agent(
     let mut response = json!(present::AgentResponse::from(&agent));
     response["token"] = json!(token);
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// A name that is valid and free in the project. `except` is the agent that is renamed.
+async fn agent_name(
+    state: &AppState,
+    project_id: Id,
+    raw: &str,
+    except: Option<Id>,
+) -> Result<String, AppError> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(AppError::field("name", "Use 1 to 60 characters."));
+    }
+    if repo::agent_name_taken(&state.db, project_id, name, except).await? {
+        return Err(AppError::field(
+            "name",
+            "An agent with this name already exists in this project.",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+#[derive(Deserialize)]
+struct AgentRenameBody {
+    name: String,
+}
+
+/// Renames the agent. Its monitors move with their project, and a monitor never moves to
+/// another project, so the agent stays in its project.
+async fn rename_agent(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<Id>,
+    Json(body): Json<AgentRenameBody>,
+) -> Result<Json<present::AgentResponse>, AppError> {
+    member.require_editor()?;
+    let agent = repo::workspace_agent(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let name = agent_name(&state, agent.project_id, &body.name, Some(id)).await?;
+    repo::rename_agent(&state.db, id, &name).await?;
+    audit(
+        &state.db,
+        &member,
+        "agent.renamed",
+        "agent",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
+    Ok(Json(present::AgentResponse::from(&repo::Agent {
+        name,
+        ..agent
+    })))
 }
 
 /// Replaces the agent's token. The old token stops working at once.
@@ -2358,6 +2403,7 @@ fn materialize(
             .unwrap_or(now),
         agent_id: None,
         check_type: None,
+        agent_lost_at: None,
     }
 }
 

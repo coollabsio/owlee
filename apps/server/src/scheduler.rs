@@ -13,9 +13,10 @@ const RETENTION_MS: i64 = 14 * 86_400_000;
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut last_pruned = 0;
-        let mut last_recheck = TimestampMillis::now().as_millis();
+        let started = TimestampMillis::now();
+        let mut last_recheck = started.as_millis();
         loop {
-            if let Err(error) = tick(&state, &mut last_pruned, &mut last_recheck).await {
+            if let Err(error) = tick(&state, started, &mut last_pruned, &mut last_recheck).await {
                 tracing::error!(%error, "scheduler tick failed");
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -25,6 +26,7 @@ pub fn spawn(state: AppState) {
 
 async fn tick(
     state: &AppState,
+    started: TimestampMillis,
     last_pruned: &mut i64,
     last_recheck: &mut i64,
 ) -> Result<(), sqlx::Error> {
@@ -47,6 +49,11 @@ async fn tick(
                 Err(error) => tracing::error!(%error, %id, "monitor check failed"),
             }
         });
+    }
+    if let Err(error) =
+        engine::reconcile_agents(state, TimestampMillis::from_millis(now), started).await
+    {
+        tracing::error!(%error, "agent liveness check failed");
     }
     if now - *last_pruned >= PRUNE_EVERY_MS {
         repo::prune(&state.db, now - RETENTION_MS).await?;

@@ -92,6 +92,8 @@ pub struct MonitorResponse {
     /// When the shown state (up, down, paused, ...) last changed.
     pub state_changed_at: TimestampMillis,
     pub agent_id: Option<Id>,
+    /// The monitor is down because its agent is silent. No check failed.
+    pub agent_offline: bool,
     pub check_type: CheckType,
     pub uptime_24h: Option<f64>,
     pub uptime_30d: Option<f64>,
@@ -222,6 +224,7 @@ pub fn monitor_response(
         created_at: monitor.created_at,
         state_changed_at: monitor.state_changed_at,
         agent_id: monitor.agent_id,
+        agent_offline: monitor.agent_lost_at.is_some(),
         check_type: monitor.check_type.unwrap_or(match monitor.job_type {
             JobType::Http => CheckType::Http,
             JobType::Tcp => CheckType::Tcp,
@@ -413,12 +416,17 @@ pub fn public_incident(
 ) -> PublicIncident {
     let view = incident_response(incident, updates);
     let name = component.unwrap_or("A component");
+    let agent_lost = updates
+        .iter()
+        .any(|update| update.message.starts_with(crate::engine::AGENT_LOST_PREFIX));
     PublicIncident {
         id: view.id,
-        title: if incident.auto {
-            crate::engine::auto_title(name)
-        } else {
+        title: if !incident.auto {
             view.title
+        } else if agent_lost {
+            format!("{name} is not being checked")
+        } else {
+            crate::engine::auto_title(name)
         },
         status: view.status,
         impact: view.impact,
@@ -438,6 +446,10 @@ pub fn public_incident(
                     .ends_with(crate::engine::AUTO_RECOVERED_SUFFIX)
                 {
                     format!("Checks for {name}{}", crate::engine::AUTO_RECOVERED_SUFFIX)
+                } else if update.message.starts_with(crate::engine::AGENT_LOST_PREFIX) {
+                    format!("Checks for {name} stopped arriving. Its real state is unknown.")
+                } else if update.message.starts_with(crate::engine::AGENT_BACK_PREFIX) {
+                    format!("Checks for {name} continue. This incident was resolved automatically.")
                 } else {
                     update.message
                 },
