@@ -3,7 +3,7 @@
 Owlee is a self-hosted uptime monitor, status page, incident desk, error tracker, and cookieless web analytics tool from [coolLabs](https://github.com/coollabsio), the team behind [Coolify](https://github.com/coollabsio/coolify). One Rust binary serves the API, runs the checks, and hosts the React app. SQLite is the default database. Postgres is the same schema and the same queries, selected with a URL.
 
 > [!WARNING]
-> Owlee is in early development. Do not use it for production systems or for systems where a failure can cause a large financial loss. The schema, the API, and the configuration can change without a migration path.
+> Owlee is early software, and 0.1.0 is its first release. Do not use it for systems where a failure can cause a large financial loss. From 0.1.0 on, each release migrates the database forward when it starts. There is no downgrade. A binary refuses to start on a database that a newer release migrated. Back up before you upgrade, and pin a version tag such as `ghcr.io/coollabsio/owlee:0.1.0` instead of `latest`. The API and the configuration can still change between releases. [CHANGELOG.md](CHANGELOG.md) lists each change, and [Upgrading](#upgrading) has the steps.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
@@ -172,8 +172,13 @@ The image runs in production mode, so it needs `OWLEE_APP_KEY` and `OWLEE_PUBLIC
 
 `.github/workflows/image.yml` runs the CI tests, then publishes `ghcr.io/coollabsio/owlee` for `linux/amd64` and `linux/arm64`. A push to `main` publishes the tags `main` and the seven-character commit SHA. A release tag such as `v0.1.0` publishes `0.1.0`, `0.1`, and `latest`. A pre-release tag such as `v0.2.0-rc.1` publishes only `0.2.0-rc.1`. So `latest` is the newest stable release, not the tip of `main`. The same workflow can be run by hand from the Actions tab. If the package is not linked to this repository automatically, link it from the package settings.
 
+To run the published image, pin a version:
+
 ```bash
-docker pull ghcr.io/coollabsio/owlee:latest
+docker run -d --name owlee --restart unless-stopped -p 8080:8080 -v owlee-data:/var/lib/owlee \
+  -e OWLEE_APP_KEY="$OWLEE_APP_KEY" \
+  -e OWLEE_PUBLIC_ORIGIN=https://status.example.com \
+  ghcr.io/coollabsio/owlee:0.1.0
 ```
 
 The image listens on `0.0.0.0:8080`, stores SQLite in `/var/lib/owlee`, and uses `owlee healthcheck` for the container check. `deploy/compose.yaml` is the same shape as Orbit's compose file, with Postgres left as a commented service. It refuses to start until `OWLEE_APP_KEY` and `OWLEE_PUBLIC_ORIGIN` are set, in the shell or in `deploy/.env`. Without `OWLEE_IMAGE`, it builds `owlee:local` from the repository. To use the published image instead, run these commands from the repository root:
@@ -195,7 +200,7 @@ docker stop owlee
 docker run --rm -v owlee-data:/var/lib/owlee \
   -e OWLEE_PUBLIC_ORIGIN=https://status.example.com \
   -e OWLEE_APP_KEY="$OWLEE_APP_KEY" \
-  ghcr.io/coollabsio/owlee:latest setup-token rotate
+  ghcr.io/coollabsio/owlee:0.1.0 setup-token rotate
 ```
 
 With Compose, from the repository root, with the same variables set:
@@ -264,6 +269,14 @@ docker compose -f deploy/compose.yaml exec owlee /owlee db
 
 Every hour, Owlee deletes monitor check results older than `OWLEE_CHECK_RETENTION_DAYS` (14, at least 1), and error and analytics rows older than their own retention settings. After that pass, SQLite returns the freed pages to the file system with `PRAGMA incremental_vacuum`, so the file shrinks. This works on a database file that Owlee 0.1.0 or later created. An older file keeps its size and reuses the free pages for new rows. On Postgres, autovacuum makes the space of deleted rows reusable.
 
+## Upgrading
+
+1. Read [CHANGELOG.md](CHANGELOG.md) for every release between your version and the new one.
+2. Back up the database with `owlee backup` or `pg_dump`, and keep `OWLEE_APP_KEY` with the backup.
+3. Change the pinned tag, for example from `ghcr.io/coollabsio/owlee:0.1.0` to the new version, and start the new container. Migrations run when Owlee starts.
+
+Each migration runs once, inside a transaction. If a migration fails, Owlee does not start, and the database stays at the last migration that worked. To go back to an older release, stop Owlee, restore the backup from step 2, and start the older tag. An older binary refuses a database that a newer one migrated, with `database schema version ... is newer than this binary`. Data written after the upgrade is lost when you restore the backup.
+
 ## Agents
 
 An agent checks targets that the Owlee server cannot reach, for example a database on a private Docker network or a host in a VPC. The agent is the same binary. You start it on the target server or in the same network. It makes only outbound HTTPS requests to the server, so you do not need to open a port into the private network.
@@ -284,7 +297,7 @@ The checks are in environment variables or a config file on the agent host. The 
      -e OWLEE_AGENT_CHECK_1_PASSWORD=... \
      -e OWLEE_AGENT_CHECK_1_DATABASE=app \
      -e OWLEE_AGENT_CHECK_1_INTERVAL=30 \
-     ghcr.io/coollabsio/owlee:latest agent
+     ghcr.io/coollabsio/owlee:0.1.0 agent
    ```
 
    Attach the container to the network of the targets. For more checks, use `OWLEE_AGENT_CHECK_2_...`, `OWLEE_AGENT_CHECK_3_...`, and so on. Without Docker, download the static Linux binary with `curl -fsSL -o owlee https://github.com/coollabsio/owlee/releases/latest/download/owlee-$(uname -m)-linux && chmod +x owlee`, set the same variables, and run `./owlee agent --server https://status.example.com --token <token>`. Pushing a `v*` tag publishes these binaries (`.github/workflows/release.yml`).
@@ -419,7 +432,7 @@ examples        PHP, JavaScript, and Rust programs that send errors
 
 Cookieless analytics and the link shortener reimplement [Beacon](https://github.com/ShadowArcanist/beacons) by ShadowArcanist, which is MIT licensed. Copyright (c) 2026 ShadowArcanist. The tracker in `apps/server/src/insights/tracker.js` is wire-compatible with Beacon's tracker and also defines `window.owleeEvent`. See [NOTICE](NOTICE).
 
-Point Coolify at `ghcr.io/coollabsio/owlee`. `OWLEE_IMAGE` is the compose override. The source repository is `https://github.com/coollabsio/owlee`. API problem URLs use `https://owlee.io/problems/...`.
+Point Coolify at `ghcr.io/coollabsio/owlee:0.1.0`. `OWLEE_IMAGE` is the compose override. The source repository is `https://github.com/coollabsio/owlee`. API problem URLs use `https://owlee.io/problems/...`.
 
 ## License
 
