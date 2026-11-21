@@ -22,6 +22,7 @@ mod migrations;
 mod notify;
 mod outbound;
 mod ownership;
+mod paging;
 mod peer;
 mod present;
 mod quota;

@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown } from "reicon-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -6,8 +6,8 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Histogram } from "@/components/error-charts";
 import { StackFrames } from "@/components/event-view";
 import { Badge } from "@/components/issue-badge";
-import { Button, ErrorText, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
-import { api, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
+import { Button, ErrorText, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
+import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 
@@ -86,16 +86,30 @@ export function IssueDetailPage() {
   });
   const listSearch = (location.state as IssueLocationState | null)?.listSearch;
 
+  const filterQuery = new URLSearchParams({ range: view.range, environment: view.environment, q }).toString();
   const issue = useQuery({
     queryKey: ["issue", id, view.range, view.environment, q],
-    queryFn: () =>
-      api<IssueDetail>(
-        `/api/error-issues/${encodeURIComponent(id)}?${new URLSearchParams({ range: view.range, environment: view.environment, q })}`,
-      ),
+    queryFn: () => api<IssueDetail>(`/api/error-issues/${encodeURIComponent(id)}?${filterQuery}`),
     placeholderData: keepPreviousData,
   });
   const latest = issue.data?.latest ?? null;
   const pickedOther = Boolean(eventId) && eventId !== latest?.eventId;
+  const issuePath = issue.data ? `/api/error-issues/${encodeURIComponent(issue.data.id)}` : "";
+  const eventList = useInfiniteQuery({
+    queryKey: ["issue-events", issuePath, filterQuery],
+    queryFn: ({ pageParam }) => api<EventPage>(withCursor(`${issuePath}/events?${filterQuery}`, pageParam)),
+    initialPageParam: "",
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    enabled: Boolean(issuePath) && view.tab === "events",
+    placeholderData: keepPreviousData,
+  });
+  const currentEventId = eventId || latest?.eventId;
+  // Asked of the server, so Older and Newer reach events no loaded page holds.
+  const neighbors = useQuery({
+    queryKey: ["event-neighbors", issuePath, currentEventId, filterQuery],
+    queryFn: () => api<EventNeighbors>(`${issuePath}/events/${encodeURIComponent(currentEventId ?? "")}/neighbors?${filterQuery}`),
+    enabled: Boolean(issuePath && currentEventId) && view.tab !== "events",
+  });
   const picked = useQuery({
     queryKey: ["event", eventId],
     queryFn: () => api<NormalizedEvent>(`/api/error-events/${eventId}`),
@@ -127,8 +141,7 @@ export function IssueDetailPage() {
   }
   const data = issue.data;
   const event = pickedOther ? picked.data : latest;
-  const events = data.events;
-  const index = events.findIndex((item) => item.id === event?.eventId);
+  const events = flattenPages(eventList.data?.pages.map((page) => page.items));
   const parts = splitTitle(data.title);
   const issueKey = data.shortId || data.id;
   const rangeLabel = `last ${view.range}`;
@@ -150,8 +163,8 @@ export function IssueDetailPage() {
   const toggle = (key: SectionKey) => () => setOpen((state) => ({ ...state, [key]: !state[key] }));
   const jumps: { label: string; target?: string | null }[] = [
     { label: "First", target: data.firstEventId },
-    { label: "Older", target: index >= 0 ? events[index + 1]?.id : undefined },
-    { label: "Newer", target: index > 0 ? events[index - 1]?.id : undefined },
+    { label: "Older", target: neighbors.data?.olderId },
+    { label: "Newer", target: neighbors.data?.newerId },
     { label: "Latest", target: data.latestEventId },
   ];
 
@@ -253,7 +266,15 @@ export function IssueDetailPage() {
               description={`Latest ${events.length} of ${data.periodEventCount} in the ${rangeLabel}`}
               flush
             >
-              {events.length === 0 ? (
+              {eventList.isLoading ? (
+                <div className="space-y-2 p-4" aria-busy="true">
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-2/3" />
+                </div>
+              ) : eventList.isError ? (
+                <ErrorText error={eventList.error} />
+              ) : events.length === 0 ? (
                 <p className="p-6 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No events match these filters.</p>
               ) : (
                 <div className="overflow-x-auto">
@@ -286,6 +307,7 @@ export function IssueDetailPage() {
                       ))}
                     </tbody>
                   </table>
+                  <LoadMore query={eventList} label="Load older events" />
                 </div>
               )}
             </LayerCard>
@@ -523,7 +545,7 @@ function CopyButton({ text, label, quiet }: { text: string; label: string; quiet
   );
 }
 
-function useDebounced<T>(value: T, ms: number) {
+export function useDebounced<T>(value: T, ms: number) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(value), ms);

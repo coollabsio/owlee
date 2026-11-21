@@ -1,11 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, X } from "reicon-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
-import { Button, Input, LayerCard, PageHeader, Select, SkeletonRows } from "@/components/ui";
-import { api, type ErrorApp, type Issue, type IssueFeed } from "@/lib/api";
+import { Button, Input, LayerCard, LoadMore, PageHeader, Select, SkeletonRows } from "@/components/ui";
+import { api, flattenPages, withCursor, type ErrorApp, type Issue, type IssueFeed } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 import { useListScope } from "@/lib/workspace";
@@ -98,11 +98,14 @@ export function IssuesPage() {
 
   const scope = useListScope();
   const apps = useQuery({ queryKey: scope.key("apps"), queryFn: () => api<ErrorApp[]>(scope.path("/api/error-apps")) });
-  const feed = useQuery({
+  const feed = useInfiniteQuery({
     queryKey: scope.key("issues", feedQuery),
-    queryFn: () => api<IssueFeed>(scope.path(`/api/error-issues?${feedQuery}`)),
+    queryFn: ({ pageParam }) => api<IssueFeed>(withCursor(scope.path(`/api/error-issues?${feedQuery}`), pageParam)),
+    initialPageParam: "",
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
     refetchInterval: 4000,
   });
+  const firstPage = feed.data?.pages[0];
   const bulk = useMutation({
     mutationFn: (body: { ids: string[]; status: Issue["status"] }) =>
       api("/api/error-issues/bulk", { method: "POST", body: JSON.stringify(body) }),
@@ -112,8 +115,8 @@ export function IssuesPage() {
     },
   });
 
-  const issues = feed.data?.issues ?? [];
-  const counts = feed.data?.counts;
+  const issues = flattenPages(feed.data?.pages.map((page) => page.issues));
+  const counts = firstPage?.counts;
   const total = counts ? counts.unresolved + counts.resolved + counts.ignored : 0;
   const visible = new Set(issues.map((issue) => issue.id));
   const selected = selection.query === feedQuery ? selection.ids.filter((id) => visible.has(id)) : [];
@@ -207,7 +210,7 @@ export function IssuesPage() {
               aria-label="Environment"
               value={filters.environment}
               onChange={(environment) => setFilters({ environment })}
-              options={[{ value: "", label: "All environments" }, ...(feed.data?.environments ?? []).map((item) => ({ value: item, label: item }))]}
+              options={[{ value: "", label: "All environments" }, ...(firstPage?.environments ?? []).map((item) => ({ value: item, label: item }))]}
             />
           </div>
           <div className="w-28">
@@ -326,11 +329,7 @@ export function IssuesPage() {
             </table>
           </div>
         ) : null}
-        {feed.data?.truncated ? (
-          <p className="border-t border-[var(--ui-divider)] px-4 py-2.5 text-[0.75rem] text-[var(--ui-fg-faint)]">
-            Showing the first {issues.length} issues. Narrow the filters to see more.
-          </p>
-        ) : null}
+        <LoadMore query={feed} label="Load more issues" />
       </LayerCard>
     </div>
   );

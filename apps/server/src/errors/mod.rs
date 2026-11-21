@@ -31,6 +31,11 @@ pub fn api_routes() -> Router<AppState> {
             "/error-issues/{id}",
             get(http::get_issue).patch(http::update_issue),
         )
+        .route("/error-issues/{id}/events", get(http::issue_events))
+        .route(
+            "/error-issues/{id}/events/{event_id}/neighbors",
+            get(http::event_neighbors),
+        )
         .route("/error-events/{id}", get(http::get_event))
         .route(
             "/privacy/errors",

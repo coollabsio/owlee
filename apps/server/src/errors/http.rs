@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use super::store::{self, App, EventSummary, IssueRow};
 use crate::error::AppError;
+use crate::paging::PageParams;
 use crate::state::AppState;
 use crate::workspaces::{Member, ProjectFilter, require_project};
 
@@ -171,15 +172,17 @@ pub struct IssueFeed {
     pub issues: Vec<IssueRow>,
     pub environments: Vec<String>,
     pub counts: store::IssueCounts,
-    pub truncated: bool,
+    pub next_cursor: Option<String>,
 }
+
+/// The largest page of issues one request returns.
+const ISSUE_PAGE: i64 = 50;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueDetail {
     #[serde(flatten)]
     pub issue: IssueRow,
-    pub events: Vec<EventSummary>,
     pub latest: Option<Value>,
     pub first_event_id: Option<String>,
     pub latest_event_id: Option<String>,
@@ -194,7 +197,9 @@ pub async fn list_issues(
     member: Member,
     Query(filter): Query<IssueFilter>,
     Query(project): Query<ProjectFilter>,
+    Query(page): Query<PageParams>,
 ) -> Result<Json<IssueFeed>, AppError> {
+    let paging = page.parse(ISSUE_PAGE)?;
     let project_id = project
         .resolve(&state.db, member.workspace_id)
         .await?
@@ -224,13 +229,14 @@ pub async fn list_issues(
             since: filter.since,
             sort: filter.sort,
         },
+        &paging,
     )
     .await?;
     Ok(Json(IssueFeed {
         issues: page.issues,
         environments,
         counts: page.counts,
-        truncated: page.truncated,
+        next_cursor: page.next_cursor,
     }))
 }
 
@@ -241,16 +247,13 @@ pub async fn get_issue(
     Query(filter): Query<DetailFilter>,
 ) -> Result<Json<IssueDetail>, AppError> {
     let mut issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    let filter = filter.events();
     let analytics = store::issue_analytics(
         &state.db,
         &issue.id,
-        if filter.range.is_empty() {
-            "14d"
-        } else {
-            &filter.range
-        },
-        &filter.environment,
-        &filter.q,
+        filter.range,
+        filter.environment,
+        filter.search,
     )
     .await?;
     let (first_event_id, latest_event_id) = store::edge_event_ids(&state.db, &issue.id).await?;
@@ -260,7 +263,6 @@ pub async fn get_issue(
     issue.user_count = analytics.users;
     Ok(Json(IssueDetail {
         issue,
-        events: analytics.events,
         latest: analytics
             .latest_payload
             .map(|payload| normalized_payload(&payload)),
@@ -270,6 +272,68 @@ pub async fn get_issue(
         histogram: analytics.histogram,
         tags: analytics.tags,
     }))
+}
+
+/// The largest page of an issue's events one request returns.
+const EVENT_PAGE: i64 = 50;
+
+impl DetailFilter {
+    fn events(&self) -> store::EventFilter<'_> {
+        store::EventFilter {
+            range: if self.range.is_empty() {
+                "14d"
+            } else {
+                &self.range
+            },
+            environment: &self.environment,
+            search: &self.q,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPage {
+    pub items: Vec<EventSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// An issue's events, newest first, under the detail page's filters.
+pub async fn issue_events(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<String>,
+    Query(filter): Query<DetailFilter>,
+    Query(page): Query<PageParams>,
+) -> Result<Json<EventPage>, AppError> {
+    let paging = page.parse(EVENT_PAGE)?;
+    let issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    let events = store::issue_events(&state.db, &issue.id, &filter.events(), &paging).await?;
+    Ok(Json(EventPage {
+        items: events.items,
+        next_cursor: events.next_cursor,
+    }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNeighbors {
+    pub older_id: Option<String>,
+    pub newer_id: Option<String>,
+}
+
+/// The events next to one event, under the detail page's filters, so
+/// Older and Newer reach every event and not only the loaded page.
+pub async fn event_neighbors(
+    State(state): State<AppState>,
+    member: Member,
+    Path((id, event_id)): Path<(String, String)>,
+    Query(filter): Query<DetailFilter>,
+) -> Result<Json<EventNeighbors>, AppError> {
+    let issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    let (older_id, newer_id) =
+        store::event_neighbors(&state.db, &issue.id, &event_id, &filter.events()).await?;
+    Ok(Json(EventNeighbors { older_id, newer_id }))
 }
 
 #[derive(Deserialize)]

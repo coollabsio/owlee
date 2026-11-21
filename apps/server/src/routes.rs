@@ -26,6 +26,7 @@ use crate::engine;
 use crate::error::AppError;
 use crate::instance_settings::{self, SmtpInput};
 use crate::notify;
+use crate::paging::{Cursor, Key, PageParams, Paged, Paging};
 use crate::peer::Client;
 use crate::present::{self, Stats};
 use crate::repo::{
@@ -106,6 +107,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/notifications/{id}/test", post(test_channel))
         .route("/public/{slug}", get(public_page))
+        .route("/public/{slug}/incidents", get(public_page_incidents))
         .merge(crate::insights::api_routes())
         .merge(crate::errors::api_routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), same_origin));
@@ -982,12 +984,12 @@ async fn overview(
             )
         })
         .collect::<Vec<_>>();
-    let incidents = repo::list_incidents(&state.db, member.workspace_id, project)
-        .await?
-        .into_iter()
-        .filter(|incident| incident.status != IncidentStatus::Resolved)
-        .take(8)
-        .collect::<Vec<_>>();
+    let open = repo::IncidentFilter {
+        project,
+        status: repo::IncidentStatusFilter::Unresolved,
+        ..Default::default()
+    };
+    let incidents = repo::list_incidents(&state.db, member.workspace_id, &open, None, 8).await?;
     let incidents = incident_views(&state, incidents).await?;
     let activity = repo::recent_audit(&state.db, member.workspace_id, 12).await?;
     Ok(Json(json!({
@@ -1687,14 +1689,53 @@ struct UpdateEditBody {
     message: String,
 }
 
+/// The largest page of incidents one request returns.
+const INCIDENT_PAGE: i64 = 50;
+
+#[derive(Deserialize)]
+struct IncidentListQuery {
+    #[serde(default)]
+    q: String,
+    status: Option<IncidentStatus>,
+    impact: Option<IncidentImpact>,
+}
+
 async fn list_incidents(
     State(state): State<AppState>,
     member: Member,
-    Query(filter): Query<ProjectFilter>,
-) -> Result<Json<Vec<present::IncidentResponse>>, AppError> {
-    let project = filter.resolve(&state.db, member.workspace_id).await?;
-    let incidents = repo::list_incidents(&state.db, member.workspace_id, project).await?;
-    Ok(Json(incident_views(&state, incidents).await?))
+    Query(project): Query<ProjectFilter>,
+    Query(query): Query<IncidentListQuery>,
+    Query(page): Query<PageParams>,
+) -> Result<Json<Paged<present::IncidentResponse>>, AppError> {
+    let paging = page.parse(INCIDENT_PAGE)?;
+    let filter = repo::IncidentFilter {
+        project: project.resolve(&state.db, member.workspace_id).await?,
+        status: query.status.map_or(
+            repo::IncidentStatusFilter::Any,
+            repo::IncidentStatusFilter::Is,
+        ),
+        impact: query.impact,
+        search: query.q,
+    };
+    let incidents = repo::list_incidents(
+        &state.db,
+        member.workspace_id,
+        &filter,
+        paging.int_after()?,
+        paging.fetch(),
+    )
+    .await?;
+    let page = paging.finish(incidents, |incident| {
+        Cursor::new(
+            Key::Int(incident.started_at.as_millis()),
+            incident.id.to_string(),
+        )
+    });
+    let items = incident_views(&state, page.items).await?;
+    Ok(Json(Paged {
+        items,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 async fn create_incident(
@@ -2201,21 +2242,91 @@ async fn test_channel(
     Ok(Json(channel_view(&state, channel).await?))
 }
 
-async fn public_page(
-    State(state): State<AppState>,
-    client: Client,
-    Path(slug): Path<String>,
-) -> Result<Json<present::PublicPage>, AppError> {
+/// The largest page of a status page's incident history.
+const PUBLIC_INCIDENT_PAGE: i64 = 20;
+
+/// A published page by slug, after the caller's public rate limit.
+async fn published_page(
+    state: &AppState,
+    client: &Client,
+    slug: &str,
+) -> Result<repo::Page, AppError> {
     limit(
         &state.public_page_limit,
         &format!("public-page:{}", client.limit_key),
     )?;
-    let page = repo::page_by_slug(&state.db, &slug)
+    let page = repo::page_by_slug(&state.db, slug)
         .await?
         .ok_or(AppError::NotFound)?;
     if !page.published {
         return Err(AppError::NotFound);
     }
+    Ok(page)
+}
+
+async fn public_incidents(
+    state: &AppState,
+    page_id: Id,
+    components: &[repo::Component],
+    paging: &Paging,
+) -> Result<Paged<present::PublicIncident>, AppError> {
+    let incidents =
+        repo::incidents_for_page(&state.db, page_id, paging.int_after()?, paging.fetch()).await?;
+    let page = paging.finish(incidents, |incident| {
+        Cursor::new(
+            Key::Int(incident.started_at.as_millis()),
+            incident.id.to_string(),
+        )
+    });
+    Ok(Paged {
+        items: public_views(state, page.items, components).await?,
+        next_cursor: page.next_cursor,
+    })
+}
+
+async fn public_views(
+    state: &AppState,
+    incidents: Vec<Incident>,
+    components: &[repo::Component],
+) -> Result<Vec<present::PublicIncident>, AppError> {
+    let incident_ids = incidents
+        .iter()
+        .map(|incident| incident.id)
+        .collect::<Vec<_>>();
+    let updates = repo::updates_for(&state.db, &incident_ids).await?;
+    Ok(incidents
+        .iter()
+        .map(|incident| {
+            let component = components
+                .iter()
+                .find(|component| Some(component.monitor_id) == incident.monitor_id)
+                .map(|component| component.name.as_str());
+            present::public_incident(incident, &updates, component)
+        })
+        .collect())
+}
+
+/// Older entries of a status page's incident history, after `?cursor=`.
+async fn public_page_incidents(
+    State(state): State<AppState>,
+    client: Client,
+    Path(slug): Path<String>,
+    Query(params): Query<PageParams>,
+) -> Result<Json<Paged<present::PublicIncident>>, AppError> {
+    let paging = params.parse(PUBLIC_INCIDENT_PAGE)?;
+    let page = published_page(&state, &client, &slug).await?;
+    let components = repo::components(&state.db, page.id).await?;
+    Ok(Json(
+        public_incidents(&state, page.id, &components, &paging).await?,
+    ))
+}
+
+async fn public_page(
+    State(state): State<AppState>,
+    client: Client,
+    Path(slug): Path<String>,
+) -> Result<Json<present::PublicPage>, AppError> {
+    let page = published_page(&state, &client, &slug).await?;
     let components = repo::components(&state.db, page.id).await?;
     let component_monitors = components
         .iter()
@@ -2243,29 +2354,21 @@ async fn public_page(
             bars: response.bars,
         });
     }
-    let incidents = repo::incidents_for_page(&state.db, page.id).await?;
-    let incident_ids = incidents
+    let incidents = public_incidents(
+        &state,
+        page.id,
+        &components,
+        &Paging::first(PUBLIC_INCIDENT_PAGE),
+    )
+    .await?;
+    let open_incidents = repo::open_incidents_for_page(&state.db, page.id).await?;
+    let open = open_incidents
         .iter()
-        .map(|incident| incident.id)
-        .collect::<Vec<_>>();
-    let updates = repo::updates_for(&state.db, &incident_ids).await?;
-    let incidents = incidents
-        .iter()
-        .map(|incident| {
-            let component = components
-                .iter()
-                .find(|component| Some(component.monitor_id) == incident.monitor_id)
-                .map(|component| component.name.as_str());
-            present::public_incident(incident, &updates, component)
-        })
-        .collect::<Vec<_>>();
-    let open = incidents
-        .iter()
-        .filter(|incident| incident.status != IncidentStatus::Resolved)
         .map(|incident| OpenIncident {
             impact: incident.impact,
         })
         .collect::<Vec<_>>();
+    let open_incidents = public_views(&state, open_incidents, &components).await?;
     let banner = page_banner(&states, &open);
     let now = TimestampMillis::now();
     let maintenances = repo::maintenances_for_page(&state.db, page.id)
@@ -2282,7 +2385,9 @@ async fn public_page(
         homepage_url: page.homepage_url,
         banner: present::banner_label(banner),
         components: public_components,
-        incidents,
+        open_incidents,
+        incidents: incidents.items,
+        incidents_next_cursor: incidents.next_cursor,
         maintenances,
     }))
 }

@@ -1,10 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { ApiError, api, type Incident, type Monitor, type StatusPage } from "@/lib/api";
+import { ApiError, api, flattenPages, withCursor, type Incident, type Monitor, type Paged, type StatusPage } from "@/lib/api";
+import { useDebounced } from "@/pages/issue-detail";
 import { useCanEdit } from "@/lib/me";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 import { formatTime, stateLabel } from "@/lib/utils";
@@ -35,20 +36,28 @@ function CardText({ title, body }: { title: string; body?: string }) {
 
 export function IncidentsPage() {
   const scope = useListScope();
-  const query = useQuery({ queryKey: scope.key("incidents"), queryFn: () => api<Incident[]>(scope.path("/api/incidents")) });
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [impactFilter, setImpactFilter] = useState<Incident["impact"] | null>(null);
   const [statusFilter, setStatusFilter] = useState<Incident["status"] | null>(null);
-  const needle = search.trim().toLowerCase();
-  const filtered = (query.data ?? []).filter(
-    (incident) =>
-      (!needle || incident.title.toLowerCase().includes(needle)) &&
-      (!impactFilter || incident.impact === impactFilter) &&
-      (!statusFilter || incident.status === statusFilter),
-  );
-  const { rows, sort, toggle } = useSort(filtered, {
+  const needle = useDebounced(search.trim(), 300);
+  const filterQuery = new URLSearchParams({
+    ...(needle ? { q: needle } : {}),
+    ...(impactFilter ? { impact: impactFilter } : {}),
+    ...(statusFilter ? { status: statusFilter } : {}),
+  }).toString();
+  // The server filters, so a match on a page not yet loaded still shows up.
+  const query = useInfiniteQuery({
+    queryKey: scope.key("incidents", filterQuery),
+    queryFn: ({ pageParam }) => api<Paged<Incident>>(withCursor(scope.path(`/api/incidents?${filterQuery}`), pageParam)),
+    initialPageParam: "",
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    placeholderData: keepPreviousData,
+  });
+  const loaded = flattenPages(query.data?.pages.map((page) => page.items));
+  const unfiltered = !needle && !impactFilter && !statusFilter;
+  const { rows, sort, toggle } = useSort(loaded, {
     title: (incident) => incident.title,
     impact: (incident) => impacts.findIndex((item) => item.value === incident.impact),
     status: (incident) => statuses.findIndex((item) => item.value === incident.status),
@@ -65,12 +74,12 @@ export function IncidentsPage() {
         title="Incidents"
         description="A timeline customers read on the status page. Automatic incidents open after repeated failures."
       />
-      {(query.data?.length ?? 0) === 0 && !query.isLoading ? (
+      {unfiltered && query.data && loaded.length === 0 && !query.isPlaceholderData ? (
         <Empty title="No incidents" body="When a monitor crosses its failure threshold, Owlee files one. You can also write one by hand." action={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : undefined} />
       ) : (
         <LayerCard
           title="All incidents"
-          description={query.data ? `${query.data.length} total` : undefined}
+          description={query.data ? (query.hasNextPage ? `Newest ${loaded.length}` : `${loaded.length} ${unfiltered ? "total" : "matching"}`) : undefined}
           actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>Report incident</Button> : null}
           flush
         >
@@ -137,6 +146,7 @@ export function IncidentsPage() {
                   })}
                 </tbody>
               </table>
+              <LoadMore query={query} label="Load older incidents" />
             </div>
           )}
         </LayerCard>

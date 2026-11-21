@@ -7,6 +7,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::paging::{Cursor, Key, Paged, Paging};
 
 #[derive(Debug, Clone)]
 pub struct App {
@@ -264,8 +265,6 @@ pub struct TagGroup {
 }
 
 pub struct IssueAnalytics {
-    /// Newest first, at most `EVENT_LIST_LIMIT`.
-    pub events: Vec<EventSummary>,
     pub latest_payload: Option<String>,
     pub histogram: Vec<i64>,
     pub users: i64,
@@ -273,12 +272,8 @@ pub struct IssueAnalytics {
     pub tags: Vec<TagGroup>,
 }
 
-const EVENT_LIST_LIMIT: usize = 100;
 const TAG_KEY_LIMIT: usize = 10;
 const TAG_VALUE_LIMIT: usize = 4;
-
-/// The feed shows at most this many issues, after sorting.
-const ISSUE_LIMIT: usize = 200;
 
 /// Issues with their app and its project, for workspace filters.
 const ISSUE_SOURCE: &str = "issues i
@@ -329,24 +324,91 @@ pub struct IssuePage {
     pub issues: Vec<IssueRow>,
     /// Counts per status under the same filters, ignoring the status filter.
     pub counts: IssueCounts,
-    pub truncated: bool,
+    pub next_cursor: Option<String>,
 }
 
-pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage, AppError> {
+/// The feed's orders. Each breaks ties by id in the same direction, so
+/// `(key, id)` is a total order a cursor can resume from.
+#[derive(Clone, Copy)]
+enum IssueSort {
+    LastSeen,
+    FirstSeen,
+    Events,
+    Users,
+}
+
+impl IssueSort {
+    fn parse(sort: &str) -> Self {
+        match sort {
+            "age" | "first_seen" => Self::FirstSeen,
+            "events" => Self::Events,
+            "users" => Self::Users,
+            _ => Self::LastSeen,
+        }
+    }
+
+    fn column(self) -> &'static str {
+        match self {
+            Self::LastSeen => "t.last_seen",
+            Self::FirstSeen => "t.first_seen",
+            Self::Events => "t.period_event_count",
+            Self::Users => "t.user_count",
+        }
+    }
+
+    fn ascending(self) -> bool {
+        matches!(self, Self::FirstSeen)
+    }
+
+    fn cursor(self, issue: &IssueRow) -> Cursor {
+        let key = match self {
+            Self::LastSeen => Key::Text(issue.last_seen.clone()),
+            Self::FirstSeen => Key::Text(issue.first_seen.clone()),
+            Self::Events => Key::Int(issue.period_event_count),
+            Self::Users => Key::Int(issue.user_count),
+        };
+        Cursor::new(key, issue.id.clone())
+    }
+}
+
+enum Bound<'a> {
+    Text(&'a str),
+    Int(i64),
+}
+
+pub async fn list_issues(
+    db: &Database,
+    query: &IssueQuery,
+    paging: &Paging,
+) -> Result<IssuePage, AppError> {
     let since = since_bound(&query.since);
     let since_flag = if since.is_empty() { "" } else { "1" };
     let filters = issue_filter_binds(query, &since);
-    let order = match query.sort.as_str() {
-        "age" | "first_seen" => "i.first_seen ASC",
-        "events" => "period_event_count DESC",
-        "users" => "user_count DESC",
-        _ => "i.last_seen DESC",
+    let sort = IssueSort::parse(&query.sort);
+    let after = match sort {
+        IssueSort::LastSeen | IssueSort::FirstSeen => {
+            paging.text_after()?.map(|(key, id)| (Bound::Text(key), id))
+        }
+        IssueSort::Events | IssueSort::Users => {
+            paging.int_after()?.map(|(key, id)| (Bound::Int(key), id))
+        }
     };
-    // The stats are columns so the sort runs before the limit.
+    let column = sort.column();
+    let (direction, past) = if sort.ascending() {
+        ("ASC", ">")
+    } else {
+        ("DESC", "<")
+    };
+    let keyset = if after.is_some() {
+        format!("({column} {past} ? OR ({column} = ? AND t.id {past} ?))")
+    } else {
+        "1 = 1".to_owned()
+    };
+    // The stats are columns so the sort and the cursor see them.
     let sql = statement(
         db,
         &format!(
-            "SELECT {ISSUE_COLUMNS},
+            "SELECT * FROM (SELECT {ISSUE_COLUMNS},
                 CAST(CASE WHEN ? = '' THEN i.event_count
                      ELSE (SELECT COUNT(*) FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?)
                 END AS BIGINT) AS period_event_count,
@@ -354,10 +416,10 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
                       WHERE ev.issue_id = i.id AND ev.user_key != '' AND (? = '' OR ev.timestamp >= ?)) AS BIGINT) AS user_count
          FROM {ISSUE_SOURCE}
          WHERE (? = '' OR i.status = ?)
-           AND {ISSUE_FILTERS}
-         ORDER BY {order}, i.last_seen DESC, i.id
-         LIMIT {}",
-            ISSUE_LIMIT + 1
+           AND {ISSUE_FILTERS}) t
+         WHERE {keyset}
+         ORDER BY {column} {direction}, t.id {direction}
+         LIMIT ?"
         ),
     );
     let mut select = sqlx::query(&sql)
@@ -370,11 +432,16 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
     for value in &filters {
         select = select.bind(value);
     }
-    let rows = select.fetch_all(db.pool()).await?;
-    let truncated = rows.len() > ISSUE_LIMIT;
-    let mut issues = rows
+    if let Some((key, id)) = after {
+        select = match key {
+            Bound::Text(key) => select.bind(key).bind(key),
+            Bound::Int(key) => select.bind(key).bind(key),
+        }
+        .bind(id);
+    }
+    let rows = select.bind(paging.fetch()).fetch_all(db.pool()).await?;
+    let issues = rows
         .iter()
-        .take(ISSUE_LIMIT)
         .map(|row| {
             let mut issue = issue_from_row(row)?;
             issue.period_event_count = row.try_get("period_event_count")?;
@@ -382,6 +449,8 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
             Ok(issue)
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+    let page = paging.finish(issues, |issue| sort.cursor(issue));
+    let mut issues = page.items;
     attach_trends(db, &mut issues).await?;
 
     let sql = statement(
@@ -410,7 +479,7 @@ pub async fn list_issues(db: &Database, query: &IssueQuery) -> Result<IssuePage,
     Ok(IssuePage {
         issues,
         counts,
-        truncated,
+        next_cursor: page.next_cursor,
     })
 }
 
@@ -970,7 +1039,6 @@ pub async fn issue_analytics(
     let mut users = std::collections::BTreeSet::new();
     let mut tags: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
         std::collections::BTreeMap::new();
-    let mut summaries = Vec::new();
     let mut latest_payload = None;
     for row in &matched {
         let timestamp: String = row.try_get("timestamp")?;
@@ -984,10 +1052,8 @@ pub async fn issue_analytics(
                 histogram[index] += 1;
             }
         }
-        let mut user = None;
         if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&payload) {
             let normalized = owlee_errors::normalize_event(raw);
-            user = user_label(&normalized.user);
             for tag in normalized.tags {
                 *tags
                     .entry(tag.key)
@@ -998,17 +1064,6 @@ pub async fn issue_analytics(
         }
         if latest_payload.is_none() {
             latest_payload = Some(payload);
-        }
-        if summaries.len() < EVENT_LIST_LIMIT {
-            summaries.push(EventSummary {
-                id: row.try_get("id")?,
-                timestamp,
-                level: row.try_get("level")?,
-                title: row.try_get("title")?,
-                environment: row.try_get("environment")?,
-                release: row.try_get("release")?,
-                user,
-            });
         }
     }
     let mut groups: Vec<(i64, TagGroup)> = tags
@@ -1027,13 +1082,143 @@ pub async fn issue_analytics(
     groups.sort_by(|left, right| right.0.cmp(&left.0));
     groups.truncate(TAG_KEY_LIMIT);
     Ok(IssueAnalytics {
-        events: summaries,
         latest_payload,
         histogram,
         users: users.len() as i64,
         period_events: matched.len() as i64,
         tags: groups.into_iter().map(|(_, group)| group).collect(),
     })
+}
+
+/// Narrows an issue's events like the detail page's filters.
+pub struct EventFilter<'a> {
+    pub range: &'a str,
+    pub environment: &'a str,
+    pub search: &'a str,
+}
+
+/// `EVENT_FILTERS` binds, in order.
+fn event_filter_binds(filter: &EventFilter) -> [String; 6] {
+    let search = if filter.search.trim().is_empty() {
+        String::new()
+    } else {
+        like_pattern(filter.search)
+    };
+    [
+        filter.environment.to_owned(),
+        filter.environment.to_owned(),
+        search.clone(),
+        search,
+        since_bound(filter.range),
+        since_bound(filter.range),
+    ]
+}
+
+const EVENT_FILTERS: &str = "(? = '' OR environment = ?)
+           AND (? = '' OR lower(title) LIKE ? ESCAPE '\\')
+           AND (? = '' OR timestamp >= ?)";
+
+const EVENT_SUMMARY_COLUMNS: &str = "id, timestamp, level, title, environment, release, payload";
+
+fn event_summary(row: &sqlx::any::AnyRow) -> Result<EventSummary, AppError> {
+    let payload: String = row.try_get("payload")?;
+    let user = serde_json::from_str::<serde_json::Value>(&payload)
+        .ok()
+        .and_then(|raw| user_label(&owlee_errors::normalize_event(raw).user));
+    Ok(EventSummary {
+        id: row.try_get("id")?,
+        timestamp: row.try_get("timestamp")?,
+        level: row.try_get("level")?,
+        title: row.try_get("title")?,
+        environment: row.try_get("environment")?,
+        release: row.try_get("release")?,
+        user,
+    })
+}
+
+/// An issue's events, newest first by `(timestamp, id)`. The caller checks
+/// that the issue is in its workspace.
+pub async fn issue_events(
+    db: &Database,
+    issue_id: &str,
+    filter: &EventFilter<'_>,
+    paging: &Paging,
+) -> Result<Paged<EventSummary>, AppError> {
+    let after = paging.text_after()?;
+    let keyset = if after.is_some() {
+        "AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+    } else {
+        ""
+    };
+    let sql = statement(
+        db,
+        &format!(
+            "SELECT {EVENT_SUMMARY_COLUMNS} FROM events
+             WHERE issue_id = ? AND {EVENT_FILTERS} {keyset}
+             ORDER BY timestamp DESC, id DESC LIMIT ?"
+        ),
+    );
+    let mut query = sqlx::query(&sql).bind(issue_id);
+    for value in event_filter_binds(filter) {
+        query = query.bind(value);
+    }
+    if let Some((timestamp, id)) = after {
+        query = query.bind(timestamp).bind(timestamp).bind(id);
+    }
+    let rows = query.bind(paging.fetch()).fetch_all(db.pool()).await?;
+    let events = rows
+        .iter()
+        .map(event_summary)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(paging.finish(events, |event| {
+        Cursor::new(Key::Text(event.timestamp.clone()), event.id.clone())
+    }))
+}
+
+/// The filtered events just older and just newer than `event_id`, which must
+/// belong to the issue. The caller checks that the issue is in its workspace.
+pub async fn event_neighbors(
+    db: &Database,
+    issue_id: &str,
+    event_id: &str,
+    filter: &EventFilter<'_>,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let sql = statement(
+        db,
+        "SELECT timestamp FROM events WHERE id = ? AND issue_id = ?",
+    );
+    let row = sqlx::query(&sql)
+        .bind(event_id)
+        .bind(issue_id)
+        .fetch_optional(db.pool())
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let timestamp: String = row.try_get("timestamp")?;
+    let mut ids = [None, None];
+    for (slot, (past, direction)) in [("<", "DESC"), (">", "ASC")].into_iter().enumerate() {
+        let sql = statement(
+            db,
+            &format!(
+                "SELECT id FROM events
+                 WHERE issue_id = ? AND {EVENT_FILTERS}
+                   AND (timestamp {past} ? OR (timestamp = ? AND id {past} ?))
+                 ORDER BY timestamp {direction}, id {direction} LIMIT 1"
+            ),
+        );
+        let mut query = sqlx::query(&sql).bind(issue_id);
+        for value in event_filter_binds(filter) {
+            query = query.bind(value);
+        }
+        let row = query
+            .bind(&timestamp)
+            .bind(&timestamp)
+            .bind(event_id)
+            .fetch_optional(db.pool())
+            .await?;
+        ids[slot] = row.map(|row| row.try_get("id")).transpose()?;
+    }
+    let [older, newer] = ids;
+    Ok((older, newer))
 }
 
 fn user_label(user: &serde_json::Value) -> Option<String> {

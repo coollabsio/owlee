@@ -443,9 +443,32 @@ export type PublicPage = {
   homepage_url: string | null;
   banner: "operational" | "degraded" | "partial_outage" | "major_outage";
   components: PublicComponent[];
+  /** Every unresolved incident, however old. */
+  open_incidents: PublicIncident[];
+  /** The newest page of the history, open or not. `/incidents?cursor=` serves older ones. */
   incidents: PublicIncident[];
+  incidents_next_cursor: string | null;
   maintenances: PublicMaintenance[];
 };
+
+/** `path` with `?cursor=` appended, or `path` alone for the first page. */
+export function withCursor(path: string, cursor: string) {
+  if (!cursor) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}cursor=${encodeURIComponent(cursor)}`;
+}
+
+/** Concatenates loaded pages, keeping the first copy of a row that moved between pages while they loaded. */
+export function flattenPages<T extends { id: string }>(pages: T[][] | undefined) {
+  const seen = new Set<string>();
+  return (pages ?? []).flat().filter((row) => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+}
+
+/** One page of a keyset-paged list. Pass `next_cursor` back as `?cursor=`; null means the last page. */
+export type Paged<T> = { items: T[]; next_cursor: string | null };
 
 export type PublicIncident = Omit<Incident, "project_id" | "page_id" | "monitor_id">;
 
@@ -634,8 +657,8 @@ export type IssueFeed = {
   environments: string[];
   /** Per status under the same filters, ignoring the status filter. */
   counts: Record<Issue["status"], number>;
-  /** More issues match than the feed returns. */
-  truncated: boolean;
+  /** Pass back as `?cursor=` for the next page. Null on the last page. */
+  nextCursor: string | null;
 };
 
 /** One tag key with its most common values among the events in range. */
@@ -707,10 +730,13 @@ export type NormalizedEvent = {
   raw: unknown;
 };
 
+export type EventPage = { items: EventSummary[]; nextCursor: string | null };
+
+/** The filtered events either side of one event. */
+export type EventNeighbors = { olderId: string | null; newerId: string | null };
+
 /** `periodEventCount` and `userCount` cover the filtered range. */
 export type IssueDetail = Issue & {
-  /** Newest first, filtered, at most 100. */
-  events: EventSummary[];
   /** The newest filtered event. */
   latest: NormalizedEvent | null;
   /** The issue's oldest and newest stored events, ignoring filters. */

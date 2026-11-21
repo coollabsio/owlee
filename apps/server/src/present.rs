@@ -643,7 +643,11 @@ pub struct PublicPage {
     pub homepage_url: Option<String>,
     pub banner: &'static str,
     pub components: Vec<PublicComponent>,
+    /// Every unresolved incident, however old.
+    pub open_incidents: Vec<PublicIncident>,
+    /// The newest page of the incident history, open or not. `/incidents` serves the rest.
     pub incidents: Vec<PublicIncident>,
+    pub incidents_next_cursor: Option<String>,
     pub maintenances: Vec<PublicMaintenance>,
 }
 

@@ -725,13 +725,14 @@ async fn flood_is_capped(config: Config) {
     let detail = send(
         &app,
         "GET",
-        &format!("/api/error-issues/{issue_id}"),
+        &format!("/api/error-issues/{issue_id}/events"),
         Vec::new(),
         Some(&cookie),
         &[],
     )
     .await;
-    let stored = detail.body["events"].as_array().unwrap().len() as i64;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let stored = detail.body["items"].as_array().unwrap().len() as i64;
     assert!(stored <= keep, "stored {stored} payloads, cap is {keep}");
     assert!(stored >= 1);
 }
@@ -854,13 +855,13 @@ async fn retention_keeps_rollups(config: Config) {
     let detail = send(
         &app,
         "GET",
-        &format!("/api/error-issues/{issue_id}"),
+        &format!("/api/error-issues/{issue_id}/events"),
         Vec::new(),
         Some(&cookie),
         &[],
     )
     .await;
-    assert_eq!(detail.body["events"].as_array().unwrap().len(), 1);
+    assert_eq!(detail.body["items"].as_array().unwrap().len(), 1);
     let overview = send(
         &app,
         "GET",

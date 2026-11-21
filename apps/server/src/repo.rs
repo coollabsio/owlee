@@ -1588,19 +1588,98 @@ pub async fn replace_components(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum IncidentStatusFilter {
+    #[default]
+    Any,
+    Unresolved,
+    Is(IncidentStatus),
+}
+
+#[derive(Debug, Default)]
+pub struct IncidentFilter {
+    pub project: Option<Id>,
+    pub status: IncidentStatusFilter,
+    pub impact: Option<IncidentImpact>,
+    /// Matched against the title, case-insensitively.
+    pub search: String,
+}
+
+/// Newest first, ordered by `(started_at, id)` so `after` resumes exactly
+/// where the previous page stopped. Returns at most `limit` rows.
 pub async fn list_incidents(
     db: &Database,
     workspace_id: Id,
-    project: Option<Id>,
+    filter: &IncidentFilter,
+    after: Option<(i64, &str)>,
+    limit: i64,
 ) -> Result<Vec<Incident>, sqlx::Error> {
+    let mut clauses = vec![in_scope("project_id", 1, filter.project)];
+    let mut next = if filter.project.is_some() { 3 } else { 2 };
+    let mut param = || {
+        next += 1;
+        next - 1
+    };
+    let status = match filter.status {
+        IncidentStatusFilter::Any => None,
+        IncidentStatusFilter::Unresolved => {
+            clauses.push("status != 'resolved'".to_owned());
+            None
+        }
+        IncidentStatusFilter::Is(status) => {
+            clauses.push(format!("status = ${}", param()));
+            Some(status)
+        }
+    };
+    if filter.impact.is_some() {
+        clauses.push(format!("impact = ${}", param()));
+    }
+    let search = filter.search.trim();
+    if !search.is_empty() {
+        clauses.push(format!("lower(title) LIKE ${} ESCAPE '\\'", param()));
+    }
+    if after.is_some() {
+        clauses.push(keyset_before("started_at", param(), param()));
+    }
     let sql = format!(
-        "{} ORDER BY started_at DESC LIMIT 100",
-        incident_select(&in_scope("project_id", 1, project))
+        "{} ORDER BY started_at DESC, id DESC LIMIT ${}",
+        incident_select(&clauses.join(" AND ")),
+        param()
     );
-    let rows = bind_scope(sqlx::query(&sql), workspace_id, project)
-        .fetch_all(db.pool())
-        .await?;
+    let mut query = bind_scope(sqlx::query(&sql), workspace_id, filter.project);
+    if let Some(status) = status {
+        query = query.bind(status.as_str());
+    }
+    if let Some(impact) = filter.impact {
+        query = query.bind(impact.as_str());
+    }
+    if !search.is_empty() {
+        query = query.bind(like_pattern(search));
+    }
+    if let Some((key, id)) = after {
+        query = query.bind(key).bind(id.to_owned());
+    }
+    let rows = query.bind(limit).fetch_all(db.pool()).await?;
     rows.iter().map(map_incident).collect()
+}
+
+/// Rows after `(key, id)` in `key DESC, id DESC` order. `$key` and `$id` are
+/// bound to the cursor's values.
+fn keyset_before(column: &str, key: usize, id: usize) -> String {
+    format!("({column} < ${key} OR ({column} = ${key} AND id < ${id}))")
+}
+
+/// A `LIKE` pattern that matches `search` literally, for `ESCAPE '\\'`.
+fn like_pattern(search: &str) -> String {
+    let mut escaped = String::from("%");
+    for ch in search.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch.to_ascii_lowercase());
+    }
+    escaped.push('%');
+    escaped
 }
 
 pub async fn workspace_incident(
@@ -1681,16 +1760,48 @@ pub async fn delete_incident(db: &Database, workspace_id: Id, id: Id) -> Result<
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn incidents_for_page(db: &Database, page_id: Id) -> Result<Vec<Incident>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, project_id, page_id, monitor_id, title, status, impact, auto, started_at, resolved_at, created_at, updated_at \
-         FROM incidents WHERE page_id = $1 OR monitor_id IN \
-         (SELECT monitor_id FROM page_components WHERE page_id = $1) \
-         ORDER BY started_at DESC LIMIT 40",
-    )
-    .bind(page_id.to_string())
-    .fetch_all(db.pool())
-    .await?;
+const PAGE_INCIDENTS: &str = "(page_id = $1 OR monitor_id IN \
+     (SELECT monitor_id FROM page_components WHERE page_id = $1))";
+
+/// A status page's incident history, newest first, in keyset pages.
+pub async fn incidents_for_page(
+    db: &Database,
+    page_id: Id,
+    after: Option<(i64, &str)>,
+    limit: i64,
+) -> Result<Vec<Incident>, sqlx::Error> {
+    let sql = match after {
+        Some(_) => format!(
+            "{} AND {} ORDER BY started_at DESC, id DESC LIMIT $4",
+            incident_select(PAGE_INCIDENTS),
+            keyset_before("started_at", 2, 3)
+        ),
+        None => format!(
+            "{} ORDER BY started_at DESC, id DESC LIMIT $2",
+            incident_select(PAGE_INCIDENTS)
+        ),
+    };
+    let mut query = sqlx::query(&sql).bind(page_id.to_string());
+    if let Some((key, id)) = after {
+        query = query.bind(key).bind(id.to_owned());
+    }
+    let rows = query.bind(limit).fetch_all(db.pool()).await?;
+    rows.iter().map(map_incident).collect()
+}
+
+/// Every unresolved incident of a status page, however old, for its banner.
+pub async fn open_incidents_for_page(
+    db: &Database,
+    page_id: Id,
+) -> Result<Vec<Incident>, sqlx::Error> {
+    let sql = format!(
+        "{} AND status != 'resolved' ORDER BY started_at DESC, id DESC",
+        incident_select(PAGE_INCIDENTS)
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_id.to_string())
+        .fetch_all(db.pool())
+        .await?;
     rows.iter().map(map_incident).collect()
 }
 

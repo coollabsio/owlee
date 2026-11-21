@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useParams } from "react-router";
 import { UptimeBars } from "@/components/charts";
-import { Button, Empty, LayerCard, Skeleton, StatusBadge } from "@/components/ui";
-import { api, type PublicPage } from "@/lib/api";
+import { Button, Empty, LayerCard, LoadMore, Skeleton, StatusBadge } from "@/components/ui";
+import { api, flattenPages, withCursor, type Paged, type PublicIncident, type PublicPage } from "@/lib/api";
 import { formatTime, percent, stateLabel } from "@/lib/utils";
 
 type Tone = "neutral" | "success" | "warning" | "error" | "info";
@@ -28,6 +29,16 @@ export function PublicStatusPage() {
     queryKey: ["public", slug],
     queryFn: () => api<PublicPage>(`/api/public/${slug}`),
     refetchInterval: 15_000,
+  });
+  // Older history loads on request, from where the page's first slice stops.
+  const [wantOlder, setWantOlder] = useState(false);
+  const olderFrom = query.data?.incidents_next_cursor ?? "";
+  const older = useInfiniteQuery({
+    queryKey: ["public-incidents", slug, olderFrom],
+    queryFn: ({ pageParam }) => api<Paged<PublicIncident>>(withCursor(`/api/public/${slug}/incidents`, pageParam)),
+    initialPageParam: olderFrom,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    enabled: wantOlder && Boolean(olderFrom),
   });
   if (query.isLoading) {
     return (
@@ -55,8 +66,13 @@ export function PublicStatusPage() {
   }
   const page = query.data;
   const banner = bannerCopy[page.banner];
-  const active = page.incidents.filter((incident) => incident.status !== "resolved");
-  const history = page.incidents.filter((incident) => incident.status === "resolved");
+  const active = page.open_incidents;
+  const history = flattenPages([page.incidents, ...(older.data?.pages.map((slice) => slice.items) ?? [])]).filter(
+    (incident) => incident.status === "resolved",
+  );
+  const loadOlder = wantOlder
+    ? { hasNextPage: older.isLoading || older.hasNextPage, isFetchingNextPage: older.isFetching, fetchNextPage: older.fetchNextPage }
+    : { hasNextPage: Boolean(olderFrom), isFetchingNextPage: false, fetchNextPage: () => setWantOlder(true) };
   const maintenances = page.maintenances.filter((item) => item.active || new Date(item.starts_at).getTime() > Date.now());
   return (
     <div className="min-h-svh bg-[var(--ui-canvas)] text-[var(--ui-fg)]">
@@ -143,6 +159,7 @@ export function PublicStatusPage() {
               ))}
             </ul>
           )}
+          <LoadMore query={loadOlder} label="Older incidents" />
         </LayerCard>
         <footer className="pt-4 text-center text-[0.6875rem] text-[var(--ui-fg-faint)]">
           <a href="https://owlee.io" className="underline decoration-[var(--ui-fg-faint)] underline-offset-2 hover:text-[var(--ui-fg)]">Powered by Owlee</a>

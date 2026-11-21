@@ -221,6 +221,7 @@ async fn sqlite_flow_covers_checks_incidents_and_the_public_page() {
     assert_eq!(checked["state"], "down");
 
     let (status, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    let incidents = incidents["items"].clone();
     assert_eq!(status, StatusCode::OK, "{incidents}");
     assert_eq!(incidents.as_array().unwrap().len(), 1);
     assert_eq!(incidents[0]["status"], "investigating");
@@ -513,6 +514,7 @@ async fn postgres_accepts_the_same_api() {
     assert_eq!(ready["database"], "postgres");
     postgres_runs_the_first_check_and_lists_connections(&state).await;
     detail_reports_state_age_latency_and_incidents(&state).await;
+    incident_lists_page_by_cursor(&state).await;
 }
 
 #[tokio::test]
@@ -578,6 +580,7 @@ async fn failed_check_is_not_counted_when_the_host_has_no_network() {
     .await;
     assert_eq!(monitor["state"], "pending", "{monitor}");
     let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    let incidents = incidents["items"].clone();
     assert_eq!(incidents.as_array().unwrap().len(), 0, "{incidents}");
 }
 
@@ -699,6 +702,7 @@ async fn agent_registers_its_own_checks_and_reports_outcomes() {
     );
     assert_eq!(monitor["recent"][0]["region"], "vpc-eu");
     let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    let incidents = incidents["items"].clone();
     assert_eq!(incidents.as_array().unwrap().len(), 1, "{incidents}");
 
     let (status, _, _) = call(
@@ -968,7 +972,10 @@ async fn another_workspace_cannot_read_change_or_link_records() {
     ] {
         let (status, listed, _) = call(&app, "GET", uri, None, Some(&eve)).await;
         assert_eq!(status, StatusCode::OK, "{uri} {listed}");
-        let records = listed.get("monitors").unwrap_or(&listed);
+        let records = listed
+            .get("monitors")
+            .or_else(|| listed.get("items"))
+            .unwrap_or(&listed);
         assert_eq!(records, &json!([]), "{uri}");
     }
     let (_, overview, _) = call(&app, "GET", "/api/overview", None, Some(&eve)).await;
@@ -1289,6 +1296,7 @@ async fn create_runs_the_first_check_and_detail_lists_connections() {
     assert_eq!(status, StatusCode::CREATED, "{worker}");
     assert_eq!(worker["state"], "down");
     let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    let incidents = incidents["items"].clone();
     assert_eq!(incidents.as_array().unwrap().len(), 1, "{incidents}");
     assert_eq!(worker["open_incident_id"], incidents[0]["id"]);
     assert_eq!(count(&state, "check_results").await, 2);
@@ -1809,6 +1817,7 @@ async fn public_incidents_carry_no_internal_ids_or_monitor_names() {
     )
     .await;
     let (status, added, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    let added = added["items"].clone();
     assert_eq!(status, StatusCode::OK, "{added}");
     let incident_id = added[0]["id"].as_str().unwrap().to_owned();
     assert_eq!(added[0]["title"], "billing-db-primary is down");
@@ -2273,6 +2282,7 @@ async fn silent_agent_takes_its_monitors_down_after_the_grace_and_recovers() {
     };
     let incidents = || async {
         let (_, incidents, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+        let incidents = incidents["items"].clone();
         incidents
             .as_array()
             .unwrap()
@@ -2700,4 +2710,162 @@ async fn monitor_headers_and_body_are_sealed_masked_and_kept_on_edit() {
         rx.try_recv().is_err(),
         "an unreadable request is never sent"
     );
+}
+
+/// Follows `next_cursor` from `uri` to the last page, returning every id.
+async fn walk(app: &Router, who: Option<&Who>, uri: &str) -> Vec<String> {
+    walk_from(app, who, uri, "").await
+}
+
+async fn walk_from(app: &Router, who: Option<&Who>, uri: &str, cursor: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut cursor = cursor.to_owned();
+    loop {
+        let (status, page, _) =
+            call(app, "GET", &format!("{uri}&cursor={cursor}"), None, who).await;
+        assert_eq!(status, StatusCode::OK, "{uri} {page}");
+        let items = page["items"].as_array().unwrap();
+        ids.extend(
+            items
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned()),
+        );
+        match page["next_cursor"].as_str() {
+            Some(next) => {
+                assert!(!items.is_empty(), "{uri}");
+                cursor = next.to_owned();
+            }
+            None => return ids,
+        }
+    }
+}
+
+async fn incident_ids(state: &AppState, project: &str, filter: &str) -> Vec<String> {
+    sqlx::query(&format!(
+        "SELECT id FROM incidents WHERE project_id = $1 {filter} ORDER BY started_at DESC, id DESC"
+    ))
+    .bind(project)
+    .fetch_all(state.db.pool())
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| sqlx::Row::get::<String, _>(row, "id"))
+    .collect()
+}
+
+#[tokio::test]
+async fn sqlite_incident_lists_page_by_cursor() {
+    let (_, state, _) = app_with_state(Vec::new()).await;
+    incident_lists_page_by_cursor(&state).await;
+}
+
+/// 22 incidents, more than a page of the status page's history, page out in
+/// full on the incident list and the public page, with filters kept.
+async fn incident_lists_page_by_cursor(state: &AppState) {
+    let app = router(state.clone());
+    let ada = Who::from(editor_session(state).await.unwrap());
+    let stranger = Who::from(editor_session(state).await.unwrap());
+    let slug = format!("paging-{}", owlee_platform::Id::new());
+    let page_id = create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "Paging", "slug": slug, "published": true, "monitor_ids": []}),
+    )
+    .await;
+    for index in 0..22 {
+        let title = if index % 2 == 0 {
+            "DB outage"
+        } else {
+            "API slow"
+        };
+        create(
+            &app,
+            &ada,
+            "/api/incidents",
+            json!({
+                "project_id": ada.project, "title": format!("{title} {index}"),
+                "status": if index % 4 == 0 && index > 0 { "resolved" } else { "investigating" },
+                "impact": if index == 0 { "major" } else { "minor" },
+                "message": "Looking", "page_id": page_id
+            }),
+        )
+        .await;
+    }
+    // The only major incident is open and older than the first page of history.
+    exec(
+        state,
+        "UPDATE incidents SET started_at = 1 WHERE title = $1",
+        &["DB outage 0"],
+    )
+    .await;
+    create(
+        &app,
+        &stranger,
+        "/api/incidents",
+        json!({"project_id": stranger.project, "title": "DB outage elsewhere", "status": "investigating", "impact": "minor", "message": "Theirs"}),
+    )
+    .await;
+
+    let all = incident_ids(state, &ada.project, "").await;
+    assert_eq!(all.len(), 22);
+    assert_eq!(walk(&app, Some(&ada), "/api/incidents?limit=5").await, all);
+    let db = incident_ids(state, &ada.project, "AND title LIKE 'DB%'").await;
+    assert_eq!(db.len(), 11);
+    assert_eq!(
+        walk(&app, Some(&ada), "/api/incidents?q=db&limit=4").await,
+        db
+    );
+    let resolved = incident_ids(state, &ada.project, "AND status = 'resolved'").await;
+    assert_eq!(resolved.len(), 5);
+    assert_eq!(
+        walk(
+            &app,
+            Some(&ada),
+            "/api/incidents?status=resolved&q=outage&limit=2"
+        )
+        .await,
+        resolved
+    );
+
+    let (status, public, _) = call(&app, "GET", &format!("/api/public/{slug}"), None, None).await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    assert_eq!(public["banner"], "partial_outage", "{public}");
+    let open = public["open_incidents"].as_array().unwrap();
+    assert_eq!(open.len(), 17);
+    assert_eq!(open.last().unwrap()["id"], json!(all.last().unwrap()));
+    let mut history: Vec<String> = public["incidents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|incident| incident["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(history.len(), 20);
+    let cursor = public["incidents_next_cursor"].as_str().unwrap();
+    history.extend(
+        walk_from(
+            &app,
+            None,
+            &format!("/api/public/{slug}/incidents?limit=1"),
+            cursor,
+        )
+        .await,
+    );
+    assert_eq!(
+        history, all,
+        "Older incidents continue where the page stopped"
+    );
+
+    for (uri, who) in [
+        ("/api/incidents?cursor=bm9wZQ".to_owned(), Some(&ada)),
+        (
+            "/api/incidents?cursor=%27%20OR%201%3D1".to_owned(),
+            Some(&ada),
+        ),
+        ("/api/incidents?limit=many".to_owned(), Some(&ada)),
+        (format!("/api/public/{slug}/incidents?cursor=e30"), None),
+    ] {
+        let (status, body, _) = call(&app, "GET", &uri, None, who).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
 }

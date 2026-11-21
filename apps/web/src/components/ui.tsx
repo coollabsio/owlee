@@ -737,6 +737,26 @@ export function FilterChips({ filters, onClear }: { filters: { key: string; labe
   );
 }
 
+/** The footer of a keyset-paged list. Renders nothing once the last page is in. */
+export function LoadMore({
+  query,
+  label = "Load more",
+  className,
+}: {
+  query: { hasNextPage: boolean; isFetchingNextPage: boolean; fetchNextPage: () => unknown };
+  label?: string;
+  className?: string;
+}) {
+  if (!query.hasNextPage) return null;
+  return (
+    <div className={cn("flex justify-center border-t border-[var(--ui-divider)] p-2", className)}>
+      <Button size="sm" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
+        {query.isFetchingNextPage ? "Loading..." : label}
+      </Button>
+    </div>
+  );
+}
+
 export function Empty({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
   return (
     <LayerCard>

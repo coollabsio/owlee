@@ -12,6 +12,7 @@ import {
   type InsightLink,
   type InsightSite,
   type Monitor,
+  type Paged,
   type StatusPage,
 } from "@/lib/api";
 import { useAccess } from "@/lib/me";
@@ -37,7 +38,11 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const scopedList = <T,>(name: string, path: string) => ({ queryKey: scope.key(name), queryFn: () => api<T[]>(scope.path(path)), enabled: open });
   const monitors = useQuery(scopedList<Monitor>("monitors", "/api/monitors"));
   const pages = useQuery(scopedList<StatusPage>("pages", "/api/pages"));
-  const incidents = useQuery(scopedList<Incident>("incidents", "/api/incidents"));
+  const incidents = useQuery({
+    queryKey: scope.key("incidents", "palette"),
+    queryFn: () => api<Paged<Incident>>(scope.path("/api/incidents")).then((page) => page.items),
+    enabled: open,
+  });
   const sites = useQuery(scopedList<InsightSite>("sites", "/api/sites"));
   const links = useQuery(scopedList<InsightLink>("links", "/api/links"));
   const apps = useQuery(scopedList<ErrorApp>("apps", "/api/error-apps"));

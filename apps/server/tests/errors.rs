@@ -332,7 +332,7 @@ async fn exercise(app: Router, state: AppState) {
         feed["counts"],
         json!({"unresolved": 1, "resolved": 0, "ignored": 0})
     );
-    assert_eq!(feed["truncated"], json!(false));
+    assert_eq!(feed["nextCursor"], Value::Null);
     assert!(
         feed["issues"][0]["title"]
             .as_str()
@@ -384,7 +384,8 @@ async fn exercise(app: Router, state: AppState) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(allow.as_deref(), Some("*"));
 
-    sorts_before_the_limit(&app, &cookie).await;
+    feed_pages_reach_every_issue(&app, &state, &cookie).await;
+    events_page_and_step_through_every_event(&app, &cookie).await;
     detail_reports_true_edges(&app, &cookie).await;
     members_only_read(&app, &state, &cookie).await;
     other_workspaces_get_404(&app, &state, &cookie).await;
@@ -459,7 +460,16 @@ async fn detail_reports_true_edges(app: &Router, cookie: &TestSession) {
     assert_eq!(detail["environments"], json!(["production"]));
     assert_eq!(detail["periodEventCount"], json!(1));
     assert_eq!(detail["userCount"], json!(1));
-    let events: Vec<(Value, Value)> = detail["events"]
+    let (_, events, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues/{issue_id}/events?range=24h"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    let events: Vec<(Value, Value)> = events["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -486,7 +496,16 @@ async fn detail_reports_true_edges(app: &Router, cookie: &TestSession) {
     assert_eq!(detail["firstEventId"], json!(old_id));
     assert_eq!(detail["periodEventCount"], json!(2));
     assert_eq!(detail["userCount"], json!(2));
-    assert_eq!(detail["events"][1]["user"], json!("ada@example.com"));
+    let (_, events, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues/{issue_id}/events?range=30d"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(events["items"][1]["user"], json!("ada@example.com"));
     assert_eq!(
         detail["tags"],
         json!([
@@ -496,8 +515,53 @@ async fn detail_reports_true_edges(app: &Router, cookie: &TestSession) {
     );
 }
 
-/// One busy issue older than 200 quiet ones must still lead `sort=events`.
-async fn sorts_before_the_limit(app: &Router, cookie: &TestSession) {
+/// Follows `nextCursor` from the first page to the last.
+async fn walk(app: &Router, session: &TestSession, uri: &str, list: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut cursor = String::new();
+    loop {
+        let (status, page, _) = call(
+            app,
+            "GET",
+            &format!("{uri}&cursor={cursor}"),
+            Vec::new(),
+            Some(session),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri} {page}");
+        let items = page[list].as_array().unwrap();
+        ids.extend(
+            items
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned()),
+        );
+        match page["nextCursor"].as_str() {
+            Some(next) => {
+                assert!(!items.is_empty(), "{uri}");
+                cursor = next.to_owned();
+            }
+            None => return ids,
+        }
+    }
+}
+
+async fn issue_ids(state: &AppState, app_id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = sqlx::query("SELECT id FROM issues WHERE app_id = $1")
+        .bind(app_id)
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| sqlx::Row::get(row, "id"))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// 201 issues span five pages under every sort, each issue exactly once, and
+/// one busy issue older than the rest still leads `sort=events`.
+async fn feed_pages_reach_every_issue(app: &Router, state: &AppState, cookie: &TestSession) {
     let project = create_app(app, cookie, "Sorting").await;
     let id = project["id"].as_str().unwrap();
     let key = project["publicKey"].as_str().unwrap();
@@ -536,22 +600,44 @@ async fn sorts_before_the_limit(app: &Router, cookie: &TestSession) {
         .await;
         assert_eq!(status, StatusCode::OK);
     }
+    let all = issue_ids(state, id).await;
+    assert_eq!(all.len(), 201);
 
     let feed_uri = format!("/api/error-issues?app_id={id}&since=14d&sort=events&status=unresolved");
     let (status, feed, _) = call(app, "GET", &feed_uri, Vec::new(), Some(cookie), &[]).await;
     assert_eq!(status, StatusCode::OK, "{feed}");
     let issues = feed["issues"].as_array().unwrap();
-    assert_eq!(issues.len(), 200);
+    assert_eq!(issues.len(), 50);
     assert_eq!(issues[0]["title"], json!("RuntimeException: busy volume"));
     assert_eq!(issues[0]["periodEventCount"], json!(3));
     assert_eq!(issues[1]["periodEventCount"], json!(1));
-    assert_eq!(feed["truncated"], json!(true));
     assert_eq!(
         feed["counts"],
         json!({"unresolved": 201, "resolved": 0, "ignored": 0})
     );
+    let busy = issues[0]["id"].as_str().unwrap().to_owned();
 
-    let busy = issues[0]["id"].as_str().unwrap();
+    let by_events = walk(app, cookie, &feed_uri, "issues").await;
+    let mut quiet: Vec<String> = all
+        .iter()
+        .filter(|issue| **issue != busy)
+        .cloned()
+        .collect();
+    quiet.sort_by(|left, right| right.cmp(left));
+    assert_eq!(by_events[0], busy);
+    assert_eq!(by_events[1..], quiet[..], "ties run by id, newest id first");
+    for sort in ["last_seen", "age", "users"] {
+        let mut walked = walk(
+            app,
+            cookie,
+            &format!("/api/error-issues?app_id={id}&sort={sort}&limit=37"),
+            "issues",
+        )
+        .await;
+        walked.sort();
+        assert_eq!(walked, all, "sort={sort}");
+    }
+
     let (status, _, _) = call(
         app,
         "POST",
@@ -565,12 +651,147 @@ async fn sorts_before_the_limit(app: &Router, cookie: &TestSession) {
     .await;
     assert!(status.is_success(), "{status}");
     let (_, feed, _) = call(app, "GET", &feed_uri, Vec::new(), Some(cookie), &[]).await;
-    assert_eq!(feed["issues"].as_array().unwrap().len(), 200);
-    assert_eq!(feed["truncated"], json!(false));
     assert_eq!(
         feed["counts"],
         json!({"unresolved": 200, "resolved": 1, "ignored": 0})
     );
+    let unresolved = walk(app, cookie, &format!("{feed_uri}&limit=30"), "issues").await;
+    assert_eq!(unresolved, quiet, "the status filter holds across pages");
+    let resolved = walk(
+        app,
+        cookie,
+        &format!("/api/error-issues?app_id={id}&status=resolved&limit=1"),
+        "issues",
+    )
+    .await;
+    assert_eq!(resolved, vec![busy]);
+
+    let (_, first, _) = call(
+        app,
+        "GET",
+        &format!("/api/error-issues?app_id={id}&limit=2"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    let text_cursor = first["nextCursor"].as_str().unwrap();
+    for (query, why) in [
+        ("cursor=not-a-cursor".to_owned(), "garbage"),
+        ("cursor=e30".to_owned(), "an empty object"),
+        (
+            format!("cursor={text_cursor}&sort=events"),
+            "a last-seen cursor on a count sort",
+        ),
+    ] {
+        let (status, body, _) = call(
+            app,
+            "GET",
+            &format!("/api/error-issues?app_id={id}&{query}"),
+            Vec::new(),
+            Some(cookie),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+    }
+}
+
+/// Five events, the most one issue keeps per window, page out two at a time, and Older and Newer step
+/// through all of them under the same filters as the list.
+async fn events_page_and_step_through_every_event(app: &Router, cookie: &TestSession) {
+    let project = create_app(app, cookie, "Paging").await;
+    let app_id = project["id"].as_str().unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let mut sent = Vec::new();
+    for index in 0..5_i64 {
+        let mut event = sample();
+        let event_id = hex_id();
+        event["event_id"] = json!(event_id);
+        event["fingerprint"] = json!(["paging"]);
+        // Two events share each second, so the id breaks the tie.
+        event["timestamp"] = json!(now - 600 + index / 2);
+        event["environment"] = json!(if index % 3 == 0 {
+            "staging"
+        } else {
+            "production"
+        });
+        store(app, &project, &event).await;
+        sent.push((now - 600 + index / 2, event_id, index % 3 == 0));
+    }
+    sent.sort_by(|left, right| (right.0, &right.1).cmp(&(left.0, &left.1)));
+    let newest_first: Vec<String> = sent.iter().map(|(_, id, _)| id.clone()).collect();
+    let staging: Vec<String> = sent
+        .iter()
+        .filter(|(_, _, staging)| *staging)
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    assert_eq!(staging.len(), 2);
+    let issue = first_issue(app, cookie, app_id).await;
+    let issue_id = issue["id"].as_str().unwrap();
+
+    let events = format!("/api/error-issues/{issue_id}/events");
+    let walked = walk(app, cookie, &format!("{events}?limit=2"), "items").await;
+    assert_eq!(walked, newest_first);
+    let walked = walk(
+        app,
+        cookie,
+        &format!("{events}?limit=1&environment=staging"),
+        "items",
+    )
+    .await;
+    assert_eq!(walked, staging, "the environment filter holds across pages");
+
+    for (filter, expected) in [("", &newest_first), ("environment=staging", &staging)] {
+        let mut stepped = vec![expected[0].clone()];
+        loop {
+            let current = stepped.last().unwrap();
+            let (status, near, _) = call(
+                app,
+                "GET",
+                &format!("{events}/{current}/neighbors?{filter}"),
+                Vec::new(),
+                Some(cookie),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{near}");
+            if stepped.len() > 1 {
+                assert_eq!(near["newerId"], json!(stepped[stepped.len() - 2]));
+            } else {
+                assert_eq!(near["newerId"], Value::Null);
+            }
+            match near["olderId"].as_str() {
+                Some(older) => stepped.push(older.to_owned()),
+                None => break,
+            }
+        }
+        assert_eq!(&stepped, expected, "filter {filter:?}");
+    }
+
+    let other = create_app(app, cookie, "Other").await;
+    let mut event = sample();
+    event["event_id"] = json!(hex_id());
+    store(app, &other, &event).await;
+    let stranger = first_issue(app, cookie, other["id"].as_str().unwrap()).await;
+    let stranger_event = stranger["id"].as_str().unwrap();
+    for (uri, expected) in [
+        (format!("{events}?cursor=%25%25"), StatusCode::BAD_REQUEST),
+        (
+            format!("{events}/{}/neighbors", event["event_id"].as_str().unwrap()),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!(
+                "/api/error-issues/{stranger_event}/events/{}/neighbors",
+                newest_first[0]
+            ),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let (status, body, _) = call(app, "GET", &uri, Vec::new(), Some(cookie), &[]).await;
+        assert_eq!(status, expected, "{uri}: {body}");
+    }
 }
 
 fn json_body(value: Value) -> Vec<u8> {
