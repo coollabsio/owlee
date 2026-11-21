@@ -16,13 +16,16 @@ pub async fn fanout(
     monitor_id: Option<Id>,
     incident_id: Option<Id>,
 ) {
-    let channels = match repo::channels_for_monitor(&state.db, project_id, monitor_id).await {
-        Ok(channels) => channels,
-        Err(error) => {
-            tracing::error!(%error, "loading notification channels");
-            return;
-        }
-    };
+    let channels =
+        match repo::channels_for_monitor(&state.db, &state.config.app_key, project_id, monitor_id)
+            .await
+        {
+            Ok(channels) => channels,
+            Err(error) => {
+                tracing::error!(%error, "loading notification channels");
+                return;
+            }
+        };
     for channel in channels {
         deliver(state, &channel, payload, monitor_id, incident_id).await;
     }
@@ -67,7 +70,12 @@ async fn send(
     channel: &Channel,
     payload: &NotificationPayload,
 ) -> Result<SendOutcome, String> {
-    let config: Value = serde_json::from_str(&channel.config_json).unwrap_or(Value::Null);
+    let Some(config) = &channel.config else {
+        return Err(
+            "the channel settings do not open with OWLEE_APP_KEY. Edit the channel and enter its URL again."
+                .to_owned(),
+        );
+    };
     let (subject, text) = plain(payload);
     match channel.provider.as_str() {
         "email" => {
@@ -98,10 +106,7 @@ async fn send(
                     request = request.header("x-owlee-signature", header);
                 }
             }
-            let response = request
-                .send()
-                .await
-                .map_err(|error| request_error(&error))?;
+            let response = request.send().await.map_err(request_error)?;
             if !response.status().is_success() {
                 return Err(format!("webhook returned HTTP {}", response.status()));
             }
@@ -129,7 +134,7 @@ async fn post_json(state: &AppState, url: &str, body: serde_json::Value) -> Resu
         .json(&body)
         .send()
         .await
-        .map_err(|error| request_error(&error))?;
+        .map_err(request_error)?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -287,8 +292,9 @@ pub fn plain(payload: &NotificationPayload) -> (String, String) {
     (subject, lines.join("\n"))
 }
 
-fn request_error(error: &reqwest::Error) -> String {
-    trim(&error_chain(error))
+/// Without the URL: a Slack or Discord path is the credential.
+fn request_error(error: reqwest::Error) -> String {
+    trim(&error_chain(&error.without_url()))
 }
 
 /// reqwest's message omits the cause, such as a refused address or a TLS failure.

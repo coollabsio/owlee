@@ -145,11 +145,11 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         workspace_id: scope.workspace_id,
         name: "Ops email".to_owned(),
         provider: "email".to_owned(),
-        config_json: format!(r#"{{"to":"{DEMO_EMAIL}"}}"#),
+        config: Some(serde_json::json!({ "to": DEMO_EMAIL })),
         enabled: true,
         created_at: now,
     };
-    repo::insert_channel(&state.db, &channel, &[]).await?;
+    repo::insert_channel(&state.db, &state.config.app_key, &channel, &[]).await?;
     crate::insights::seed_demo(state, &scope).await?;
     crate::errors::seed_demo(state, &scope).await?;
     let _ = repo::insert_audit(

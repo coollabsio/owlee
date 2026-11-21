@@ -200,7 +200,8 @@ export type Channel = {
   id: string;
   name: string;
   provider: "email" | "webhook" | "slack" | "discord";
-  config: Record<string, string>;
+  /** URLs and secrets are credentials: the API returns only their origin and whether a secret is set. */
+  config: { to?: string; url_preview?: string; has_secret?: boolean; unreadable?: boolean };
   enabled: boolean;
   monitor_ids: string[];
   deliveries: Delivery[];

@@ -92,7 +92,7 @@ function NotificationChannels() {
                           <FilterValue active={providerFilter === channel.provider} label={providerLabel[channel.provider]} onToggle={() => setProviderFilter(providerFilter === channel.provider ? null : channel.provider)}>
                             {providerLabel[channel.provider]}
                           </FilterValue>{" "}
-                          · {channel.config.to || channel.config.url}
+                          · {channel.config.unreadable ? "Settings unreadable, edit to re-enter" : channel.config.to || channel.config.url_preview}
                         </div>
                       </td>
                       <td className="hidden whitespace-nowrap md:table-cell">
@@ -162,13 +162,16 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
   const monitors = useQuery({ queryKey: workspaceWide.key("monitors"), queryFn: () => api<Monitor[]>(workspaceWide.path("/api/monitors")) });
   const [name, setName] = useState(channel?.name ?? "");
   const [provider, setProvider] = useState<(typeof providers)[number]>(channel?.provider ?? "email");
-  const [target, setTarget] = useState(channel ? channel.config.to || channel.config.url || "" : "");
-  const [secret, setSecret] = useState(channel?.config.secret ?? "");
+  const [target, setTarget] = useState(channel?.config.to ?? "");
+  const [secret, setSecret] = useState("");
   // The form picks one monitor. Keep a wider set made through the API until the user picks another.
   const initialMonitors = channel?.monitor_ids ?? [];
   const [monitorId, setMonitorId] = useState(initialMonitors.length > 1 ? keepMonitors : (initialMonitors[0] ?? ""));
   const [enabled, setEnabled] = useState(channel?.enabled ?? true);
   const [fields, setFields] = useState<Record<string, string>>({});
+  // A blank URL or secret keeps the saved one while the provider stays the same.
+  const saved = channel && channel.provider === provider && !channel.config.unreadable ? channel.config : undefined;
+  const keepsUrl = provider !== "email" && saved?.url_preview !== undefined;
   const save = useMutation({
     mutationFn: () =>
       api<Channel>(channel ? `/api/notifications/${channel.id}` : "/api/notifications", {
@@ -200,12 +203,21 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
       <Field label="Provider" error={fields.provider}>
         <Select value={provider} options={providers.map((item) => ({ value: item, label: providerLabel[item] }))} onChange={setProvider} aria-label="Provider" />
       </Field>
-      <Field label={provider === "email" ? "Recipient" : "Webhook URL"} error={fields.config}>
-        <Input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={provider === "email" ? "ops@coollabs.io" : "https://"} required />
+      <Field
+        label={provider === "email" ? "Recipient" : "Webhook URL"}
+        hint={keepsUrl ? "Leave blank to keep the saved URL" : undefined}
+        error={fields.config}
+      >
+        <Input
+          value={target}
+          onChange={(event) => setTarget(event.target.value)}
+          placeholder={provider === "email" ? "ops@coollabs.io" : (saved?.url_preview ?? "https://")}
+          required={!keepsUrl}
+        />
       </Field>
       {provider === "webhook" ? (
-        <Field label="Signing secret" hint="optional">
-          <Input value={secret} onChange={(event) => setSecret(event.target.value)} />
+        <Field label="Signing secret" hint={saved?.has_secret ? "Leave blank to keep the saved secret" : "optional"}>
+          <Input type="password" autoComplete="new-password" value={secret} onChange={(event) => setSecret(event.target.value)} />
         </Field>
       ) : null}
       <Field label="Monitor">

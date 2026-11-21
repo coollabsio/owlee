@@ -2011,13 +2011,14 @@ struct ChannelBody {
     monitor_ids: Vec<Id>,
 }
 
-/// Editors only: channel configs hold webhook secrets and URLs with tokens.
+/// Editors only. Responses carry masked configs, see `present::channel_response`.
 async fn list_channels(
     State(state): State<AppState>,
     member: Member,
 ) -> Result<Json<Vec<present::ChannelResponse>>, AppError> {
     member.require_editor_to_read()?;
-    let channels = repo::list_channels(&state.db, member.workspace_id).await?;
+    let channels =
+        repo::list_channels(&state.db, &state.config.app_key, member.workspace_id).await?;
     let mut response = Vec::new();
     for channel in channels {
         response.push(channel_view(&state, channel).await?);
@@ -2031,7 +2032,8 @@ async fn create_channel(
     Json(body): Json<ChannelBody>,
 ) -> Result<(StatusCode, Json<present::ChannelResponse>), AppError> {
     member.require_editor()?;
-    let (name, provider, config) = validate_channel(&body, state.config.allow_private_webhooks)?;
+    let (name, provider, config) =
+        validate_channel(&body, None, state.config.allow_private_webhooks)?;
     ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let now = TimestampMillis::now();
     let channel = Channel {
@@ -2039,11 +2041,17 @@ async fn create_channel(
         workspace_id: member.workspace_id,
         name,
         provider,
-        config_json: config,
+        config: Some(config),
         enabled: body.enabled.unwrap_or(true),
         created_at: now,
     };
-    repo::insert_channel(&state.db, &channel, &body.monitor_ids).await?;
+    repo::insert_channel(
+        &state.db,
+        &state.config.app_key,
+        &channel,
+        &body.monitor_ids,
+    )
+    .await?;
     audit(
         &state.db,
         &member,
@@ -2066,22 +2074,25 @@ async fn update_channel(
     Json(body): Json<ChannelBody>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
     member.require_editor()?;
-    let existing = repo::workspace_channel(&state.db, member.workspace_id, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let (name, provider, config) = validate_channel(&body, state.config.allow_private_webhooks)?;
+    let existing =
+        repo::workspace_channel(&state.db, &state.config.app_key, member.workspace_id, id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    let (name, provider, config) =
+        validate_channel(&body, Some(&existing), state.config.allow_private_webhooks)?;
     ensure_monitors(&state, &member, &body.monitor_ids).await?;
     let channel = Channel {
         id,
         workspace_id: existing.workspace_id,
         name,
         provider,
-        config_json: config,
+        config: Some(config),
         enabled: body.enabled.unwrap_or(existing.enabled),
         created_at: existing.created_at,
     };
     repo::update_channel(
         &state.db,
+        &state.config.app_key,
         &channel,
         &body.monitor_ids,
         TimestampMillis::now(),
@@ -2117,9 +2128,10 @@ async fn test_channel(
     Path(id): Path<Id>,
 ) -> Result<Json<present::ChannelResponse>, AppError> {
     member.require_editor()?;
-    let channel = repo::workspace_channel(&state.db, member.workspace_id, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let channel =
+        repo::workspace_channel(&state.db, &state.config.app_key, member.workspace_id, id)
+            .await?
+            .ok_or(AppError::NotFound)?;
     let payload = NotificationPayload {
         event: NotificationEvent::Test.as_str().to_owned(),
         sent_at: TimestampMillis::now().to_string(),
@@ -2250,7 +2262,13 @@ async fn detail(
     let monitor = workspace_monitor(state, member, id).await?;
     let stats = load_stats(state, &[id]).await?;
     let recent = repo::recent_checks(&state.db, id, 60).await?;
-    let channels = repo::channels_for_monitor(&state.db, monitor.project_id, Some(id)).await?;
+    let channels = repo::channels_for_monitor(
+        &state.db,
+        &state.config.app_key,
+        monitor.project_id,
+        Some(id),
+    )
+    .await?;
     let alert_channel_count = channels.len();
     let alert_channels = if member.is_editor() {
         channels
@@ -2467,15 +2485,38 @@ fn validate_incident(title: &str, message: &str) -> Result<(String, String), App
     }
 }
 
+/// Responses never carry a channel's URL or secret, so on update an omitted or
+/// blank `url` or `secret` keeps the saved one while the provider stays the same.
 fn validate_channel(
     body: &ChannelBody,
+    existing: Option<&Channel>,
     allow_private: bool,
-) -> Result<(String, String, String), AppError> {
+) -> Result<(String, String, Value), AppError> {
     let name = body.name.trim().to_owned();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(AppError::field("name", "Use 1 to 80 characters."));
     }
     let provider = body.provider.trim().to_lowercase();
+    let saved = existing
+        .filter(|channel| channel.provider == provider)
+        .and_then(|channel| channel.config.as_ref());
+    let field = |key: &str| {
+        let given = body
+            .config
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if given.is_empty() {
+            saved
+                .and_then(|config| config.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        } else {
+            given.to_owned()
+        }
+    };
     let config = match provider.as_str() {
         "email" => {
             let to = body
@@ -2487,21 +2528,15 @@ fn validate_channel(
             if !valid_email(to) {
                 return Err(AppError::field("config", "Enter the recipient email."));
             }
-            json!({ "to": to }).to_string()
+            json!({ "to": to })
         }
         "webhook" => {
-            let url = require_http_url(body.config.get("url"), allow_private)?;
-            let secret = body
-                .config
-                .get("secret")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            json!({ "url": url, "secret": secret }).to_string()
+            let url = require_http_url(&field("url"), allow_private)?;
+            json!({ "url": url, "secret": field("secret") })
         }
         "slack" | "discord" => {
-            let url = require_http_url(body.config.get("url"), allow_private)?;
-            json!({ "url": url }).to_string()
+            let url = require_http_url(&field("url"), allow_private)?;
+            json!({ "url": url })
         }
         _ => {
             return Err(AppError::field(
@@ -2513,12 +2548,8 @@ fn validate_channel(
     Ok((name, provider, config))
 }
 
-fn require_http_url(value: Option<&Value>, allow_private: bool) -> Result<String, AppError> {
-    let url = value
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_owned();
+fn require_http_url(url: &str, allow_private: bool) -> Result<String, AppError> {
+    let url = url.to_owned();
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err(AppError::field("config", "Enter an http(s) URL."));
     }

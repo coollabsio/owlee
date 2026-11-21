@@ -2012,6 +2012,166 @@ async fn agent_errors_are_cut_to_1_kib_and_agent_calls_are_capped() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "3 a minute at once");
 }
 
+#[tokio::test]
+async fn channel_urls_and_secrets_are_sealed_masked_and_kept_on_edit() {
+    use sqlx::Row;
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, &token.unwrap()).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(1);
+    let hook = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_addr = hook.local_addr().unwrap();
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/hook/T0-PATH-TOKEN",
+            axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+                let tx = tx.clone();
+                async move {
+                    let signature = headers
+                        .get("x-owlee-signature")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    let _ = tx.send((signature, body)).await;
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        axum::serve(hook, app).await.unwrap();
+    });
+    let masked = json!({ "url_preview": format!("http://{hook_addr}/…"), "has_secret": true });
+
+    let (status, created, _) = call(
+        &app,
+        "POST",
+        "/api/notifications",
+        Some(json!({
+            "name": "Hooks", "provider": "webhook", "monitor_ids": [],
+            "config": { "url": format!("http://{hook_addr}/hook/T0-PATH-TOKEN"), "secret": "topsecret" }
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["config"], masked);
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    let stored: String = sqlx::query("SELECT config_json FROM notifications WHERE id = $1")
+        .bind(&id)
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap()
+        .try_get("config_json")
+        .unwrap();
+    assert!(stored.starts_with("v1:"), "{stored}");
+    assert!(!stored.contains("topsecret") && !stored.contains("T0-PATH-TOKEN"));
+
+    let (status, edited, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/notifications/{id}"),
+        Some(json!({ "name": "Renamed", "provider": "webhook", "monitor_ids": [], "config": { "url": "", "secret": "" } })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["config"], masked, "blank fields keep the saved ones");
+
+    let (_, listed, _) = call(&app, "GET", "/api/notifications", None, Some(&ada)).await;
+    assert_eq!(listed[0]["config"], masked);
+    for response in [&created, &listed, &edited] {
+        let text = response.to_string();
+        assert!(
+            !text.contains("topsecret") && !text.contains("T0-PATH-TOKEN"),
+            "{text}"
+        );
+    }
+
+    let (status, tested, _) = call(
+        &app,
+        "POST",
+        &format!("/api/notifications/{id}/test"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(tested["deliveries"][0]["status"], "sent", "{tested}");
+    let (signature, body) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        signature,
+        format!(
+            "sha256={}",
+            owlee_domain::sign_body("topsecret", body.as_bytes())
+        ),
+        "the kept secret still signs"
+    );
+
+    let plaintext =
+        format!(r#"{{"url":"http://{hook_addr}/hook/T0-PATH-TOKEN","secret":"topsecret"}}"#);
+    sqlx::query("UPDATE notifications SET config_json = $1 WHERE id = $2")
+        .bind(&plaintext)
+        .bind(&id)
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    let (_, listed, _) = call(&app, "GET", "/api/notifications", None, Some(&ada)).await;
+    assert_eq!(listed[0]["config"], json!({ "unreadable": true }));
+    let (_, tested, _) = call(
+        &app,
+        "POST",
+        &format!("/api/notifications/{id}/test"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(tested["deliveries"][0]["status"], "failed", "{tested}");
+    assert!(
+        tested["deliveries"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("OWLEE_APP_KEY"),
+        "{tested}"
+    );
+    let (status, problem, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/notifications/{id}"),
+        Some(json!({ "name": "Hooks", "provider": "webhook", "monitor_ids": [], "config": {} })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "nothing to keep: {problem}"
+    );
+
+    let refused = create(
+        &app,
+        &ada,
+        "/api/notifications",
+        json!({
+            "name": "Slack", "provider": "slack", "monitor_ids": [],
+            "config": { "url": "http://127.0.0.1:9/services/T9-SLACK-TOKEN" }
+        }),
+    )
+    .await;
+    let (_, tested, _) = call(
+        &app,
+        "POST",
+        &format!("/api/notifications/{refused}/test"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(tested["deliveries"][0]["status"], "failed", "{tested}");
+    assert!(!tested.to_string().contains("T9-SLACK-TOKEN"), "{tested}");
+}
+
 async fn agent_with_checks(
     app: &Router,
     who: &Who,

@@ -7,7 +7,7 @@ use owlee_domain::{
     Assertion, CheckStatus, CheckType, DailyCount, HeaderPair, IncidentImpact, IncidentStatus,
     JobType, MonitorState,
 };
-use owlee_platform::{Database, Id, ParseIdError, TimestampMillis};
+use owlee_platform::{AppKey, Database, Id, ParseIdError, TimestampMillis};
 use serde::de::DeserializeOwned;
 use sqlx::{Any, Row, Transaction};
 
@@ -202,7 +202,9 @@ pub struct Channel {
     pub workspace_id: Id,
     pub name: String,
     pub provider: String,
-    pub config_json: String,
+    /// Plaintext here, sealed in `config_json`. `None` when the stored value
+    /// does not open with `OWLEE_APP_KEY`.
+    pub config: Option<serde_json::Value>,
     pub enabled: bool,
     pub created_at: TimestampMillis,
 }
@@ -1888,18 +1890,40 @@ pub async fn in_maintenance(db: &Database, monitor_id: Id, now: i64) -> Result<b
 const CHANNEL_COLUMNS: &str =
     "n.id, n.workspace_id, n.name, n.provider, n.config_json, n.enabled, n.created_at";
 
-pub async fn list_channels(db: &Database, workspace_id: Id) -> Result<Vec<Channel>, sqlx::Error> {
+/// Channel configs hold webhook URLs and signing secrets, which are
+/// credentials, so the column is sealed per channel id.
+fn channel_aad(id: Id) -> String {
+    format!("notifications.config_json:{id}")
+}
+
+fn seal_channel_config(key: &AppKey, channel: &Channel) -> Result<String, sqlx::Error> {
+    let config = channel.config.as_ref().ok_or_else(|| {
+        sqlx::Error::Protocol("an unreadable channel config cannot be saved".into())
+    })?;
+    Ok(crate::secret_box::seal(
+        key,
+        channel_aad(channel.id).as_bytes(),
+        &config.to_string(),
+    ))
+}
+
+pub async fn list_channels(
+    db: &Database,
+    key: &AppKey,
+    workspace_id: Id,
+) -> Result<Vec<Channel>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {CHANNEL_COLUMNS} FROM notifications n WHERE n.workspace_id = $1 ORDER BY lower(n.name)"
     ))
     .bind(workspace_id.to_string())
     .fetch_all(db.pool())
     .await?;
-    rows.iter().map(map_channel).collect()
+    rows.iter().map(|row| map_channel(row, key)).collect()
 }
 
 pub async fn workspace_channel(
     db: &Database,
+    key: &AppKey,
     workspace_id: Id,
     id: Id,
 ) -> Result<Option<Channel>, sqlx::Error> {
@@ -1910,7 +1934,7 @@ pub async fn workspace_channel(
     .bind(workspace_id.to_string())
     .fetch_optional(db.pool())
     .await?;
-    row.as_ref().map(map_channel).transpose()
+    row.as_ref().map(|row| map_channel(row, key)).transpose()
 }
 
 pub async fn channel_monitors(db: &Database, id: Id) -> Result<Vec<Id>, sqlx::Error> {
@@ -1924,6 +1948,7 @@ pub async fn channel_monitors(db: &Database, id: Id) -> Result<Vec<Id>, sqlx::Er
 
 pub async fn insert_channel(
     db: &Database,
+    key: &AppKey,
     channel: &Channel,
     monitor_ids: &[Id],
 ) -> Result<(), sqlx::Error> {
@@ -1936,7 +1961,7 @@ pub async fn insert_channel(
     .bind(channel.workspace_id.to_string())
     .bind(&channel.name)
     .bind(&channel.provider)
-    .bind(&channel.config_json)
+    .bind(seal_channel_config(key, channel)?)
     .bind(bit(channel.enabled))
     .bind(channel.created_at.as_millis())
     .execute(tx.deref_mut())
@@ -1948,6 +1973,7 @@ pub async fn insert_channel(
 
 pub async fn update_channel(
     db: &Database,
+    key: &AppKey,
     channel: &Channel,
     monitor_ids: &[Id],
     now: TimestampMillis,
@@ -1958,7 +1984,7 @@ pub async fn update_channel(
     )
     .bind(&channel.name)
     .bind(&channel.provider)
-    .bind(&channel.config_json)
+    .bind(seal_channel_config(key, channel)?)
     .bind(bit(channel.enabled))
     .bind(now.as_millis())
     .bind(channel.id.to_string())
@@ -1986,6 +2012,7 @@ pub async fn delete_channel(db: &Database, workspace_id: Id, id: Id) -> Result<b
 /// `monitor_id`: those linked to it, and those linked to no monitor.
 pub async fn channels_for_monitor(
     db: &Database,
+    key: &AppKey,
     project_id: Id,
     monitor_id: Option<Id>,
 ) -> Result<Vec<Channel>, sqlx::Error> {
@@ -2003,7 +2030,7 @@ pub async fn channels_for_monitor(
         .bind(monitor_id.map(|id| id.to_string()).unwrap_or_default())
         .fetch_all(db.pool())
         .await?;
-    rows.iter().map(map_channel).collect()
+    rows.iter().map(|row| map_channel(row, key)).collect()
 }
 
 pub async fn insert_delivery(
@@ -2275,13 +2302,23 @@ fn map_incident(row: &sqlx::any::AnyRow) -> Result<Incident, sqlx::Error> {
     })
 }
 
-fn map_channel(row: &sqlx::any::AnyRow) -> Result<Channel, sqlx::Error> {
+fn map_channel(row: &sqlx::any::AnyRow, key: &AppKey) -> Result<Channel, sqlx::Error> {
+    let id = parse_id(row, "id")?;
+    let stored: String = row.try_get("config_json")?;
+    let config = crate::secret_box::open(key, channel_aad(id).as_bytes(), &stored)
+        .and_then(|plaintext| serde_json::from_str(&plaintext).ok());
+    if config.is_none() {
+        tracing::warn!(
+            channel = %id,
+            "a notification channel config does not open with OWLEE_APP_KEY; an editor must enter it again"
+        );
+    }
     Ok(Channel {
-        id: parse_id(row, "id")?,
+        id,
         workspace_id: parse_id(row, "workspace_id")?,
         name: row.try_get("name")?,
         provider: row.try_get("provider")?,
-        config_json: row.try_get("config_json")?,
+        config,
         enabled: flag(row.try_get("enabled")?),
         created_at: millis(row, "created_at")?,
     })

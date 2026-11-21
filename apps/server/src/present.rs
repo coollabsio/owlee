@@ -543,7 +543,7 @@ pub fn channel_response(
         id: channel.id,
         name: channel.name.clone(),
         provider: channel.provider.clone(),
-        config: serde_json::from_str(&channel.config_json).unwrap_or(Value::Null),
+        config: masked_config(&channel.provider, channel.config.as_ref()),
         enabled: channel.enabled,
         monitor_ids,
         deliveries: deliveries
@@ -556,6 +556,35 @@ pub fn channel_response(
                 created_at: delivery.created_at,
             })
             .collect(),
+    }
+}
+
+/// Webhook URLs and signing secrets are credentials, so editors see the
+/// recipient, the URL's origin, and whether a secret is set.
+fn masked_config(provider: &str, config: Option<&Value>) -> Value {
+    let Some(config) = config else {
+        return serde_json::json!({ "unreadable": true });
+    };
+    let text = |key: &str| config.get(key).and_then(Value::as_str).unwrap_or("");
+    match provider {
+        "email" => serde_json::json!({ "to": text("to") }),
+        "webhook" => serde_json::json!({
+            "url_preview": url_preview(text("url")),
+            "has_secret": !text("secret").is_empty(),
+        }),
+        _ => serde_json::json!({ "url_preview": url_preview(text("url")) }),
+    }
+}
+
+/// `https://hooks.slack.com/services/T0/B0/x` becomes `https://hooks.slack.com/…`.
+fn url_preview(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}/…", url.scheme()),
+            (Some(host), None) => format!("{}://{host}/…", url.scheme()),
+            _ => "…".to_owned(),
+        },
+        Err(_) => "…".to_owned(),
     }
 }
 
