@@ -9,7 +9,7 @@ import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
-import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
+import { fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function ErrorAppsPage() {
@@ -113,7 +113,7 @@ export function ErrorAppsPage() {
           </div>
         ) : null}
       </LayerCard>
-      <Dialog open={canEdit && open} wide title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it." onClose={() => setOpen(false)}>
+      <Dialog open={canEdit && open} title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it." onClose={() => setOpen(false)}>
         {open ? <NewAppForm /> : null}
       </Dialog>
     </div>
@@ -143,29 +143,19 @@ function NewAppForm() {
         create.mutate();
       }}
     >
-      <div role="radiogroup" aria-label="Platform" className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {platformIds.map((id) => (
-          <button
-            key={id}
-            type="button"
-            role="radio"
-            aria-checked={platform === id}
-            onClick={() => setPlatform(id)}
-            className={cn(
-              "rounded-lg border px-3 py-2.5 text-left transition-colors",
-              platform === id
-                ? "border-[var(--ui-accent)] bg-[var(--ui-hover)]"
-                : "border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] hover:bg-[var(--ui-hover)]",
-            )}
-          >
-            <span className="block text-[0.8125rem] font-medium text-[var(--ui-fg)]">{platformGuides[id].label}</span>
-            <span className="block truncate font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">{platformGuides[id].sdk}</span>
-          </button>
-        ))}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name">
+          <Input value={name} required placeholder={`${platformGuides[platform].label} app`} onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field label="Platform">
+          <Select
+            aria-label="Platform"
+            value={platform}
+            options={platformIds.map((id) => ({ value: id, label: platformGuides[id].label }))}
+            onChange={setPlatform}
+          />
+        </Field>
       </div>
-      <Field label="Name">
-        <Input value={name} required placeholder={`${platformGuides[platform].label} app`} onChange={(event) => setName(event.target.value)} />
-      </Field>
       <ProjectField value={projectId} onChange={setProjectId} />
       <ErrorText error={create.error} />
       <div className="flex justify-end">
