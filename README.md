@@ -101,7 +101,18 @@ owlee setup-token rotate
 
 The root user opens registration in Admin. It stays closed until a mail server is saved there, or `OWLEE_SMTP_HOST` and `OWLEE_SMTP_FROM` are set, and the root user turns Open registration on. Clearing the saved mail server closes registration again. `OWLEE_OPEN_SIGNUP` is ignored. A person who opens `/register` enters an email address, and Owlee mails a link that works once, for 24 hours. The link opens a page where they choose a password. If the address already has an account, the mail says so instead, and the page shows the same message in both cases. `/forgot-password` mails a reset link that works once, for 1 hour, and the reset signs out every session of that account. Without a mail server, no reset mail is sent and the server logs a warning. Each address gets at most about 3 of these mails an hour.
 
-New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings. The root account itself cannot be changed. Every account can change its own password in Account settings, which signs out its other sessions, and can sign out any of its sessions there.
+New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings and other installation admins. Every account can change its own password in Account settings, which signs out its other sessions, and can sign out any of its sessions there.
+
+Without a mail server or open registration, add people in either of two ways. When an installation admin sends a workspace invite to an address with no account, the link lets the person choose a name and password, which creates a member account and joins the workspace. The link works once. An invite from a workspace owner who is not an installation admin needs an existing account, so the person registers first or asks an admin. In Admin > Users, an installation admin can create an account with an email and password, disable or enable it, set a new password, or delete it. Disabling and setting a password sign the account out everywhere. A disabled account keeps its data and memberships but cannot sign in. An account that owns a workspace cannot be deleted, so disable it instead. Only the root user can change another installation admin, and the root account itself cannot be changed. On the host, `owlee user` creates, disables, and enables accounts and sets passwords. On SQLite, stop Owlee first:
+
+```bash
+owlee user create --email ada@example.com --name Ada    # asks for the password
+echo "$PASSWORD" | owlee user set-password --email ada@example.com --password-stdin
+owlee user disable --email ada@example.com
+owlee user enable --email ada@example.com
+```
+
+`owlee user set-password` also works on the root account, so a lost root password can be reset without mail.
 
 Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. The `403` names the origin it received and the one it expected. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
 

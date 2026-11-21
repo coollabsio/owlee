@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, ErrorText, Field, Input, LayerCard, Spinner, StatusBadge, Switch } from "@/components/ui";
+import { Button, ConfirmDialog, Dialog, ErrorText, Field, Input, LayerCard, RowActions, type RowAction, Spinner, StatusBadge, Switch } from "@/components/ui";
 import {
   ApiError,
   api,
@@ -74,7 +74,7 @@ export function AdminUsersPage() {
   });
   return (
     <SettingsView title="Users" description="Every account on this Owlee install." requires="admin">
-      <UsersCard users={users.data} error={users.error} canChange={root} />
+      <UsersCard users={users.data} error={users.error} root={root} />
     </SettingsView>
   );
 }
@@ -292,34 +292,65 @@ function EmailForm({ settings }: { settings?: InstanceSettings }) {
   );
 }
 
+type UserAction = { kind: "demote" | "disable" | "delete" | "password"; user: AdminUser };
+
 function UsersCard({
   users,
   error,
-  canChange,
+  root,
 }: {
   users?: AdminUser[];
   error: unknown;
-  canChange: boolean;
+  /** Only the root user changes installation admins. Admins manage members. */
+  root: boolean;
 }) {
   const client = useQueryClient();
-  const [demoting, setDemoting] = useState<AdminUser | null>(null);
-  const mutation = useMutation({
-    mutationFn: ({ id, admin }: { id: string; admin: boolean }) =>
-      api<AdminUser>(`/api/admin/users/${id}/admin`, {
-        method: "PUT",
-        body: JSON.stringify({ admin }),
-      }),
+  const [creating, setCreating] = useState(false);
+  const [pending, setPending] = useState<UserAction | null>(null);
+  const change = useMutation({
+    mutationFn: ({ path, method, body }: { path: string; method: "PUT" | "DELETE"; body?: unknown }) =>
+      api(`/api/admin/users/${path}`, { method, body: body === undefined ? undefined : JSON.stringify(body) }),
     onSuccess: () => {
-      setDemoting(null);
+      setPending(null);
       void client.invalidateQueries({ queryKey: ["admin-users"] });
     },
   });
+  const close = () => {
+    setPending(null);
+    change.reset();
+  };
+  const name = pending?.user.display_name ?? "This user";
+
+  function actions(user: AdminUser): RowAction[] {
+    const list: RowAction[] = [];
+    if (root) {
+      list.push(
+        user.installation_admin
+          ? { label: "Remove admin", onSelect: () => setPending({ kind: "demote", user }) }
+          : { label: "Make admin", onSelect: () => change.mutate({ path: `${user.id}/admin`, method: "PUT", body: { admin: true } }) },
+      );
+    }
+    list.push({ label: "Set password", onSelect: () => setPending({ kind: "password", user }) });
+    list.push(
+      user.disabled
+        ? { label: "Enable", onSelect: () => change.mutate({ path: `${user.id}/disabled`, method: "PUT", body: { disabled: false } }) }
+        : { label: "Disable", danger: true, onSelect: () => setPending({ kind: "disable", user }) },
+    );
+    list.push({ label: "Delete", danger: true, onSelect: () => setPending({ kind: "delete", user }) });
+    return list.map((action) => ({ ...action, disabled: change.isPending }));
+  }
+
   return (
     <LayerCard
       title="Accounts"
-      description="The root user is created at setup and cannot be changed. Only the root user can make or remove an installation admin."
+      description="The root user is created at setup and cannot be changed. Admins manage members. Only the root user can make, remove, or change an installation admin."
+      actions={
+        <Button type="button" size="sm" variant="primary" onClick={() => setCreating(true)}>
+          Create user
+        </Button>
+      }
     >
-      <ErrorText error={error || (demoting ? null : mutation.error)} />
+      <ErrorText error={error || (pending ? null : change.error)} />
       <ul className="divide-y divide-[var(--ui-well-border)]">
         {(users ?? []).map((user) => (
           <li key={user.id} className="flex items-center gap-3 py-2.5">
@@ -328,36 +359,127 @@ function UsersCard({
               <div className="truncate text-xs text-[var(--ui-fg-faint)]">{user.email}</div>
             </div>
             <span className="flex shrink-0 items-center gap-1.5">
+              {user.disabled ? <StatusBadge tone="warning">Disabled</StatusBadge> : null}
               {user.root ? <StatusBadge tone="info">Root</StatusBadge> : null}
               {user.installation_admin && !user.root ? <StatusBadge>Admin</StatusBadge> : null}
             </span>
-            {canChange && !user.root ? (
-              <Button
-                type="button"
-                size="sm"
-                disabled={mutation.isPending}
-                onClick={() => (user.installation_admin ? setDemoting(user) : mutation.mutate({ id: user.id, admin: true }))}
-              >
-                {user.installation_admin ? "Remove admin" : "Make admin"}
-              </Button>
+            {!user.root && (root || !user.installation_admin) ? (
+              <RowActions label={user.display_name} actions={actions(user)} />
             ) : null}
           </li>
         ))}
       </ul>
       <ConfirmDialog
-        open={demoting !== null}
+        open={pending?.kind === "demote"}
         title="Remove admin?"
-        description={`${demoting?.display_name ?? "This user"} loses installation admin access. The root user can make them an admin again.`}
+        description={`${name} loses installation admin access. The root user can make them an admin again.`}
         confirmLabel="Remove admin"
-        pending={mutation.isPending}
-        error={mutation.error}
-        onConfirm={() => demoting && mutation.mutate({ id: demoting.id, admin: false })}
-        onClose={() => {
-          setDemoting(null);
-          mutation.reset();
-        }}
+        pending={change.isPending}
+        error={change.error}
+        onConfirm={() => pending && change.mutate({ path: `${pending.user.id}/admin`, method: "PUT", body: { admin: false } })}
+        onClose={close}
       />
+      <ConfirmDialog
+        open={pending?.kind === "disable"}
+        title={`Disable ${name}?`}
+        description="They are signed out everywhere and cannot sign in until an admin enables the account. Their data and workspace memberships stay."
+        confirmLabel="Disable"
+        pending={change.isPending}
+        error={change.error}
+        onConfirm={() => pending && change.mutate({ path: `${pending.user.id}/disabled`, method: "PUT", body: { disabled: true } })}
+        onClose={close}
+      />
+      <ConfirmDialog
+        open={pending?.kind === "delete"}
+        title={`Delete ${name}?`}
+        description="The account, its sessions, its workspace memberships, and the invitations it sent are deleted. This cannot be undone. An account that owns a workspace cannot be deleted. Disable it instead."
+        confirmLabel="Delete account"
+        pending={change.isPending}
+        error={change.error}
+        onConfirm={() => pending && change.mutate({ path: pending.user.id, method: "DELETE" })}
+        onClose={close}
+      />
+      {pending?.kind === "password" ? <PasswordDialog user={pending.user} onClose={close} /> : null}
+      {creating ? <CreateUserDialog onClose={() => setCreating(false)} /> : null}
     </LayerCard>
   );
 }
 
+function CreateUserDialog({ onClose }: { onClose: () => void }) {
+  const client = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const create = useMutation({
+    mutationFn: () =>
+      api<AdminUser>("/api/admin/users", {
+        method: "POST",
+        body: JSON.stringify({ email, password, display_name: displayName }),
+      }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["admin-users"] });
+      onClose();
+    },
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    create.mutate();
+  }
+  return (
+    <Dialog open title="Create user" description="New accounts are members. Share the password with them. They can change it in Account settings." onClose={onClose}>
+      <form className="space-y-4" onSubmit={submit}>
+        <Field label="Name" hint="optional" error={fields.display_name}>
+          <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Andras Bacsai" />
+        </Field>
+        <Field label="Email" error={fields.email}>
+          <Input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@coollabs.io" />
+        </Field>
+        <Field label="Password" hint="12+ characters" error={fields.password}>
+          <Input type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+        </Field>
+        <ErrorText error={Object.keys(fields).length ? null : create.error} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={create.isPending}>
+            {create.isPending ? <><Spinner />Creating…</> : "Create user"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
+function PasswordDialog({ user, onClose }: { user: AdminUser; onClose: () => void }) {
+  const [password, setPassword] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const save = useMutation({
+    mutationFn: () =>
+      api(`/api/admin/users/${user.id}/password`, { method: "PUT", body: JSON.stringify({ password }) }),
+    onSuccess: onClose,
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    save.mutate();
+  }
+  return (
+    <Dialog open title={`Set a password for ${user.display_name}`} description="They are signed out everywhere. Share the new password with them." onClose={onClose}>
+      <form className="space-y-4" onSubmit={submit}>
+        <Field label="New password" hint="12+ characters" error={fields.password}>
+          <Input type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+        </Field>
+        <ErrorText error={Object.keys(fields).length ? null : save.error} />
+        <div className="flex justify-end gap-2">
+          <Button type="button" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={save.isPending}>
+            {save.isPending ? <><Spinner />Saving…</> : "Set password"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}

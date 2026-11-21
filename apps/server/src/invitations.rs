@@ -1,5 +1,7 @@
 //! Workspace invitations. The link carries a random token and only its hash is
-//! stored. Accepting needs a signed-in account whose email matches the invite.
+//! stored. Accepting needs a signed-in account whose email matches the invite,
+//! or, when the address has no account yet and an installation admin sent the
+//! invite, creates one from the link.
 
 use std::ops::DerefMut;
 
@@ -15,9 +17,14 @@ use sqlx::Row;
 
 use crate::error::AppError;
 use crate::notify;
-use crate::repo::{millis, parse_id};
-use crate::routes::{mail_allowed, request_email, require_user};
-use crate::state::AppState;
+use crate::peer::Client;
+use crate::present::UserResponse;
+use crate::repo::{self, millis, parse_id};
+use crate::routes::{
+    account_fields, display_name_field, is_installation_admin, issue_session, limit_auth_ip,
+    mail_allowed, password_field, request_email, require_user, user_response,
+};
+use crate::state::{self, AppState};
 use crate::workspaces::{Member, Role, audit, insert_membership, lock_workspace};
 
 const INVITATION_LIFETIME_MS: i64 = 7 * 86_400_000;
@@ -42,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         // `id` is an invitation id for DELETE and the link token for GET.
         .route("/invitations/{id}", get(preview).delete(revoke))
         .route("/invitations/{id}/accept", post(accept))
+        .route("/invitations/{id}/register", post(register))
 }
 
 async fn list(
@@ -224,7 +232,7 @@ async fn preview(
     Path(token): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let row = sqlx::query(&format!(
-        "SELECT i.email, i.role, w.name FROM workspace_invitations i \
+        "SELECT i.email, i.normalized_email, i.role, i.invited_by, w.name FROM workspace_invitations i \
          JOIN workspaces w ON w.id = i.workspace_id \
          WHERE i.token_hash = $1 AND {PENDING} AND i.expires_at > $2"
     ))
@@ -233,11 +241,26 @@ async fn preview(
     .fetch_optional(state.db.pool())
     .await?
     .ok_or(AppError::NotFound)?;
+    let normalized: String = row.try_get("normalized_email")?;
+    let account_exists = repo::user_by_email(&state.db, &normalized).await?.is_some();
+    let can_register =
+        !account_exists && inviter_creates_accounts(&state, parse_id(&row, "invited_by")?).await?;
     Ok(Json(json!({
         "workspace_name": row.try_get::<String, _>("name")?,
         "email": row.try_get::<String, _>("email")?,
         "role": Role::from_row(&row)?,
+        "account_exists": account_exists,
+        "can_register": can_register,
     })))
+}
+
+/// Anyone may invite, but only an installation admin may create accounts. A link
+/// from anyone else would let them claim an address they do not control.
+async fn inviter_creates_accounts(state: &AppState, inviter: Id) -> Result<bool, AppError> {
+    match repo::user_by_id(&state.db, inviter).await? {
+        Some(user) if !user.disabled => is_installation_admin(state, &user).await,
+        _ => Ok(false),
+    }
 }
 
 async fn accept(
@@ -279,4 +302,126 @@ async fn accept(
     insert_membership(&mut tx, workspace_id, user.id, Role::from_row(&row)?, now).await?;
     tx.commit().await?;
     Ok(Json(json!({ "workspace_id": workspace_id })))
+}
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    password: String,
+    display_name: Option<String>,
+}
+
+/// Creates the invited account, joins the workspace, and signs in. The link
+/// proves the address, so this needs neither open registration nor a mail
+/// server, but only when an installation admin sent it. The email always comes
+/// from the invitation.
+async fn register(
+    State(state): State<AppState>,
+    client: Client,
+    jar: CookieJar,
+    Path(token): Path<String>,
+    Json(body): Json<RegisterBody>,
+) -> Result<(StatusCode, CookieJar, Json<UserResponse>), AppError> {
+    limit_auth_ip(&state, &client.limit_key)?;
+    state
+        .passwords
+        .validate(&body.password)
+        .map_err(password_field)?;
+    let display_name = display_name_field(body.display_name)?;
+    let token_hash = hash_token(&token);
+    // A wrong token must not buy a password hash, so look before hashing and
+    // claim the link only after.
+    let invited = sqlx::query(&format!(
+        "SELECT email, invited_by FROM workspace_invitations \
+         WHERE token_hash = $1 AND {PENDING} AND expires_at > $2"
+    ))
+    .bind(&token_hash)
+    .bind(TimestampMillis::now().as_millis())
+    .fetch_optional(state.db.pool())
+    .await?
+    .ok_or(AppError::NotFound)?;
+    if !inviter_creates_accounts(&state, parse_id(&invited, "invited_by")?).await? {
+        return Err(AppError::Forbidden(
+            "Only invitations from an installation admin can create an account. Register, or ask an admin to create your account, then open this link again.",
+        ));
+    }
+    let account = account_fields(&invited.try_get::<String, _>("email")?, display_name)?;
+    if repo::user_by_email(&state.db, &account.normalized)
+        .await?
+        .is_some()
+    {
+        return Err(account_exists());
+    }
+    let hash = state::hash_password(&state, body.password)
+        .await
+        .map_err(password_field)?;
+
+    let now = TimestampMillis::now();
+    let mut tx = state.db.begin_immediate().await?;
+    let row = sqlx::query(&format!(
+        "SELECT id, workspace_id, role FROM workspace_invitations \
+         WHERE token_hash = $1 AND {PENDING} AND expires_at > $2"
+    ))
+    .bind(&token_hash)
+    .bind(now.as_millis())
+    .fetch_optional(tx.deref_mut())
+    .await?
+    .ok_or(AppError::NotFound)?;
+    let claimed = sqlx::query(&format!(
+        "UPDATE workspace_invitations SET accepted_at = $1 WHERE id = $2 AND {PENDING}"
+    ))
+    .bind(now.as_millis())
+    .bind(row.try_get::<String, _>("id")?)
+    .execute(tx.deref_mut())
+    .await?;
+    if claimed.rows_affected() != 1 {
+        return Err(AppError::NotFound);
+    }
+    let taken = sqlx::query("SELECT id FROM users WHERE normalized_email = $1")
+        .bind(&account.normalized)
+        .fetch_optional(tx.deref_mut())
+        .await?;
+    if taken.is_some() {
+        return Err(account_exists());
+    }
+    let user_id = Id::new();
+    sqlx::query(
+        "INSERT INTO users (id, email, normalized_email, display_name, password_hash, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $6)",
+    )
+    .bind(user_id.to_string())
+    .bind(&account.email)
+    .bind(&account.normalized)
+    .bind(&account.display_name)
+    .bind(&hash)
+    .bind(now.as_millis())
+    .execute(tx.deref_mut())
+    .await?;
+    let workspace_id = parse_id(&row, "workspace_id")?;
+    insert_membership(&mut tx, workspace_id, user_id, Role::from_row(&row)?, now).await?;
+    tx.commit().await?;
+
+    let user = repo::user_by_id(&state.db, user_id)
+        .await?
+        .ok_or(AppError::Internal)?;
+    let jar = issue_session(&state, jar, &user, now).await?;
+    let _ = repo::insert_audit(
+        &state.db,
+        Some(user.id),
+        "auth.register_invited",
+        "user",
+        Some(&user.id.to_string()),
+        now,
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        jar,
+        Json(user_response(&state, &user).await?),
+    ))
+}
+
+fn account_exists() -> AppError {
+    AppError::Conflict(
+        "This email already has an account. Sign in to accept the invitation.".into(),
+    )
 }

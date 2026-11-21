@@ -1165,3 +1165,310 @@ async fn a_json_body_over_512_kib_is_refused() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+async fn me(app: &App, cookie: &str) -> Hit {
+    call(&app.router, "GET", "/api/auth/me", None, Some(cookie), &[]).await
+}
+
+async fn create_user(app: &App, by: &str, email: &str) -> Hit {
+    call(
+        &app.router,
+        "POST",
+        "/api/admin/users",
+        Some(json!({ "email": email, "password": PASSWORD, "display_name": "Made" })),
+        Some(by),
+        &[],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_disabled_account_cannot_sign_in_and_its_sessions_stop_working() {
+    let app = app().await;
+    let created = create_user(&app, &app.root, "made@coollabs.io").await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(created.body["email"], "made@coollabs.io");
+    assert_eq!(created.body["installation_admin"], false);
+    assert_eq!(created.body["disabled"], false);
+    let again = create_user(&app, &app.root, "MADE@coollabs.io").await;
+    assert_eq!(again.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        again.body["fields"]["email"],
+        "An account with this email already exists."
+    );
+    let id = created.body["id"].as_str().unwrap().to_owned();
+    let session = login(&app, "made@coollabs.io", PASSWORD)
+        .await
+        .cookie
+        .unwrap();
+    assert_eq!(me(&app, &session).await.status, StatusCode::OK);
+
+    let disabled = call(
+        &app.router,
+        "PUT",
+        &format!("/api/admin/users/{id}/disabled"),
+        Some(json!({ "disabled": true })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    assert_eq!(disabled.status, StatusCode::OK, "{}", disabled.body);
+    assert_eq!(disabled.body["disabled"], true);
+    assert_eq!(me(&app, &session).await.status, StatusCode::UNAUTHORIZED);
+    let refused = login(&app, "made@coollabs.io", PASSWORD).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.body["detail"],
+        "This account is disabled. Ask an admin to enable it."
+    );
+    assert_eq!(refused.cookie, None);
+
+    let enabled = call(
+        &app.router,
+        "PUT",
+        &format!("/api/admin/users/{id}/disabled"),
+        Some(json!({ "disabled": false })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    assert_eq!(enabled.body["disabled"], false, "{}", enabled.body);
+    let session = login(&app, "made@coollabs.io", PASSWORD)
+        .await
+        .cookie
+        .unwrap();
+    assert_eq!(me(&app, &session).await.status, StatusCode::OK);
+
+    // A session that outlived the disable, such as one made mid-request, is refused too.
+    sqlx::query("UPDATE users SET disabled_at = 1 WHERE id = $1")
+        .bind(&id)
+        .execute(app.state.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(me(&app, &session).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        call(
+            &app.router,
+            "GET",
+            "/api/monitors",
+            None,
+            Some(&session),
+            &app.scope()
+        )
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn an_admin_password_reset_signs_out_every_session() {
+    let app = app().await;
+    let created = create_user(&app, &app.root, "made@coollabs.io").await;
+    let id = created.body["id"].as_str().unwrap().to_owned();
+    let first = login(&app, "made@coollabs.io", PASSWORD)
+        .await
+        .cookie
+        .unwrap();
+    let second = login(&app, "made@coollabs.io", PASSWORD)
+        .await
+        .cookie
+        .unwrap();
+    let uri = format!("/api/admin/users/{id}/password");
+
+    let weak = call(
+        &app.router,
+        "PUT",
+        &uri,
+        Some(json!({ "password": "short" })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    assert_eq!(weak.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(weak.body["fields"]["password"].is_string(), "{}", weak.body);
+    assert_eq!(me(&app, &first).await.status, StatusCode::OK);
+
+    let set = call(
+        &app.router,
+        "PUT",
+        &uri,
+        Some(json!({ "password": "a-brand-new-passphrase" })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    assert_eq!(set.status, StatusCode::NO_CONTENT, "{}", set.body);
+    assert_eq!(me(&app, &first).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(me(&app, &second).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        login(&app, "made@coollabs.io", PASSWORD).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login(&app, "made@coollabs.io", "a-brand-new-passphrase")
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn only_admins_manage_accounts_and_only_root_manages_admins() {
+    let app = app().await;
+    let member = app.member().await;
+    let member_id = me(&app, &member).await.body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root_id = me(&app, &app.root).await.body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let admin_body = create_user(&app, &app.root, "admin@coollabs.io").await.body;
+    let admin_id = admin_body["id"].as_str().unwrap().to_owned();
+    let promoted = call(
+        &app.router,
+        "PUT",
+        &format!("/api/admin/users/{admin_id}/admin"),
+        Some(json!({ "admin": true })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    assert_eq!(promoted.status, StatusCode::OK, "{}", promoted.body);
+    let admin = login(&app, "admin@coollabs.io", PASSWORD)
+        .await
+        .cookie
+        .unwrap();
+
+    let actions = |id: &str| {
+        [
+            (
+                "PUT",
+                format!("/api/admin/users/{id}/disabled"),
+                Some(json!({ "disabled": true })),
+            ),
+            (
+                "PUT",
+                format!("/api/admin/users/{id}/password"),
+                Some(json!({ "password": "a-brand-new-passphrase" })),
+            ),
+            ("DELETE", format!("/api/admin/users/{id}"), None),
+        ]
+    };
+    let member_create = create_user(&app, &member, "x@coollabs.io").await;
+    assert_eq!(member_create.status, StatusCode::FORBIDDEN);
+    for (method, uri, body) in actions(&admin_id) {
+        let hit = call(&app.router, method, &uri, body, Some(&member), &[]).await;
+        assert_eq!(hit.status, StatusCode::FORBIDDEN, "member {method} {uri}");
+    }
+    let other = create_user(&app, &app.root, "other@coollabs.io").await.body;
+    for (method, uri, body) in actions(other["id"].as_str().unwrap()) {
+        let hit = call(&app.router, method, &uri, body, Some(&member), &[]).await;
+        assert_eq!(hit.status, StatusCode::FORBIDDEN, "member {method} {uri}");
+    }
+
+    for (method, uri, body) in actions(&root_id) {
+        let hit = call(
+            &app.router,
+            method,
+            &uri,
+            body.clone(),
+            Some(&app.root),
+            &[],
+        )
+        .await;
+        assert_eq!(hit.status, StatusCode::CONFLICT, "root {method} {uri}");
+        assert_eq!(hit.body["detail"], "The root account cannot be changed.");
+    }
+
+    let second_admin = create_user(&app, &admin, "second@coollabs.io").await;
+    assert_eq!(
+        second_admin.status,
+        StatusCode::CREATED,
+        "{}",
+        second_admin.body
+    );
+    let peer_id = second_admin.body["id"].as_str().unwrap().to_owned();
+    call(
+        &app.router,
+        "PUT",
+        &format!("/api/admin/users/{peer_id}/admin"),
+        Some(json!({ "admin": true })),
+        Some(&app.root),
+        &[],
+    )
+    .await;
+    for (method, uri, body) in actions(&peer_id) {
+        let hit = call(&app.router, method, &uri, body, Some(&admin), &[]).await;
+        assert_eq!(
+            hit.status,
+            StatusCode::FORBIDDEN,
+            "admin on admin {method} {uri}"
+        );
+        assert_eq!(
+            hit.body["detail"],
+            "Only the root user can change an installation admin."
+        );
+    }
+
+    let disabled = call(
+        &app.router,
+        "PUT",
+        &format!("/api/admin/users/{member_id}/disabled"),
+        Some(json!({ "disabled": true })),
+        Some(&admin),
+        &[],
+    )
+    .await;
+    assert_eq!(disabled.status, StatusCode::OK, "{}", disabled.body);
+
+    let owner = owlee_server::editor_session(&app.state).await.unwrap();
+    let refused = call(
+        &app.router,
+        "DELETE",
+        &format!("/api/admin/users/{}", owner.user_id),
+        None,
+        Some(&admin),
+        &[],
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.body["detail"],
+        "This account owns a workspace: Test workspace. Only the owner can delete a workspace, so disable the account instead."
+    );
+
+    let deleted = call(
+        &app.router,
+        "DELETE",
+        &format!("/api/admin/users/{member_id}"),
+        None,
+        Some(&admin),
+        &[],
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    let list = call(
+        &app.router,
+        "GET",
+        "/api/admin/users",
+        None,
+        Some(&admin),
+        &[],
+    )
+    .await;
+    let emails: Vec<&str> = list
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|user| user["email"].as_str().unwrap())
+        .collect();
+    assert_eq!(emails.len(), 5, "{emails:?}");
+    assert!(
+        !emails.iter().any(|email| email.starts_with("member-")),
+        "{emails:?}"
+    );
+}

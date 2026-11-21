@@ -5,9 +5,13 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use owlee_platform::{Config, TimestampMillis};
 
+use crate::accounts;
 use crate::agent;
 use crate::connectivity::Connectivity;
+use crate::error::AppError;
+use crate::instance_settings;
 use crate::ownership;
+use crate::repo;
 use crate::scheduler;
 use crate::seed;
 use crate::setup;
@@ -55,6 +59,15 @@ enum Command {
         #[command(subcommand)]
         command: SetupTokenCommand,
     },
+    /// Create an account, disable or enable it, or set its password.
+    /// On SQLite, stop Owlee first. On Postgres, this can run while Owlee is up.
+    User {
+        /// SQLite database file. Ignored when a Postgres URL is configured.
+        #[arg(long)]
+        database: Option<PathBuf>,
+        #[command(subcommand)]
+        command: UserCommand,
+    },
     /// Run checks from this network and report them to a Owlee server. Checks come from a
     /// config file, OWLEE_AGENT_CHECK_<n>_<KEY> environment variables, or both.
     Agent {
@@ -67,6 +80,39 @@ enum Command {
         /// TOML file with [[check]] entries. Optional when the checks are in environment variables.
         #[arg(long, env = "OWLEE_AGENT_CONFIG")]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserCommand {
+    /// Create a member account. Asks for the password unless --password-stdin is set.
+    Create {
+        #[arg(long)]
+        email: String,
+        /// Display name. Defaults to the part of the email before the @.
+        #[arg(long)]
+        name: Option<String>,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Block sign-in and end every session. The account's data stays.
+    Disable {
+        #[arg(long)]
+        email: String,
+    },
+    /// Allow a disabled account to sign in again.
+    Enable {
+        #[arg(long)]
+        email: String,
+    },
+    /// Replace the password and end every session. Works for the root account too.
+    SetPassword {
+        #[arg(long)]
+        email: String,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
     },
 }
 
@@ -174,6 +220,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::User { database, command } => {
+            let config = load(None, database)?;
+            let _sqlite_owner = sqlite_owner(&config)?;
+            let state = state::boot(config).await?;
+            println!("{}", user_command(&state, command).await?);
+        }
         Command::Healthcheck => {
             let config = Config::from_env()?;
             let url = format!("http://127.0.0.1:{}/api/health/ready", config.port);
@@ -189,6 +241,124 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+async fn user_command(
+    state: &state::AppState,
+    command: UserCommand,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let now = TimestampMillis::now();
+    let (action, done, user) = match command {
+        UserCommand::Create {
+            email,
+            name,
+            password_stdin,
+        } => {
+            let password = read_password(password_stdin)?;
+            let user = accounts::create_account(state, &email, name, password, now)
+                .await
+                .map_err(cli_error)?;
+            ("user.created", "created", user)
+        }
+        UserCommand::Disable { email } => {
+            let user = existing(state, &email).await?;
+            if instance_settings::root_user_id(&state.db).await? == Some(user.id) {
+                return Err("the root account cannot be disabled".into());
+            }
+            accounts::disable_account(state, user.id, true, now)
+                .await
+                .map_err(cli_error)?;
+            ("user.disabled", "disabled", user)
+        }
+        UserCommand::Enable { email } => {
+            let user = existing(state, &email).await?;
+            accounts::disable_account(state, user.id, false, now)
+                .await
+                .map_err(cli_error)?;
+            ("user.enabled", "enabled", user)
+        }
+        UserCommand::SetPassword {
+            email,
+            password_stdin,
+        } => {
+            let user = existing(state, &email).await?;
+            let password = read_password(password_stdin)?;
+            accounts::reset_password(state, user.id, password, now)
+                .await
+                .map_err(cli_error)?;
+            ("user.password_set", "set the password of", user)
+        }
+    };
+    let _ = repo::insert_audit(
+        &state.db,
+        None,
+        action,
+        "user",
+        Some(&user.id.to_string()),
+        now,
+    )
+    .await;
+    Ok(format!("{done} {}", user.email))
+}
+
+async fn existing(
+    state: &state::AppState,
+    email: &str,
+) -> Result<repo::User, Box<dyn std::error::Error>> {
+    Ok(
+        repo::user_by_email(&state.db, &owlee_platform::normalize_email(email))
+            .await?
+            .ok_or_else(|| format!("no account for {email}"))?,
+    )
+}
+
+fn cli_error(error: AppError) -> Box<dyn std::error::Error> {
+    match error {
+        AppError::Validation(fields) => fields.into_values().collect::<Vec<_>>().join(" ").into(),
+        AppError::Conflict(message) => message.into(),
+        other => other.to_string().into(),
+    }
+}
+
+/// The first line of stdin, or two prompts on a terminal with echo off.
+fn read_password(from_stdin: bool) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let stdin = std::io::stdin();
+    if from_stdin {
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\n', '\r']).to_owned());
+    }
+    if !stdin.is_terminal() {
+        return Err("no terminal to ask for the password; pass --password-stdin".into());
+    }
+    let ask = |prompt: &str| -> Result<String, Box<dyn std::error::Error>> {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+        set_echo(false);
+        let mut line = String::new();
+        let read = stdin.lock().read_line(&mut line);
+        set_echo(true);
+        eprintln!();
+        read?;
+        Ok(line.trim_end_matches(['\n', '\r']).to_owned())
+    };
+    let password = ask("Password: ")?;
+    if ask("Repeat password: ")? != password {
+        return Err("the passwords do not match".into());
+    }
+    Ok(password)
+}
+
+fn set_echo(on: bool) {
+    #[cfg(unix)]
+    let _ = std::process::Command::new("stty")
+        .arg(if on { "echo" } else { "-echo" })
+        .stdin(std::process::Stdio::inherit())
+        .status();
+    #[cfg(not(unix))]
+    let _ = on;
 }
 
 /// SQLite is owned by one Owlee process. Postgres stays unlocked so `setup-token`
@@ -231,6 +401,29 @@ mod tests {
             cli.command,
             Some(Command::SetupToken {
                 command: SetupTokenCommand::Rotate { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_user_set_password() {
+        let cli = Cli::try_parse_from([
+            "owlee",
+            "user",
+            "set-password",
+            "--email",
+            "a@example.com",
+            "--password-stdin",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::User {
+                command: UserCommand::SetPassword {
+                    password_stdin: true,
+                    ..
+                },
                 ..
             })
         ));

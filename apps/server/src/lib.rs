@@ -3,6 +3,7 @@
 //! Mirrors Orbit's `apps/server`: a binary that migrates on boot, serves the
 //! API, and embeds the built React app. There is no realtime layer.
 
+mod accounts;
 mod agent;
 mod checker;
 mod cli;

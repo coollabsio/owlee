@@ -46,6 +46,8 @@ pub struct User {
     pub display_name: String,
     pub installation_admin: bool,
     pub password_hash: String,
+    /// Cannot sign in. Sessions stop working even if one was missed at disable time.
+    pub disabled: bool,
     #[allow(dead_code)]
     pub created_at: TimestampMillis,
 }
@@ -233,7 +235,7 @@ pub async fn count_users(db: &Database) -> Result<i64, sqlx::Error> {
 
 pub async fn user_by_email(db: &Database, email: &str) -> Result<Option<User>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE normalized_email = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, disabled_at, created_at FROM users WHERE normalized_email = $1",
     )
     .bind(email)
     .fetch_optional(db.pool())
@@ -247,11 +249,12 @@ pub struct Account {
     pub email: String,
     pub display_name: String,
     pub installation_admin: bool,
+    pub disabled: bool,
 }
 
 pub async fn list_accounts(db: &Database) -> Result<Vec<Account>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, email, display_name, installation_admin FROM users ORDER BY created_at, id",
+        "SELECT id, email, display_name, installation_admin, disabled_at FROM users ORDER BY created_at, id",
     )
     .fetch_all(db.pool())
     .await?;
@@ -262,6 +265,7 @@ pub async fn list_accounts(db: &Database) -> Result<Vec<Account>, sqlx::Error> {
                 email: row.try_get("email")?,
                 display_name: row.try_get("display_name")?,
                 installation_admin: row.try_get::<i64, _>("installation_admin")? != 0,
+                disabled: row.try_get::<Option<i64>, _>("disabled_at")?.is_some(),
             })
         })
         .collect()
@@ -366,12 +370,16 @@ pub async fn authenticate(
         .await?;
     }
     let user = sqlx::query(
-        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE id = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, disabled_at, created_at FROM users WHERE id = $1",
     )
     .bind(&user_id)
     .fetch_optional(db.pool())
     .await?;
-    user.as_ref().map(map_user).transpose()
+    Ok(user
+        .as_ref()
+        .map(map_user)
+        .transpose()?
+        .filter(|user| !user.disabled))
 }
 
 pub async fn revoke_token(
@@ -389,7 +397,7 @@ pub async fn revoke_token(
 
 pub async fn user_by_id(db: &Database, id: Id) -> Result<Option<User>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, email, display_name, installation_admin, password_hash, created_at FROM users WHERE id = $1",
+        "SELECT id, email, display_name, installation_admin, password_hash, disabled_at, created_at FROM users WHERE id = $1",
     )
     .bind(id.to_string())
     .fetch_optional(db.pool())
@@ -2064,6 +2072,7 @@ fn map_user(row: &sqlx::any::AnyRow) -> Result<User, sqlx::Error> {
         display_name: row.try_get("display_name")?,
         installation_admin: row.try_get::<i64, _>("installation_admin")? != 0,
         password_hash: row.try_get("password_hash")?,
+        disabled: row.try_get::<Option<i64>, _>("disabled_at")?.is_some(),
         created_at: millis(row, "created_at")?,
     })
 }

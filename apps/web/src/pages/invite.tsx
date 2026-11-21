@@ -1,12 +1,15 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { Button, ErrorText } from "@/components/ui";
-import { ApiError, api, type InvitationLookup, signOut } from "@/lib/api";
+import { Button, ErrorText, Field, Input, Spinner } from "@/components/ui";
+import { ApiError, api, type InvitationLookup, signOut, type User } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { switchWorkspace } from "@/lib/workspace";
-import { AuthShell, rememberPendingInvite } from "@/pages/auth";
+import { AuthShell } from "@/pages/auth";
 
-/** Public: anyone with the link sees the invite; accepting needs the invited account. */
+/** Public: anyone with the link sees the invite. Accepting needs the invited
+    account, or creates it from the link when the address has none yet and an
+    installation admin sent the invite. */
 export function InvitePage() {
   const { token = "" } = useParams();
   const navigate = useNavigate();
@@ -44,7 +47,7 @@ export function InvitePage() {
     );
   }
 
-  const { workspace_name, email, role } = invite.data;
+  const { workspace_name, email, role, account_exists, can_register } = invite.data;
   const user = me.data;
   const signedOut = me.error instanceof ApiError && me.error.status === 401;
   const wrongAccount = user != null && user.email.toLowerCase() !== email.toLowerCase();
@@ -71,18 +74,66 @@ export function InvitePage() {
             {accept.isPending ? "Joining…" : `Accept and open ${workspace_name}`}
           </Button>
         </div>
-      ) : signedOut ? (
-        <div className="space-y-3">
-          <Link className="button button-highlighted w-full" to="/login" state={{ from: here }}>
-            Sign in to accept
-          </Link>
-          <Link className="button w-full" to="/register" onClick={() => rememberPendingInvite(here)}>
-            Create an account for {email}
+      ) : signedOut && can_register ? (
+        <InviteSignUpForm token={token} workspaceName={workspace_name} />
+      ) : signedOut && !account_exists ? (
+        <div className="space-y-4">
+          <p className="text-sm text-[var(--ui-fg-faint)]">
+            {email} has no account yet. Create one with Register, or ask an installation admin to create it, then open this link again.
+          </p>
+          <Link className="button button-highlighted w-full" to="/register">
+            Register
           </Link>
         </div>
+      ) : signedOut ? (
+        <Link className="button button-highlighted w-full" to="/login" state={{ from: here }}>
+          Sign in to accept
+        </Link>
       ) : (
         <ErrorText error={me.error} />
       )}
     </AuthShell>
+  );
+}
+
+function InviteSignUpForm({ token, workspaceName }: { token: string; workspaceName: string }) {
+  const navigate = useNavigate();
+  const client = useQueryClient();
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const register = useMutation({
+    mutationFn: () =>
+      api<User>(`/api/invitations/${encodeURIComponent(token)}/register`, {
+        method: "POST",
+        body: JSON.stringify({ password, display_name: displayName || undefined }),
+      }),
+    onSuccess: (user) => {
+      client.clear();
+      navigate("/", { replace: true });
+      // A new account has exactly one workspace, the one it was invited to.
+      if (user.workspaces[0]) switchWorkspace(user.workspaces[0].id);
+    },
+    onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setFields({});
+    register.mutate();
+  }
+  return (
+    <form className="space-y-4" onSubmit={submit}>
+      <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">Choose a name and a password to create your account and join.</p>
+      <Field label="Name" error={fields.display_name}>
+        <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Andras Bacsai" />
+      </Field>
+      <Field label="Password" hint="12+ characters" error={fields.password}>
+        <Input type="password" required autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      </Field>
+      <ErrorText error={Object.keys(fields).length ? null : register.error} />
+      <Button className="w-full" variant="primary" type="submit" disabled={register.isPending}>
+        {register.isPending ? <><Spinner />Working…</> : `Create account and join ${workspaceName}`}
+      </Button>
+    </form>
   );
 }

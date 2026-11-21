@@ -467,7 +467,7 @@ async fn an_invitation_is_accepted_only_by_the_invited_email() {
     assert_eq!(status, StatusCode::OK, "{preview}");
     assert_eq!(
         preview,
-        json!({ "workspace_name": "Test workspace", "email": invitee_email, "role": "admin" })
+        json!({ "workspace_name": "Test workspace", "email": invitee_email, "role": "admin", "account_exists": true, "can_register": false })
     );
 
     let accept = format!("/api/invitations/{token}/accept");
@@ -533,6 +533,173 @@ async fn an_invitation_is_accepted_only_by_the_invited_email() {
         problem["fields"]["email"],
         "This person is already a member of the workspace."
     );
+}
+
+/// The `owlee_session=...` pair a response set, beside its status and body.
+async fn call_for_cookie(app: &App, uri: &str, body: Value) -> (StatusCode, Value, Option<String>) {
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let cookie = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok()?.split(';').next())
+        .find(|pair| pair.starts_with("owlee_session="))
+        .map(str::to_owned);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        cookie,
+    )
+}
+
+#[tokio::test]
+async fn only_an_admins_invitation_creates_the_account_without_mail_or_open_registration() {
+    let app = app().await;
+    let owner = editor_session(&app.state).await.unwrap();
+    let (status, problem) = call(
+        &app,
+        "POST",
+        "/api/auth/register",
+        Some(json!({ "email": "new.person@example.com" })),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
+    assert_eq!(problem["code"], "registration_closed");
+
+    let (status, invitation) = scoped(
+        &app,
+        &owner,
+        "POST",
+        "/api/invitations",
+        Some(json!({ "email": "New.Person@example.com", "role": "member" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{invitation}");
+    let token = token_of(&invitation);
+    let (_, preview) = call(
+        &app,
+        "GET",
+        &format!("/api/invitations/{token}"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(preview["account_exists"], false, "{preview}");
+    assert_eq!(preview["can_register"], false, "{preview}");
+
+    let register = format!("/api/invitations/{token}/register");
+    let (status, problem, cookie) = call_for_cookie(
+        &app,
+        &register,
+        json!({ "password": "correct-horse-battery" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a workspace owner who is not an installation admin cannot create accounts: {problem}"
+    );
+    assert_eq!(
+        problem["detail"],
+        "Only invitations from an installation admin can create an account. Register, or ask an admin to create your account, then open this link again."
+    );
+    assert!(cookie.is_none());
+
+    sqlx::query("UPDATE users SET installation_admin = $1 WHERE id = $2")
+        .bind(true)
+        .bind(owner.user_id.to_string())
+        .execute(app.state.db.pool())
+        .await
+        .unwrap();
+    let (_, preview) = call(
+        &app,
+        "GET",
+        &format!("/api/invitations/{token}"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(preview["can_register"], true, "{preview}");
+    let (status, problem, _) = call_for_cookie(
+        &app,
+        "/api/invitations/not-a-token/register",
+        json!({ "password": "correct-horse-battery" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{problem}");
+    let (status, problem, _) =
+        call_for_cookie(&app, &register, json!({ "password": "short" })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(problem["fields"]["password"].is_string(), "{problem}");
+
+    let (status, user, cookie) = call_for_cookie(
+        &app,
+        &register,
+        json!({
+            "password": "correct-horse-battery",
+            "display_name": "New Person",
+            "email": "attacker@example.com"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{user}");
+    assert_eq!(user["email"], "New.Person@example.com");
+    assert_eq!(user["display_name"], "New Person");
+    assert_eq!(user["installation_admin"], false);
+    assert_eq!(user["workspaces"][0]["id"], owner.workspace_id.to_string());
+    assert_eq!(user["workspaces"][0]["role"], "member");
+    let cookie = cookie.expect("signed in");
+    let (status, members) = call(
+        &app,
+        "GET",
+        "/api/members",
+        None,
+        Some(&cookie),
+        Some(owner.workspace_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{members}");
+    assert_eq!(members.as_array().unwrap().len(), 2);
+
+    let (status, problem, _) = call_for_cookie(
+        &app,
+        &register,
+        json!({ "password": "correct-horse-battery" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the link works once: {problem}"
+    );
+    let (status, problem) = call(
+        &app,
+        "POST",
+        "/api/auth/login",
+        Some(json!({ "email": "new.person@example.com", "password": "correct-horse-battery" })),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{problem}");
 }
 
 #[tokio::test]

@@ -206,19 +206,6 @@ export function SetupPage() {
   );
 }
 
-const pendingInviteKey = "owlee:pending-invite";
-
-/** The sign-up email opens in a new tab, so the invite page survives the round trip in storage. */
-export function rememberPendingInvite(path: string) {
-  localStorage.setItem(pendingInviteKey, path);
-}
-
-function takePendingInvite() {
-  const path = localStorage.getItem(pendingInviteKey);
-  localStorage.removeItem(pendingInviteKey);
-  return path?.startsWith("/invite/") ? path : null;
-}
-
 function useConsumedToken() {
   const [token] = useState(() => {
     const url = new URL(window.location.href);
@@ -343,7 +330,7 @@ function LoginForm() {
       api<User>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
     onSuccess: () => {
       client.clear();
-      navigate(typeof from === "string" && from.startsWith("/") ? from : (takePendingInvite() ?? "/"), { replace: true });
+      navigate(typeof from === "string" && from.startsWith("/") ? from : "/", { replace: true });
     },
     onError: (error) => {
       setFields(error instanceof ApiError ? (error.fields ?? {}) : {});
@@ -439,7 +426,7 @@ function TokenPasswordForm({
     mutationFn: () => send(password, displayName),
     onSuccess: () => {
       client.clear();
-      navigate(takePendingInvite() ?? "/", { replace: true });
+      navigate("/", { replace: true });
     },
     onError: (error) => setFields(error instanceof ApiError ? (error.fields ?? {}) : {}),
   });

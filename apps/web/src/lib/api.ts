@@ -239,7 +239,7 @@ export type Invitation = {
 
 export type CreatedInvitation = Invitation & { url: string };
 
-export type InvitationLookup = { workspace_name: string; email: string; role: InviteRole };
+export type InvitationLookup = { workspace_name: string; email: string; role: InviteRole; account_exists: boolean; can_register: boolean };
 
 const post = <T>(path: string, body: unknown) => api<T>(path, { method: "POST", body: JSON.stringify(body) });
 
@@ -313,6 +313,7 @@ export type AdminUser = {
   display_name: string;
   root: boolean;
   installation_admin: boolean;
+  disabled: boolean;
 };
 
 export type Audit = {

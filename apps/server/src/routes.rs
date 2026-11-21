@@ -63,8 +63,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/settings/registration", put(set_registration))
         .route("/admin/settings/quotas", put(set_quotas))
         .route("/admin/settings/smtp", put(save_smtp).delete(delete_smtp))
-        .route("/admin/users", get(admin_users))
-        .route("/admin/users/{id}/admin", put(set_installation_admin))
+        .merge(crate::accounts::routes())
         .merge(workspaces::routes())
         .merge(crate::invitations::routes())
         .route("/overview", get(overview))
@@ -342,6 +341,7 @@ async fn recovery(
     let normalized = request_email(&body.email)?;
     if mail_allowed(&state, &normalized)
         && let Some(user) = repo::user_by_email(&state.db, &normalized).await?
+        && !user.disabled
     {
         let token = generate_token();
         let now = TimestampMillis::now();
@@ -397,7 +397,10 @@ async fn recovery_complete(
     let Some(user_id) = token.and_then(|token| token.user_id) else {
         return Err(invalid_link());
     };
-    let Some(user) = repo::user_by_id(&state.db, user_id).await? else {
+    let Some(user) = repo::user_by_id(&state.db, user_id)
+        .await?
+        .filter(|user| !user.disabled)
+    else {
         return Err(invalid_link());
     };
     repo::revoke_user_sessions(&state.db, user.id, None, now).await?;
@@ -660,6 +663,11 @@ async fn login(
     let Some(user) = user.filter(|_| valid) else {
         return Err(AppError::InvalidLogin);
     };
+    if user.disabled {
+        return Err(AppError::Forbidden(
+            "This account is disabled. Ask an admin to enable it.",
+        ));
+    }
     state.login_account_limit.forget(&account_key);
     state.login_account_wide_limit.refund(&wide_key);
     let now = TimestampMillis::now();
@@ -676,8 +684,8 @@ async fn login(
     Ok((jar, Json(user_response(&state, &user).await?)))
 }
 
-/// Login, register, recovery, and setup share one bucket per client IP.
-fn limit_auth_ip(state: &AppState, ip: &str) -> Result<(), AppError> {
+/// Login, register, invite sign-up, recovery, and setup share one bucket per client IP.
+pub(crate) fn limit_auth_ip(state: &AppState, ip: &str) -> Result<(), AppError> {
     limit(&state.login_ip_limit, &format!("auth-ip:{ip}"))
 }
 
@@ -817,64 +825,6 @@ async fn delete_smtp(
     Ok(Json(settings_body(&state).await?))
 }
 
-async fn admin_users(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<Json<Value>, AppError> {
-    require_installation_admin(&state, &jar).await?;
-    let root_id = instance_settings::root_user_id(&state.db).await?;
-    let accounts = repo::list_accounts(&state.db).await?;
-    let users = accounts
-        .iter()
-        .map(|account| account_body(account, root_id))
-        .collect::<Vec<_>>();
-    Ok(Json(json!(users)))
-}
-
-#[derive(Deserialize)]
-struct AdminBody {
-    admin: bool,
-}
-
-async fn set_installation_admin(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    Path(id): Path<Id>,
-    Json(body): Json<AdminBody>,
-) -> Result<Json<Value>, AppError> {
-    let actor = require_root(&state, &jar).await?;
-    let root_id = instance_settings::root_user_id(&state.db).await?;
-    if root_id == Some(id) {
-        return Err(AppError::Conflict(
-            "The root user stays an installation admin.".into(),
-        ));
-    }
-    let now = TimestampMillis::now();
-    let updated = repo::set_installation_admin(&state.db, id, body.admin, now).await?;
-    if !updated {
-        return Err(AppError::NotFound);
-    }
-    let _ = repo::insert_audit(
-        &state.db,
-        Some(actor.id),
-        if body.admin {
-            "instance.admin_granted"
-        } else {
-            "instance.admin_revoked"
-        },
-        "user",
-        Some(&id.to_string()),
-        now,
-    )
-    .await;
-    let accounts = repo::list_accounts(&state.db).await?;
-    let account = accounts
-        .iter()
-        .find(|account| account.id == id)
-        .ok_or(AppError::NotFound)?;
-    Ok(Json(account_body(account, root_id)))
-}
-
 async fn settings_body(state: &AppState) -> Result<Value, AppError> {
     let settings = instance_settings::load(&state.db, &state.config.app_key).await?;
     let env_smtp = state.config.smtp.is_some();
@@ -958,17 +908,6 @@ fn smtp_body(
         })
     })
     .unwrap_or(Value::Null)
-}
-
-fn account_body(account: &repo::Account, root_id: Option<Id>) -> Value {
-    let root = root_id == Some(account.id);
-    json!({
-        "id": account.id,
-        "email": account.email,
-        "display_name": account.display_name,
-        "root": root,
-        "installation_admin": root || account.installation_admin,
-    })
 }
 
 fn smtp_input(body: &SmtpBody, key: &owlee_platform::AppKey) -> Result<SmtpInput, AppError> {
@@ -2633,7 +2572,10 @@ async fn require_agent(state: &AppState, headers: &HeaderMap) -> Result<Agent, A
         .ok_or(AppError::Unauthorized)
 }
 
-async fn user_response(state: &AppState, user: &User) -> Result<present::UserResponse, AppError> {
+pub(crate) async fn user_response(
+    state: &AppState,
+    user: &User,
+) -> Result<present::UserResponse, AppError> {
     let root_id = instance_settings::root_user_id(&state.db).await?;
     let workspaces = workspaces::access_for_user(&state.db, user.id).await?;
     Ok(present::UserResponse::with_access(
@@ -2641,7 +2583,7 @@ async fn user_response(state: &AppState, user: &User) -> Result<present::UserRes
     ))
 }
 
-async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
+pub(crate) async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
     let user = require_user(state, jar).await?;
     let root_id = instance_settings::root_user_id(&state.db).await?;
     if root_id != Some(user.id) {
@@ -2653,15 +2595,18 @@ async fn require_root(state: &AppState, jar: &CookieJar) -> Result<User, AppErro
 }
 
 /// Root, or an account the root user promoted. Guards `/admin/*`.
-async fn require_installation_admin(state: &AppState, jar: &CookieJar) -> Result<User, AppError> {
+pub(crate) async fn require_installation_admin(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<User, AppError> {
     let user = require_user(state, jar).await?;
-    if !is_editor(state, &user).await? {
+    if !is_installation_admin(state, &user).await? {
         return Err(AppError::Forbidden("Only an admin can change this."));
     }
     Ok(user)
 }
 
-async fn is_editor(state: &AppState, user: &User) -> Result<bool, AppError> {
+pub(crate) async fn is_installation_admin(state: &AppState, user: &User) -> Result<bool, AppError> {
     let root_id = instance_settings::root_user_id(&state.db).await?;
     Ok(user.installation_admin || root_id == Some(user.id))
 }
@@ -2706,7 +2651,7 @@ fn expired_cookie(state: &AppState) -> Cookie<'static> {
         .build()
 }
 
-async fn issue_session(
+pub(crate) async fn issue_session(
     state: &AppState,
     jar: CookieJar,
     user: &User,
@@ -2739,13 +2684,16 @@ fn session_jar(state: &AppState, jar: CookieJar, token: String) -> CookieJar {
     jar.add(cookie)
 }
 
-struct AccountFields {
-    email: String,
-    normalized: String,
-    display_name: String,
+pub(crate) struct AccountFields {
+    pub(crate) email: String,
+    pub(crate) normalized: String,
+    pub(crate) display_name: String,
 }
 
-fn account_fields(email: &str, display_name: Option<String>) -> Result<AccountFields, AppError> {
+pub(crate) fn account_fields(
+    email: &str,
+    display_name: Option<String>,
+) -> Result<AccountFields, AppError> {
     let email = email.trim();
     let normalized = normalize_email(email);
     if !valid_email(&normalized) {
@@ -2766,7 +2714,7 @@ fn account_fields(email: &str, display_name: Option<String>) -> Result<AccountFi
 }
 
 /// `None` when blank, so the caller picks a default.
-fn display_name_field(display_name: Option<String>) -> Result<Option<String>, AppError> {
+pub(crate) fn display_name_field(display_name: Option<String>) -> Result<Option<String>, AppError> {
     let display_name = display_name.unwrap_or_default().trim().to_owned();
     if display_name.chars().count() > 80 {
         return Err(AppError::field(
@@ -2788,6 +2736,6 @@ fn valid_email(email: &str) -> bool {
         && email.len() <= 200
 }
 
-fn password_field(error: PasswordError) -> AppError {
+pub(crate) fn password_field(error: PasswordError) -> AppError {
     AppError::field("password", error.to_string())
 }
