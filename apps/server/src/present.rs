@@ -530,6 +530,8 @@ pub struct DeliveryResponse {
     pub event: String,
     pub status: String,
     pub error: Option<String>,
+    pub attempts: i64,
+    pub next_attempt_at: Option<TimestampMillis>,
     pub created_at: TimestampMillis,
 }
 
@@ -540,6 +542,7 @@ pub struct ChannelResponse {
     pub provider: String,
     pub config: Value,
     pub enabled: bool,
+    pub error_issues: bool,
     pub monitor_ids: Vec<Id>,
     pub deliveries: Vec<DeliveryResponse>,
 }
@@ -555,6 +558,7 @@ pub fn channel_response(
         provider: channel.provider.clone(),
         config: masked_config(&channel.provider, channel.config.as_ref()),
         enabled: channel.enabled,
+        error_issues: channel.error_issues,
         monitor_ids,
         deliveries: deliveries
             .into_iter()
@@ -563,6 +567,8 @@ pub fn channel_response(
                 event: delivery.event,
                 status: delivery.status,
                 error: delivery.error,
+                attempts: delivery.attempts,
+                next_attempt_at: delivery.next_attempt_at,
                 created_at: delivery.created_at,
             })
             .collect(),

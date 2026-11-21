@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, SkeletonRows, SortHeader, Spinner, StatusBadge, Switch, useSort } from "@/components/ui";
-import { ApiError, api, type Channel, type Monitor } from "@/lib/api";
+import { ApiError, api, type Channel, type Delivery, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope } from "@/lib/workspace";
 import { formatTime, providerLabel } from "@/lib/utils";
@@ -97,13 +97,15 @@ function NotificationChannels() {
                       </td>
                       <td className="hidden whitespace-nowrap md:table-cell">
                         {channel.monitor_ids.length === 0 ? "All monitors" : `${channel.monitor_ids.length} monitors`}
+                        {channel.error_issues ? <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">and error issues</div> : null}
                       </td>
                       <td className="hidden max-w-[16rem] xl:table-cell">
                         {last ? (
                           <>
-                            <div className="truncate">{last.status} · {last.event}</div>
+                            <div className="truncate">{deliveryStatus(last)} · {last.event}</div>
                             <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">
                               {formatTime(last.created_at)}
+                              {last.attempts > 1 ? ` · ${last.attempts} attempts` : ""}
                               {last.error ? ` · ${last.error}` : ""}
                             </div>
                           </>
@@ -132,7 +134,7 @@ function NotificationChannels() {
           </div>
         )}
       </LayerCard>
-      <Dialog open={open} title="New channel" description="Alerts fire when a monitor changes state." onClose={() => setOpen(false)}>
+      <Dialog open={open} title="New channel" description="Alerts fire when a monitor changes state, and for new or regressed error issues." onClose={() => setOpen(false)}>
         {open ? <ChannelForm onDone={() => setOpen(false)} /> : null}
       </Dialog>
       <Dialog open={editing !== null} title="Edit channel" description={editing?.name} onClose={() => setEditing(null)}>
@@ -168,6 +170,7 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
   const initialMonitors = channel?.monitor_ids ?? [];
   const [monitorId, setMonitorId] = useState(initialMonitors.length > 1 ? keepMonitors : (initialMonitors[0] ?? ""));
   const [enabled, setEnabled] = useState(channel?.enabled ?? true);
+  const [errorIssues, setErrorIssues] = useState(channel?.error_issues ?? true);
   const [fields, setFields] = useState<Record<string, string>>({});
   // A blank URL or secret keeps the saved one while the provider stays the same.
   const saved = channel && channel.provider === provider && !channel.config.unreadable ? channel.config : undefined;
@@ -182,6 +185,7 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
           config: provider === "email" ? { to: target } : { url: target, secret },
           monitor_ids: monitorId === keepMonitors ? initialMonitors : monitorId ? [monitorId] : [],
           enabled,
+          error_issues: errorIssues,
         }),
       }),
     onSuccess: async () => {
@@ -232,6 +236,10 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
           aria-label="Monitor"
         />
       </Field>
+      <div className="flex items-center justify-between">
+        <span className="text-[0.8125rem] text-[var(--ui-fg)]">New and regressed error issues</span>
+        <Switch checked={errorIssues} onCheckedChange={setErrorIssues} aria-label="New and regressed error issues" />
+      </div>
       {channel ? (
         <div className="flex items-center justify-between">
           <span className="text-[0.8125rem] text-[var(--ui-fg)]">Enabled</span>
@@ -244,6 +252,12 @@ function ChannelForm({ channel, onDone }: { channel?: Channel; onDone: () => voi
       </div>
     </form>
   );
+}
+
+function deliveryStatus(delivery: Delivery): string {
+  // A pending delivery without an error is mid-attempt; with one, it waits for a retry.
+  if (delivery.status === "pending" && delivery.error && delivery.next_attempt_at) return `retry at ${formatTime(delivery.next_attempt_at)}`;
+  return delivery.status;
 }
 
 function CardText({ title, body }: { title: string; body?: string }) {

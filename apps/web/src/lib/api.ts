@@ -194,8 +194,11 @@ export type Maintenance = {
 export type Delivery = {
   id: string;
   event: string;
-  status: string;
+  status: "pending" | "sent" | "failed" | "skipped";
   error: string | null;
+  attempts: number;
+  /** Set while a failed delivery waits for its next attempt. */
+  next_attempt_at: string | null;
   created_at: string;
 };
 
@@ -206,6 +209,8 @@ export type Channel = {
   /** URLs and secrets are credentials: the API returns only their origin and whether a secret is set. */
   config: { to?: string; url_preview?: string; has_secret?: boolean; unreadable?: boolean };
   enabled: boolean;
+  /** Gets new and regressed error-tracking issues. */
+  error_issues: boolean;
   monitor_ids: string[];
   deliveries: Delivery[];
 };

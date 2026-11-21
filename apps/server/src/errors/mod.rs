@@ -2,6 +2,7 @@
 //! member's workspace. Ingest routes keep the Sentry SDK paths and take the
 //! DSN key instead of a login.
 
+mod alert;
 mod http;
 mod ingest;
 mod seed;
@@ -12,6 +13,7 @@ use axum::routing::{get, post, put};
 
 use crate::state::AppState;
 
+pub use alert::ISSUE_ALERTS_PER_HOUR;
 pub use seed::seed_demo;
 pub use store::privatize_events;
 

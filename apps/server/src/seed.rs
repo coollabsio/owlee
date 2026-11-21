@@ -153,6 +153,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         provider: "email".to_owned(),
         config: Some(serde_json::json!({ "to": DEMO_EMAIL })),
         enabled: true,
+        error_issues: true,
         created_at: now,
     };
     repo::insert_channel(&state.db, &state.config.app_key, &channel, &[]).await?;

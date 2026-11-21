@@ -254,6 +254,9 @@ async fn accept_event(
         )));
     }
     state.error_intake.stored(&app.id);
+    if let Some(alert) = ingested.alert {
+        super::alert::send(state, app, alert);
+    }
     Ok(Accepted::Stored(ingested.id))
 }
 

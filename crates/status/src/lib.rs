@@ -22,8 +22,8 @@ pub use monitor::{
     parse_tcp_target, validate_monitor,
 };
 pub use notification::{
-    NotificationEvent, NotificationPayload, PayloadCheck, PayloadIncident, PayloadMonitor,
-    sign_body,
+    NotificationEvent, NotificationPayload, PayloadCheck, PayloadIncident, PayloadIssue,
+    PayloadMonitor, sign_body,
 };
 pub use slug::{SlugError, validate_slug};
 pub use uptime::{DailyCount, DayBucket, DayStatus, WindowStats, summarize};

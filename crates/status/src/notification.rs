@@ -1,5 +1,5 @@
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::assertion::CheckStatus;
@@ -14,6 +14,8 @@ pub enum NotificationEvent {
     MonitorDown,
     MonitorRecovered,
     IncidentUpdated,
+    IssueNew,
+    IssueRegressed,
     Test,
 }
 
@@ -24,12 +26,14 @@ impl NotificationEvent {
             Self::MonitorDown => "monitor.down",
             Self::MonitorRecovered => "monitor.recovered",
             Self::IncidentUpdated => "incident.updated",
+            Self::IssueNew => "issue.new",
+            Self::IssueRegressed => "issue.regressed",
             Self::Test => "notification.test",
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotificationPayload {
     pub event: String,
     pub sent_at: String,
@@ -39,11 +43,13 @@ pub struct NotificationPayload {
     pub check: Option<PayloadCheck>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incident: Option<PayloadIncident>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<PayloadIssue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PayloadMonitor {
     pub id: String,
     pub name: String,
@@ -51,7 +57,7 @@ pub struct PayloadMonitor {
     pub state: MonitorState,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PayloadCheck {
     pub status: CheckStatus,
     pub status_code: Option<i64>,
@@ -59,12 +65,23 @@ pub struct PayloadCheck {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PayloadIncident {
     pub id: String,
     pub title: String,
     pub status: IncidentStatus,
     pub impact: IncidentImpact,
+}
+
+/// An error-tracking issue. Carries the title and culprit, never event data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PayloadIssue {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub culprit: Option<String>,
+    pub project: String,
+    pub url: String,
 }
 
 /// Hex-encoded HMAC-SHA256 of the raw body. Webhooks send this as

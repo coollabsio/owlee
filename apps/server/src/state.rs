@@ -46,6 +46,9 @@ pub struct AppState {
     pub mail_address_limit: Arc<TokenBucket>,
     /// Checks an editor starts by hand, per user: "Run check" and the unsaved test.
     pub check_limit: Arc<TokenBucket>,
+    /// New and regressed issue alerts per project, so an ingest flood of
+    /// distinct errors cannot flood the channels.
+    pub issue_alert_limit: Arc<TokenBucket>,
     /// Tests set this to read account mails instead of sending them.
     pub outbox: Option<crate::notify::Outbox>,
     pub dns: Arc<dyn TxtResolver>,
@@ -180,6 +183,10 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         )),
         mail_address_limit: Arc::new(TokenBucket::per_hour(3, 3)),
         check_limit: Arc::new(TokenBucket::per_minute(30, 15)),
+        issue_alert_limit: Arc::new(TokenBucket::per_hour(
+            crate::errors::ISSUE_ALERTS_PER_HOUR,
+            crate::errors::ISSUE_ALERTS_PER_HOUR,
+        )),
         outbox: None,
         dns: Arc::new(SystemResolver::from_system()),
         geo: insights.geo,

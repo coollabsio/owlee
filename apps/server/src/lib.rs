@@ -43,7 +43,7 @@ pub use dns::MapResolver;
 pub use engine::{AGENT_GRACE_MS, reconcile_agents};
 pub use errors::seed_demo as seed_errors;
 pub use instance_settings::permit_signup;
-pub use notify::{Outbox, SentMail};
+pub use notify::{Outbox, SentMail, retry_due as retry_deliveries};
 pub use quota::today as quota_today;
 pub use retention::prune_before;
 pub use routes::router;

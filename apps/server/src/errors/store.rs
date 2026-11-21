@@ -542,6 +542,23 @@ pub struct Ingested {
     /// The daily quota was already spent. Nothing new was stored.
     pub quota_exceeded: bool,
     pub retry_after_secs: u64,
+    /// Set when this event opened the issue or reopened a resolved one.
+    pub alert: Option<IssueAlert>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IssueChange {
+    New,
+    Regressed,
+}
+
+#[derive(Clone, Debug)]
+pub struct IssueAlert {
+    pub change: IssueChange,
+    pub issue_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub culprit: Option<String>,
 }
 
 pub async fn ingest_event(
@@ -553,7 +570,9 @@ pub async fn ingest_event(
     keep_first: i64,
     window_secs: i64,
 ) -> Result<Ingested, AppError> {
-    let mut tx = db.pool().begin().await?;
+    // Immediate: the read-then-write would fail on SQLite with SQLITE_BUSY
+    // if another connection wrote in between, such as an alert delivery.
+    let mut tx = db.begin_immediate().await?;
     // `events.id` is unique across apps. A resend from the same app is a
     // duplicate. The same id from another app is a different event, and must
     // not be swallowed by a row its sender cannot see, so it is stored under
@@ -584,6 +603,7 @@ pub async fn ingest_event(
                     id: candidate,
                     quota_exceeded: false,
                     retry_after_secs: 0,
+                    alert: None,
                 });
             }
             Some(_) => {}
@@ -596,9 +616,10 @@ pub async fn ingest_event(
             id: String::new(),
             quota_exceeded: true,
             retry_after_secs: crate::quota::secs_until_utc_midnight(),
+            alert: None,
         });
     }
-    let issue_id = Uuid::new_v4().to_string();
+    let new_issue_id = Uuid::new_v4().to_string();
     let seq_sql = statement(
         db,
         "UPDATE error_apps SET next_issue = next_issue + 1 WHERE id = ? RETURNING next_issue, slug",
@@ -626,12 +647,11 @@ pub async fn ingest_event(
             release = excluded.release,
             last_seen = excluded.last_seen,
             event_count = issues.event_count + 1,
-            unhandled = CASE WHEN excluded.unhandled = 1 THEN 1 ELSE issues.unhandled END,
-            status = CASE WHEN issues.status = 'resolved' THEN 'unresolved' ELSE issues.status END
-         RETURNING id, stored_count, sample_window_start",
+            unhandled = CASE WHEN excluded.unhandled = 1 THEN 1 ELSE issues.unhandled END
+         RETURNING id, short_id, title, culprit, stored_count, sample_window_start",
     );
     let row = sqlx::query(&sql)
-        .bind(&issue_id)
+        .bind(&new_issue_id)
         .bind(&app.id)
         .bind(&event.fingerprint)
         .bind(&event.title)
@@ -647,6 +667,35 @@ pub async fn ingest_event(
         .fetch_one(&mut *tx)
         .await?;
     let issue_id: String = row.try_get("id")?;
+    // A conditional update, so of two concurrent events only one sees the reopen.
+    let change = if issue_id == new_issue_id {
+        Some(IssueChange::New)
+    } else {
+        let reopen = statement(
+            db,
+            "UPDATE issues SET status = 'unresolved' WHERE id = ? AND status = 'resolved'",
+        );
+        let reopened = sqlx::query(&reopen)
+            .bind(&issue_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1;
+        reopened.then_some(IssueChange::Regressed)
+    };
+    let alert = change
+        .map(|change| -> Result<IssueAlert, sqlx::Error> {
+            Ok(IssueAlert {
+                change,
+                issue_id: issue_id.clone(),
+                short_id: row
+                    .try_get::<Option<String>, _>("short_id")?
+                    .unwrap_or_default(),
+                title: row.try_get("title")?,
+                culprit: row.try_get("culprit")?,
+            })
+        })
+        .transpose()?;
     let stored_count: i64 = row.try_get("stored_count")?;
     let window_start: Option<String> = row.try_get("sample_window_start")?;
     let keep = window_secs.max(1);
@@ -712,6 +761,7 @@ pub async fn ingest_event(
         id: event_id,
         quota_exceeded: false,
         retry_after_secs: 0,
+        alert,
     })
 }
 

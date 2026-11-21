@@ -55,6 +55,18 @@ async fn tick(
     {
         tracing::error!(%error, "agent liveness check failed");
     }
+    {
+        let state = state.clone();
+        // Detached like the probes: a slow endpoint must not hold the tick.
+        // Claims keep two overlapping runs off the same delivery.
+        tokio::spawn(async move {
+            if let Err(error) =
+                crate::notify::retry_due(&state, TimestampMillis::from_millis(now)).await
+            {
+                tracing::error!(%error, "notification retry failed");
+            }
+        });
+    }
     if now - *last_pruned >= PRUNE_EVERY_MS {
         repo::prune(&state.db, now - RETENTION_MS).await?;
         if let Err(error) = crate::retention::prune_expired(state).await {

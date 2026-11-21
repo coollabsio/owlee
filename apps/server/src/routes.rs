@@ -2061,6 +2061,7 @@ struct ChannelBody {
     provider: String,
     config: Value,
     enabled: Option<bool>,
+    error_issues: Option<bool>,
     monitor_ids: Vec<Id>,
 }
 
@@ -2096,6 +2097,7 @@ async fn create_channel(
         provider,
         config: Some(config),
         enabled: body.enabled.unwrap_or(true),
+        error_issues: body.error_issues.unwrap_or(true),
         created_at: now,
     };
     repo::insert_channel(
@@ -2141,6 +2143,7 @@ async fn update_channel(
         provider,
         config: Some(config),
         enabled: body.enabled.unwrap_or(existing.enabled),
+        error_issues: body.error_issues.unwrap_or(existing.error_issues),
         created_at: existing.created_at,
     };
     repo::update_channel(
@@ -2191,6 +2194,7 @@ async fn test_channel(
         monitor: None,
         check: None,
         incident: None,
+        issue: None,
         message: Some("This is a test notification from Owlee.".to_owned()),
     };
     notify::deliver(&state, &channel, &payload, None, None).await;
@@ -2404,6 +2408,7 @@ async fn notify_incident(state: &AppState, incident: &Incident, message: &str) {
             status: incident.status,
             impact: incident.impact,
         }),
+        issue: None,
         message: Some(message.to_owned()),
     };
     notify::fanout(

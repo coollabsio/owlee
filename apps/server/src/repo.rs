@@ -258,6 +258,8 @@ pub struct Channel {
     /// does not open with `OWLEE_APP_KEY`.
     pub config: Option<serde_json::Value>,
     pub enabled: bool,
+    /// Gets new and regressed error-tracking issues.
+    pub error_issues: bool,
     pub created_at: TimestampMillis,
 }
 
@@ -269,7 +271,20 @@ pub struct Delivery {
     pub event: String,
     pub status: String,
     pub error: Option<String>,
+    pub attempts: i64,
+    /// Set while the delivery waits for a retry.
+    pub next_attempt_at: Option<TimestampMillis>,
     pub created_at: TimestampMillis,
+}
+
+/// A pending delivery whose next attempt is due.
+#[derive(Clone, Debug)]
+pub struct DueDelivery {
+    pub id: Id,
+    pub notification_id: Id,
+    pub attempts: i64,
+    pub next_attempt_at: i64,
+    pub payload_json: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1941,8 +1956,7 @@ pub async fn in_maintenance(db: &Database, monitor_id: Id, now: i64) -> Result<b
     Ok(count > 0)
 }
 
-const CHANNEL_COLUMNS: &str =
-    "n.id, n.workspace_id, n.name, n.provider, n.config_json, n.enabled, n.created_at";
+const CHANNEL_COLUMNS: &str = "n.id, n.workspace_id, n.name, n.provider, n.config_json, n.enabled, n.error_issues, n.created_at";
 
 /// Channel configs hold webhook URLs and signing secrets, which are
 /// credentials, so the column is sealed per channel id.
@@ -2008,8 +2022,8 @@ pub async fn insert_channel(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query(
-        "INSERT INTO notifications (id, workspace_id, name, provider, config_json, enabled, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
+        "INSERT INTO notifications (id, workspace_id, name, provider, config_json, enabled, error_issues, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
     )
     .bind(channel.id.to_string())
     .bind(channel.workspace_id.to_string())
@@ -2017,6 +2031,7 @@ pub async fn insert_channel(
     .bind(&channel.provider)
     .bind(seal_channel_config(key, channel)?)
     .bind(bit(channel.enabled))
+    .bind(bit(channel.error_issues))
     .bind(channel.created_at.as_millis())
     .execute(tx.deref_mut())
     .await?;
@@ -2034,12 +2049,13 @@ pub async fn update_channel(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     sqlx::query(
-        "UPDATE notifications SET name = $1, provider = $2, config_json = $3, enabled = $4, updated_at = $5 WHERE id = $6",
+        "UPDATE notifications SET name = $1, provider = $2, config_json = $3, enabled = $4, error_issues = $5, updated_at = $6 WHERE id = $7",
     )
     .bind(&channel.name)
     .bind(&channel.provider)
     .bind(seal_channel_config(key, channel)?)
     .bind(bit(channel.enabled))
+    .bind(bit(channel.error_issues))
     .bind(now.as_millis())
     .bind(channel.id.to_string())
     .execute(tx.deref_mut())
@@ -2087,33 +2103,143 @@ pub async fn channels_for_monitor(
     rows.iter().map(|row| map_channel(row, key)).collect()
 }
 
-pub async fn insert_delivery(
+/// The enabled channels of the project's workspace that take error-tracking
+/// issues. Monitor links do not narrow them.
+pub async fn channels_for_issues(
+    db: &Database,
+    key: &AppKey,
+    project_id: Id,
+) -> Result<Vec<Channel>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {CHANNEL_COLUMNS} FROM notifications n \
+         WHERE n.enabled = 1 AND n.error_issues = 1 \
+         AND n.workspace_id = (SELECT workspace_id FROM projects WHERE id = $1)"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(project_id.to_string())
+        .fetch_all(db.pool())
+        .await?;
+    rows.iter().map(|row| map_channel(row, key)).collect()
+}
+
+pub async fn channel(db: &Database, key: &AppKey, id: Id) -> Result<Option<Channel>, sqlx::Error> {
+    let row = sqlx::query(&format!(
+        "SELECT {CHANNEL_COLUMNS} FROM notifications n WHERE n.id = $1"
+    ))
+    .bind(id.to_string())
+    .fetch_optional(db.pool())
+    .await?;
+    row.as_ref().map(|row| map_channel(row, key)).transpose()
+}
+
+/// The project's name and workspace.
+pub async fn project_label(db: &Database, id: Id) -> Result<Option<(String, Id)>, sqlx::Error> {
+    let row = sqlx::query("SELECT name, workspace_id FROM projects WHERE id = $1")
+        .bind(id.to_string())
+        .fetch_optional(db.pool())
+        .await?;
+    row.map(|row| Ok((row.try_get("name")?, parse_id(&row, "workspace_id")?)))
+        .transpose()
+}
+
+/// Records a delivery as pending and claimed by its first attempt until
+/// `lease_until`. A crash before [`settle_delivery`] leaves it for a retry.
+pub async fn insert_pending_delivery(
     db: &Database,
     id: Id,
     notification_id: Id,
     monitor_id: Option<Id>,
     incident_id: Option<Id>,
     event: &str,
-    status: &str,
-    error: Option<&str>,
+    payload_json: &str,
     now: TimestampMillis,
+    lease_until: TimestampMillis,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO notification_deliveries \
-            (id, notification_id, monitor_id, incident_id, event, status, error, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            (id, notification_id, monitor_id, incident_id, event, status, created_at, attempts, next_attempt_at, payload_json) \
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6, 1, $7, $8)",
     )
     .bind(id.to_string())
     .bind(notification_id.to_string())
     .bind(monitor_id.map(|id| id.to_string()))
     .bind(incident_id.map(|id| id.to_string()))
     .bind(event)
-    .bind(status)
-    .bind(error)
     .bind(now.as_millis())
+    .bind(lease_until.as_millis())
+    .bind(payload_json)
     .execute(db.pool())
     .await?;
     Ok(())
+}
+
+/// `next_attempt_at` keeps the delivery pending. Without it the delivery is
+/// final and its payload is dropped.
+pub async fn settle_delivery(
+    db: &Database,
+    id: Id,
+    status: &str,
+    error: Option<&str>,
+    next_attempt_at: Option<TimestampMillis>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE notification_deliveries SET status = $1, error = $2, next_attempt_at = $3, \
+            payload_json = CASE WHEN $1 = 'pending' THEN payload_json ELSE NULL END \
+         WHERE id = $4",
+    )
+    .bind(status)
+    .bind(error)
+    .bind(next_attempt_at.map(TimestampMillis::as_millis))
+    .bind(id.to_string())
+    .execute(db.pool())
+    .await?;
+    Ok(())
+}
+
+pub async fn due_deliveries(
+    db: &Database,
+    now: i64,
+    limit: i64,
+) -> Result<Vec<DueDelivery>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, notification_id, attempts, next_attempt_at, payload_json FROM notification_deliveries \
+         WHERE status = 'pending' AND next_attempt_at <= $1 AND payload_json IS NOT NULL \
+         ORDER BY next_attempt_at LIMIT $2",
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_all(db.pool())
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(DueDelivery {
+                id: parse_id(row, "id")?,
+                notification_id: parse_id(row, "notification_id")?,
+                attempts: row.try_get("attempts")?,
+                next_attempt_at: row.try_get("next_attempt_at")?,
+                payload_json: row.try_get("payload_json")?,
+            })
+        })
+        .collect()
+}
+
+/// Takes a due delivery for one attempt. False when another worker took it first.
+pub async fn claim_delivery(
+    db: &Database,
+    id: Id,
+    due_at: i64,
+    lease_until: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE notification_deliveries SET attempts = attempts + 1, next_attempt_at = $1 \
+         WHERE id = $2 AND status = 'pending' AND next_attempt_at = $3",
+    )
+    .bind(lease_until)
+    .bind(id.to_string())
+    .bind(due_at)
+    .execute(db.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn recent_deliveries(
@@ -2121,8 +2247,8 @@ pub async fn recent_deliveries(
     notification_id: Id,
 ) -> Result<Vec<Delivery>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, notification_id, event, status, error, created_at FROM notification_deliveries \
-         WHERE notification_id = $1 ORDER BY created_at DESC LIMIT 8",
+        "SELECT id, notification_id, event, status, error, attempts, next_attempt_at, created_at \
+         FROM notification_deliveries WHERE notification_id = $1 ORDER BY created_at DESC LIMIT 8",
     )
     .bind(notification_id.to_string())
     .fetch_all(db.pool())
@@ -2135,6 +2261,10 @@ pub async fn recent_deliveries(
                 event: row.try_get("event")?,
                 status: row.try_get("status")?,
                 error: row.try_get("error")?,
+                attempts: row.try_get("attempts")?,
+                next_attempt_at: row
+                    .try_get::<Option<i64>, _>("next_attempt_at")?
+                    .map(TimestampMillis::from_millis),
                 created_at: millis(row, "created_at")?,
             })
         })
@@ -2376,6 +2506,7 @@ fn map_channel(row: &sqlx::any::AnyRow, key: &AppKey) -> Result<Channel, sqlx::E
         provider: row.try_get("provider")?,
         config,
         enabled: flag(row.try_get("enabled")?),
+        error_issues: flag(row.try_get("error_issues")?),
         created_at: millis(row, "created_at")?,
     })
 }

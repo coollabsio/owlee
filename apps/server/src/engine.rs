@@ -359,6 +359,7 @@ async fn announce(
             },
             impact: IncidentImpact::Major,
         }),
+        issue: None,
         message: Some(message),
     };
     notify::fanout(
