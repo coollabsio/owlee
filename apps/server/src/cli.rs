@@ -95,6 +95,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }) {
         Command::Serve { listen, database } => {
             let config = load(listen, database)?;
+            config.check_serve_origin()?;
             let _sqlite_owner = sqlite_owner(&config)?;
             let addr = config.listen_addr();
             let state = state::boot(config).await?;
@@ -123,6 +124,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Seed { database } => {
             let config = load(None, database)?;
+            seed::refuse_in_production(&config)?;
             let state = state::boot(config).await?;
             if seed::seed(&state).await? {
                 println!("seeded {DEMO}", DEMO = seed::DEMO_EMAIL);
@@ -136,8 +138,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             token,
             config,
         } => {
-            let targets = Config::from_env()?.connectivity_targets;
-            agent::run(&server, token, config.as_deref(), Connectivity::new(targets)).await?;
+            let targets = owlee_platform::connectivity_targets_from_env()?
+                .unwrap_or_else(|| Config::development().connectivity_targets);
+            agent::run(
+                &server,
+                token,
+                config.as_deref(),
+                Connectivity::new(targets),
+            )
+            .await?;
         }
         Command::SetupToken { database, command } => {
             let config = load(None, database)?;

@@ -190,9 +190,9 @@ impl Config {
 
     pub fn from_env() -> Result<Self, ConfigError> {
         let environment = match optional(ENV).as_deref() {
-            None => EnvironmentMode::Development,
+            // Unset is production, so a bare binary never runs with the public app key.
+            None | Some("production") => EnvironmentMode::Production,
             Some("development") => EnvironmentMode::Development,
-            Some("production") => EnvironmentMode::Production,
             Some(other) => {
                 return Err(ConfigError::Invalid {
                     name: ENV,
@@ -220,13 +220,10 @@ impl Config {
                 value: port,
             })?;
         }
-        config.public_origin = optional(ORIGIN).unwrap_or_else(|| {
-            let host = match config.bind {
-                IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
-                other => other.to_string(),
-            };
-            format!("http://{host}:{}", config.port)
-        });
+        config.public_origin = match optional(ORIGIN) {
+            Some(value) => parse_origin(&value).ok_or(ConfigError::PublicOrigin(value))?,
+            None => default_origin(&config),
+        };
         config.database_path = resolve_sqlite_path(optional(DATABASE_PATH));
         if let Some(url) = optional(DATABASE_URL) {
             if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
@@ -266,11 +263,8 @@ impl Config {
                 value: memory,
             })?;
         }
-        if let Some(targets) = optional(CONNECTIVITY_TARGETS) {
-            config.connectivity_targets = parse_targets(&targets).ok_or(ConfigError::Invalid {
-                name: CONNECTIVITY_TARGETS,
-                value: targets,
-            })?;
+        if let Some(targets) = connectivity_targets_from_env()? {
+            config.connectivity_targets = targets;
         }
         if let Some(value) = optional(ALLOW_PRIVATE_WEBHOOKS) {
             config.allow_private_webhooks = parse_bool(&value).ok_or(ConfigError::Invalid {
@@ -316,6 +310,32 @@ impl Config {
     #[must_use]
     pub const fn listen_addr(&self) -> SocketAddr {
         SocketAddr::new(self.bind, self.port)
+    }
+
+    /// `serve` in production needs the origin that browsers open: the same-origin check and
+    /// Secure cookies follow it. Other commands run without it. Loopback and plain `http://`
+    /// are allowed with a warning, for a test box or a LAN install.
+    pub fn check_serve_origin(&self) -> Result<(), ConfigError> {
+        if self.environment != EnvironmentMode::Production {
+            return Ok(());
+        }
+        if optional(ORIGIN).is_none() {
+            return Err(ConfigError::PublicOriginMissing);
+        }
+        let origin = &self.public_origin;
+        if origin_is_loopback(origin) {
+            tracing::warn!(
+                origin,
+                "OWLEE_PUBLIC_ORIGIN is a loopback address, so sign-in fails from any other host"
+            );
+        }
+        if !self.secure_cookies() {
+            tracing::warn!(
+                origin,
+                "OWLEE_PUBLIC_ORIGIN is plain http, so the session cookie is not Secure"
+            );
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -368,6 +388,14 @@ pub enum ConfigError {
         "OWLEE_DATABASE_URL must be a postgres:// or postgresql:// URL. SQLite is the default; set OWLEE_DATABASE_PATH to move the file"
     )]
     DatabaseUrl,
+    #[error(
+        "OWLEE_PUBLIC_ORIGIN must be an http:// or https:// origin with no path, such as https://status.example.com: {0}"
+    )]
+    PublicOrigin(String),
+    #[error(
+        "OWLEE_PUBLIC_ORIGIN is required in production. Set it to the URL people open, such as https://status.example.com"
+    )]
+    PublicOriginMissing,
     // The value is a secret, so the message does not repeat it.
     #[error("OWLEE_APP_KEY must be base64 of 32 bytes. Make one with `openssl rand -base64 32`")]
     AppKey,
@@ -455,6 +483,53 @@ fn optional(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// `OWLEE_CONNECTIVITY_TARGETS` alone, for `owlee agent`, which runs on hosts without the
+/// server's app key or origin.
+pub fn connectivity_targets_from_env() -> Result<Option<Vec<String>>, ConfigError> {
+    optional(CONNECTIVITY_TARGETS)
+        .map(|targets| {
+            parse_targets(&targets).ok_or(ConfigError::Invalid {
+                name: CONNECTIVITY_TARGETS,
+                value: targets,
+            })
+        })
+        .transpose()
+}
+
+/// The serialized origin (`https://status.example.com`), as browsers send it in `Origin`.
+fn parse_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    let bare = matches!(url.scheme(), "http" | "https")
+        && url.has_host()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none();
+    bare.then(|| url.origin().ascii_serialization())
+}
+
+fn default_origin(config: &Config) -> String {
+    let host = match config.bind {
+        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+        other => other.to_string(),
+    };
+    format!("http://{host}:{}", config.port)
+}
+
+fn origin_is_loopback(origin: &str) -> bool {
+    match url::Url::parse(origin)
+        .ok()
+        .and_then(|url| url.host().map(|host| host.to_owned()))
+    {
+        Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        None => false,
+    }
 }
 
 fn resolve_sqlite_path(explicit: Option<String>) -> PathBuf {
@@ -728,9 +803,119 @@ mod tests {
         }
     }
 
+    const KEY: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+
+    #[test]
+    fn unset_environment_is_production() {
+        let _env = lock_process_env();
+        // SAFETY: the lock above is the only other writer of these variables.
+        unsafe {
+            std::env::remove_var("OWLEE_ENV");
+            std::env::remove_var("OWLEE_APP_KEY");
+        }
+        assert!(matches!(
+            Config::from_env().unwrap_err(),
+            ConfigError::AppKey
+        ));
+        unsafe {
+            std::env::set_var("OWLEE_APP_KEY", KEY);
+        }
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.environment, EnvironmentMode::Production);
+        assert!(!config.allow_private_webhooks);
+        unsafe {
+            std::env::remove_var("OWLEE_APP_KEY");
+        }
+    }
+
+    #[test]
+    fn serve_in_production_refuses_a_missing_or_malformed_public_origin() {
+        let _env = lock_process_env();
+        // SAFETY: the lock above is the only other writer of these variables.
+        unsafe {
+            std::env::set_var("OWLEE_ENV", "production");
+            std::env::set_var("OWLEE_APP_KEY", KEY);
+            std::env::remove_var("OWLEE_PUBLIC_ORIGIN");
+        }
+        let unset = Config::from_env().unwrap();
+        assert_eq!(
+            unset.check_serve_origin().unwrap_err().to_string(),
+            "OWLEE_PUBLIC_ORIGIN is required in production. Set it to the URL people open, such as https://status.example.com"
+        );
+        for bad in [
+            "status.example.com",
+            "ftp://status.example.com",
+            "https://status.example.com/owlee",
+            "https://status.example.com/?a=1",
+            "https://user@status.example.com",
+            "https://",
+        ] {
+            unsafe {
+                std::env::set_var("OWLEE_PUBLIC_ORIGIN", bad);
+            }
+            assert_eq!(
+                Config::from_env().unwrap_err().to_string(),
+                format!(
+                    "OWLEE_PUBLIC_ORIGIN must be an http:// or https:// origin with no path, such as https://status.example.com: {bad}"
+                ),
+            );
+        }
+        for (value, origin, secure) in [
+            (
+                "https://Status.Example.com/",
+                "https://status.example.com",
+                true,
+            ),
+            (
+                "https://status.example.com:443",
+                "https://status.example.com",
+                true,
+            ),
+            ("http://10.0.0.5:8080", "http://10.0.0.5:8080", false),
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080", false),
+        ] {
+            unsafe {
+                std::env::set_var("OWLEE_PUBLIC_ORIGIN", value);
+            }
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.public_origin, origin);
+            assert_eq!(config.secure_cookies(), secure);
+            config.check_serve_origin().unwrap();
+        }
+        unsafe {
+            std::env::set_var("OWLEE_ENV", "development");
+            std::env::remove_var("OWLEE_PUBLIC_ORIGIN");
+        }
+        let development = Config::from_env().unwrap();
+        assert_eq!(development.public_origin, "http://127.0.0.1:43123");
+        development.check_serve_origin().unwrap();
+        unsafe {
+            std::env::remove_var("OWLEE_ENV");
+            std::env::remove_var("OWLEE_APP_KEY");
+        }
+    }
+
+    #[test]
+    fn loopback_origins_are_recognized() {
+        for origin in [
+            "http://127.0.0.1:8080",
+            "http://localhost",
+            "http://[::1]:80",
+            "http://0.0.0.0",
+        ] {
+            assert!(origin_is_loopback(origin), "{origin}");
+        }
+        assert!(!origin_is_loopback("https://status.example.com"));
+        assert!(!origin_is_loopback("http://192.168.1.10"));
+    }
+
     #[test]
     fn analytics_geo_defaults_to_city_and_rejects_unknown_values() {
         let _env = lock_process_env();
+        // SAFETY: the lock above is the only other writer of this variable.
+        unsafe {
+            std::env::set_var("OWLEE_ENV", "development");
+        }
         assert_eq!(
             Config::from_env().unwrap().ingest.analytics_geo,
             GeoPrecision::City
@@ -752,6 +937,7 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("OWLEE_ANALYTICS_GEO");
+            std::env::remove_var("OWLEE_ENV");
         }
     }
 

@@ -13,16 +13,16 @@ mod observability;
 mod problem;
 mod time;
 
-pub use ipnet::IpNet;
 pub use auth::{PasswordError, PasswordService, generate_token, hash_token, normalize_email};
 pub use config::{
-    AppKey, Config, ConfigError, EnvironmentMode, GeoPrecision, IngestConfig, SmtpConfig, default_trusted_proxies,
-    redact_database_url,
+    AppKey, Config, ConfigError, EnvironmentMode, GeoPrecision, IngestConfig, SmtpConfig,
+    connectivity_targets_from_env, default_trusted_proxies, redact_database_url,
 };
 pub use db::{
     Backend, Database, DatabaseConfig, DatabaseError, Migration, MigrationError, MigrationRunner,
 };
 pub use id::{Id, ParseIdError};
+pub use ipnet::IpNet;
 pub use observability::{TracingFormat, init_tracing};
 pub use problem::Problem;
 pub use time::TimestampMillis;

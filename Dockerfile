@@ -32,8 +32,7 @@ COPY --from=server /src/target/release/owlee /owlee
 ENV OWLEE_ENV=production \
     OWLEE_BIND=0.0.0.0 \
     OWLEE_PORT=8080 \
-    OWLEE_DATABASE_PATH=/var/lib/owlee/owlee.sqlite \
-    OWLEE_PUBLIC_ORIGIN=http://127.0.0.1:8080
+    OWLEE_DATABASE_PATH=/var/lib/owlee/owlee.sqlite
 USER 65532:65532
 VOLUME ["/var/lib/owlee"]
 EXPOSE 8080

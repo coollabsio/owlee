@@ -923,7 +923,10 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
     assert_eq!(foreign.status, StatusCode::FORBIDDEN);
     assert_eq!(
         foreign.body["detail"],
-        "This request came from another site."
+        format!(
+            "This request came from the origin https://evil.example, but Owlee accepts changes only from {ORIGIN}. \
+             Open Owlee at {ORIGIN}, or set OWLEE_PUBLIC_ORIGIN to the address in the browser."
+        )
     );
     let cross = call(
         &app.router,
@@ -935,6 +938,13 @@ async fn cookie_routes_refuse_other_origins_and_ingest_does_not() {
     )
     .await;
     assert_eq!(cross.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        cross.body["detail"],
+        format!(
+            "This request came from another site (Sec-Fetch-Site: cross-site), but Owlee accepts changes only from {ORIGIN}. \
+             Open Owlee at {ORIGIN}, or set OWLEE_PUBLIC_ORIGIN to the address in the browser."
+        )
+    );
     let login_elsewhere = call(
         &app.router,
         "POST",

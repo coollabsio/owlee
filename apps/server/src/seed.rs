@@ -1,5 +1,5 @@
 use owlee_domain::{IncidentImpact, IncidentStatus, JobType, MonitorState};
-use owlee_platform::{Id, TimestampMillis};
+use owlee_platform::{Config, EnvironmentMode, Id, TimestampMillis};
 
 use crate::error::AppError;
 use crate::repo::{self, Channel, Incident, IncidentUpdate, Maintenance, Monitor, Page};
@@ -7,6 +7,17 @@ use crate::state::{self, AppState};
 
 pub const DEMO_EMAIL: &str = "test@example.com";
 pub const DEMO_PASSWORD: &str = "password";
+
+/// The demo account has a published password, so production never gets one.
+pub fn refuse_in_production(config: &Config) -> Result<(), String> {
+    match config.environment {
+        EnvironmentMode::Development => Ok(()),
+        EnvironmentMode::Production => Err(format!(
+            "owlee seed refuses to run in production: it creates {DEMO_EMAIL} with the password \"{DEMO_PASSWORD}\". \
+             Set OWLEE_ENV=development to seed a local database"
+        )),
+    }
+}
 
 pub async fn seed(state: &AppState) -> Result<bool, AppError> {
     if repo::count_users(&state.db).await? > 0 {
@@ -414,4 +425,24 @@ async fn insert_open(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use owlee_platform::EnvironmentMode;
+
+    use super::refuse_in_production;
+
+    #[test]
+    fn seed_refuses_in_production() {
+        let mut config = crate::state::testing_config("unused.sqlite".into());
+        assert_eq!(refuse_in_production(&config), Ok(()));
+        config.environment = EnvironmentMode::Production;
+        assert_eq!(
+            refuse_in_production(&config),
+            Err("owlee seed refuses to run in production: it creates test@example.com with the password \"password\". \
+                 Set OWLEE_ENV=development to seed a local database"
+                .to_owned())
+        );
+    }
 }

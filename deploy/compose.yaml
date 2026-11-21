@@ -21,8 +21,10 @@ services:
       # and private networks, where the Traefik container lives, so a client
       # that reaches the published port directly cannot fake its address.
       # OWLEE_TRUSTED_PROXIES: 10.0.1.0/24
-      # Used in the one-time Initial setup URL printed to stderr on a fresh database.
-      OWLEE_PUBLIC_ORIGIN: ${OWLEE_PUBLIC_ORIGIN:-http://localhost:8080}
+      # The URL people open, such as https://status.example.com. Sign-in accepts
+      # changes only from this origin, the session cookie is Secure when it is
+      # https, and the one-time Initial setup URL uses it.
+      OWLEE_PUBLIC_ORIGIN: ${OWLEE_PUBLIC_ORIGIN:?Set OWLEE_PUBLIC_ORIGIN to the URL people open, such as https://status.example.com}
       # SQLite file inside the volume. Set this to another path to use a different file.
       OWLEE_DATABASE_PATH: /var/lib/owlee/owlee.sqlite
       # Public sign-up stays closed after the owner is created from that URL.

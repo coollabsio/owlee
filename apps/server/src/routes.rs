@@ -143,16 +143,21 @@ async fn same_origin(State(state): State<AppState>, request: Request, next: Next
         return next.run(request).await;
     }
     let headers = request.headers();
+    let expected = state.config.public_origin.trim_end_matches('/');
     let allowed = match headers.get(ORIGIN) {
-        Some(origin) => {
-            origin.as_bytes() == state.config.public_origin.trim_end_matches('/').as_bytes()
-        }
+        Some(origin) => origin.as_bytes() == expected.as_bytes(),
         None => headers
             .get("sec-fetch-site")
             .is_none_or(|site| site.as_bytes() != b"cross-site"),
     };
     if !allowed {
-        return AppError::Forbidden("This request came from another site.").into_response();
+        return AppError::CrossOrigin {
+            expected: expected.to_owned(),
+            received: headers
+                .get(ORIGIN)
+                .map(|origin| String::from_utf8_lossy(origin.as_bytes()).into_owned()),
+        }
+        .into_response();
     }
     next.run(request).await
 }

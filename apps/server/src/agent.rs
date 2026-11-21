@@ -85,7 +85,9 @@ fn load(path: Option<&Path>) -> Result<Vec<Check>, String> {
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))
         })
         .transpose()?;
-    parse(text.as_deref(), std::env::vars(), |name| std::env::var(name).ok())
+    parse(text.as_deref(), std::env::vars(), |name| {
+        std::env::var(name).ok()
+    })
 }
 
 /// Reads the checks from the config file text and from `OWLEE_AGENT_CHECK_<n>_<KEY>` variables.
@@ -141,8 +143,15 @@ fn env_checks(
             }
             _ => (field, toml::Value::String(value)),
         };
-        if tables.entry(index).or_default().insert(field, value).is_some() {
-            return Err(format!("{key} sets a key that another variable already sets"));
+        if tables
+            .entry(index)
+            .or_default()
+            .insert(field, value)
+            .is_some()
+        {
+            return Err(format!(
+                "{key} sets a key that another variable already sets"
+            ));
         }
     }
     tables
@@ -473,7 +482,9 @@ body_contains = "ok"
     #[test]
     fn rejects_unknown_keys() {
         let error = parse(
-            Some("[[check]]\nname = \"x\"\ntype = \"tcp\"\ntarget = \"a:1\"\npasword_env = \"X\"\n"),
+            Some(
+                "[[check]]\nname = \"x\"\ntype = \"tcp\"\ntarget = \"a:1\"\npasword_env = \"X\"\n",
+            ),
             [],
             |_| None,
         )
@@ -507,7 +518,10 @@ body_contains = "ok"
         ]);
         let lookup = vars.clone();
         let checks = parse(None, vars, |name| {
-            lookup.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
+            lookup
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
         })
         .unwrap();
         assert_eq!(checks[0].name, "Main DB");

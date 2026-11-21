@@ -36,6 +36,7 @@ You need Rust 1.99 (see `rust-toolchain.toml`) and [Bun](https://bun.sh) 1.2 or 
 
 ```bash
 cd apps/web && bun install && bun run build
+export OWLEE_ENV=development   # unset means production
 cargo run -p owlee-server -- seed
 cargo run -p owlee-server -- serve --listen 127.0.0.1:43123
 ```
@@ -48,7 +49,7 @@ Open http://127.0.0.1:43123.
 - password `password`
 - a coolLabs status page, a demo analytics site (`coolify.io`, public id `pub_coollabs_demo`), short links at `/go/coolify` and `/go/docs`, and demo error projects (`Checkout`, `API`) with sample events
 
-`just dev` runs `seed` before it starts the server. Production does not. A fresh database uses the setup URL below, not this password.
+`just dev` runs `seed` before it starts the server. `just` recipes set `OWLEE_ENV=development` unless it is already set. `seed` refuses to run in production, which is also the mode when `OWLEE_ENV` is unset. A fresh database uses the setup URL below, not this password.
 
 The database file is `data/owlee.sqlite`. The Docker default is `/var/lib/owlee/owlee.sqlite`. A custom `OWLEE_DATABASE_PATH` is used as written. Migrations run on startup.
 
@@ -102,7 +103,9 @@ The root user opens registration in Admin. It stays closed until a mail server i
 
 New accounts are members. A member can read everything but cannot create, change, or delete anything, and cannot see notification channels, which hold webhook URLs and tokens. The root user can mark another account as an installation admin, which can change everything except the instance settings. The root account itself cannot be changed. Every account can change its own password in Account settings, which signs out its other sessions, and can sign out any of its sessions there.
 
-Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
+Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. The `403` names the origin it received and the one it expected. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
+
+In production, `owlee serve` does not start without `OWLEE_PUBLIC_ORIGIN`. Any command refuses a value that is not a bare `http://` or `https://` origin, such as one with a path. A loopback host or plain `http://` starts with a warning, for a test machine or a LAN install.
 
 Secrets saved in the database are encrypted with `OWLEE_APP_KEY`, base64 of 32 bytes (`openssl rand -base64 32`). Production does not start without it. Development uses a fixed public key and logs a warning. Keep the key with your backups. With another key, Owlee cannot read the saved SMTP password; it logs a warning, and the root user must enter the password again in Admin. A password saved by an older Owlee in plain text is treated the same way.
 
@@ -147,9 +150,12 @@ export OWLEE_APP_POSTGRES_URL=postgres://status:status@127.0.0.1:5432/status_app
 ```bash
 docker build -t owlee:local .
 export OWLEE_APP_KEY="$(openssl rand -base64 32)"   # once; store it with your backups
-docker run --rm -p 8080:8080 -v owlee-data:/var/lib/owlee \
-  -e OWLEE_APP_KEY="$OWLEE_APP_KEY" owlee:local
+docker run -d --name owlee -p 8080:8080 -v owlee-data:/var/lib/owlee \
+  -e OWLEE_APP_KEY="$OWLEE_APP_KEY" \
+  -e OWLEE_PUBLIC_ORIGIN=http://localhost:8080 owlee:local
 ```
+
+The image runs in production mode, so it needs `OWLEE_APP_KEY` and `OWLEE_PUBLIC_ORIGIN`. A plain `http://` origin starts with a warning, because the session cookie is not `Secure`.
 
 `.github/workflows/image.yml` runs the CI tests, then publishes `ghcr.io/coollabsio/owlee` for `linux/amd64` and `linux/arm64`. A push to `main` publishes the tags `main` and the seven-character commit SHA. A release tag such as `v0.1.0` publishes `0.1.0`, `0.1`, and `latest`. A pre-release tag such as `v0.2.0-rc.1` publishes only `0.2.0-rc.1`. So `latest` is the newest stable release, not the tip of `main`. The same workflow can be run by hand from the Actions tab. If the package is not linked to this repository automatically, link it from the package settings.
 
@@ -157,21 +163,29 @@ docker run --rm -p 8080:8080 -v owlee-data:/var/lib/owlee \
 docker pull ghcr.io/coollabsio/owlee:latest
 ```
 
-The image listens on `0.0.0.0:8080`, stores SQLite in `/var/lib/owlee`, and uses `owlee healthcheck` for the container check. `deploy/compose.yaml` is the same shape as Orbit's compose file, with Postgres left as a commented service. Set `OWLEE_IMAGE=ghcr.io/coollabsio/owlee:latest` to point that file at the published image.
+The image listens on `0.0.0.0:8080`, stores SQLite in `/var/lib/owlee`, and uses `owlee healthcheck` for the container check. `deploy/compose.yaml` is the same shape as Orbit's compose file, with Postgres left as a commented service. It refuses to start until `OWLEE_APP_KEY` and `OWLEE_PUBLIC_ORIGIN` are set, in the shell or in `deploy/.env`. Without `OWLEE_IMAGE`, it builds `owlee:local` from the repository. To use the published image instead, run these commands from the repository root:
+
+```bash
+export OWLEE_APP_KEY="$(openssl rand -base64 32)"   # once; store it with your backups
+export OWLEE_PUBLIC_ORIGIN=https://status.example.com
+export OWLEE_IMAGE=ghcr.io/coollabsio/owlee:0.1.0
+docker compose -f deploy/compose.yaml pull owlee
+docker compose -f deploy/compose.yaml up -d --no-build
+```
 
 On a fresh volume the container prints `Initial setup URL` to stderr. Read it from the container logs (`docker logs` or `docker compose logs owlee`), open it in a browser, and create the owner. Set `OWLEE_PUBLIC_ORIGIN` to the URL you will open before the first start so the printed link uses that host. The token is not stored in the image.
 
 If you miss the URL, stop the container (required for the default SQLite volume; leave Owlee running when `OWLEE_DATABASE_URL` is Postgres) and issue another:
 
 ```bash
-docker stop <container>
+docker stop owlee
 docker run --rm -v owlee-data:/var/lib/owlee \
   -e OWLEE_PUBLIC_ORIGIN=https://status.example.com \
   -e OWLEE_APP_KEY="$OWLEE_APP_KEY" \
   ghcr.io/coollabsio/owlee:latest setup-token rotate
 ```
 
-With Compose, from the repository root:
+With Compose, from the repository root, with the same variables set:
 
 ```bash
 docker compose -f deploy/compose.yaml stop owlee

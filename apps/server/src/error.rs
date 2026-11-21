@@ -11,6 +11,12 @@ pub enum AppError {
     Unauthorized,
     InvalidLogin,
     Forbidden(&'static str),
+    /// A cookie request whose `Origin` is not `OWLEE_PUBLIC_ORIGIN`. `None` is a request
+    /// without `Origin` that the browser marked `Sec-Fetch-Site: cross-site`.
+    CrossOrigin {
+        expected: String,
+        received: Option<String>,
+    },
     NotFound,
     /// No workspace header, or the user is not a member of that workspace.
     WorkspaceNotFound,
@@ -52,6 +58,7 @@ impl std::fmt::Display for AppError {
             Self::Unauthorized => formatter.write_str("unauthorized"),
             Self::InvalidLogin => formatter.write_str("invalid login"),
             Self::Forbidden(detail) => write!(formatter, "forbidden: {detail}"),
+            Self::CrossOrigin { .. } => formatter.write_str("forbidden: cross-origin request"),
             Self::NotFound => formatter.write_str("not found"),
             Self::WorkspaceNotFound => formatter.write_str("workspace not found"),
             Self::Busy => formatter.write_str("check already running"),
@@ -100,6 +107,23 @@ impl IntoResponse for AppError {
                 detail: detail.to_owned(),
                 fields: None,
             },
+            Self::CrossOrigin { expected, received } => {
+                let from = received.map_or_else(
+                    || "another site (Sec-Fetch-Site: cross-site)".to_owned(),
+                    |origin| format!("the origin {origin}"),
+                );
+                Problem {
+                    type_uri: "https://owlee.io/problems/forbidden".to_owned(),
+                    title: "Forbidden".to_owned(),
+                    status: 403,
+                    code: "forbidden".to_owned(),
+                    detail: format!(
+                        "This request came from {from}, but Owlee accepts changes only from {expected}. \
+                         Open Owlee at {expected}, or set OWLEE_PUBLIC_ORIGIN to the address in the browser."
+                    ),
+                    fields: None,
+                }
+            }
             Self::NotFound => Problem::not_found(),
             Self::WorkspaceNotFound => Problem {
                 type_uri: "https://owlee.io/problems/workspace-not-found".to_owned(),

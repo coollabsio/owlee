@@ -1,5 +1,8 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# An unset OWLEE_ENV is production. Recipes run in development unless the caller says otherwise.
+export OWLEE_ENV := env("OWLEE_ENV", "development")
+
 # Install frontend dependencies. Rust dependencies are fetched by Cargo.
 setup:
     cd apps/web && bun install --frozen-lockfile

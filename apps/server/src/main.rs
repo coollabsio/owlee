@@ -10,8 +10,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() -> ExitCode {
     let environment = std::env::var("OWLEE_ENV");
     let format = match environment.as_deref() {
-        Ok("production") => TracingFormat::Json,
-        _ => TracingFormat::Compact,
+        Ok("development") => TracingFormat::Compact,
+        _ => TracingFormat::Json,
     };
     let _ = init_tracing(format);
     let runtime = tokio::runtime::Builder::new_multi_thread()
