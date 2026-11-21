@@ -36,19 +36,23 @@ async fn get(app: &Router, method: &str, uri: &str) -> (StatusCode, HeaderMap, S
     (status, headers, String::from_utf8_lossy(&body).into_owned())
 }
 
-/// The theme script in `index.html`, hashed the way a browser checks it against the CSP.
-fn inline_script_hash(html: &str) -> String {
-    let start = html
-        .find("<script>")
-        .expect("index.html has an inline script")
-        + "<script>".len();
-    let end = start + html[start..].find("</script>").unwrap();
-    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&html[start..end]))
+/// The CSP sources for every inline script in the served page, hashed the way a browser checks
+/// them. The real build has one (the theme script); the placeholder page that `build.rs` writes
+/// without `apps/web/dist` has none.
+fn inline_script_sources(html: &str) -> String {
+    html.split("<script>")
+        .skip(1)
+        .map(|rest| {
+            let script = &rest[..rest.find("</script>").unwrap()];
+            let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script));
+            format!(" 'sha256-{hash}'")
+        })
+        .collect()
 }
 
-fn policy(hash: &str, frame_ancestors: &str) -> String {
+fn policy(scripts: &str, frame_ancestors: &str) -> String {
     format!(
-        "default-src 'self'; script-src 'self' 'sha256-{hash}'; style-src 'self'; img-src 'self'; \
+        "default-src 'self'; script-src 'self'{scripts}; style-src 'self'; img-src 'self'; \
          object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors {frame_ancestors}"
     )
 }
@@ -72,26 +76,32 @@ async fn the_dashboard_refuses_framing_and_allows_only_its_own_scripts() {
     let app = app().await;
     let (status, headers, html) = get(&app, "GET", "/").await;
     assert_eq!(status, StatusCode::OK);
-    let hash = inline_script_hash(&html);
-    assert_eq!(headers["content-security-policy"], policy(&hash, "'none'"));
+    let scripts = inline_script_sources(&html);
+    assert_eq!(
+        headers["content-security-policy"],
+        policy(&scripts, "'none'")
+    );
     assert_eq!(headers["x-frame-options"], "DENY");
     assert_common(&headers);
 
     let (_, settings, _) = get(&app, "GET", "/monitors").await;
-    assert_eq!(settings["content-security-policy"], policy(&hash, "'none'"));
+    assert_eq!(
+        settings["content-security-policy"],
+        policy(&scripts, "'none'")
+    );
 }
 
 #[tokio::test]
 async fn public_status_and_share_pages_can_be_embedded() {
     let app = app().await;
     let (_, _, html) = get(&app, "GET", "/").await;
-    let hash = inline_script_hash(&html);
+    let scripts = inline_script_sources(&html);
     for path in ["/status/acme", "/share/site/acme"] {
         let (status, headers, _) = get(&app, "GET", path).await;
         assert_eq!(status, StatusCode::OK, "{path}");
         assert_eq!(
             headers["content-security-policy"],
-            policy(&hash, "*"),
+            policy(&scripts, "*"),
             "{path}"
         );
         assert!(!headers.contains_key("x-frame-options"), "{path}");

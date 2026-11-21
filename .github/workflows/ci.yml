@@ -40,10 +40,11 @@ jobs:
           sudo apt-get install -y postgresql-client
           PGPASSWORD=status psql -h 127.0.0.1 -U status -d status -c "CREATE DATABASE status_platform"
           PGPASSWORD=status psql -h 127.0.0.1 -U status -d status -c "CREATE DATABASE status_app"
-      - name: Backend tests
-        run: cargo test --workspace
+      # Build the UI first, so the server tests check the real embedded index.html.
       - name: Frontend build
         run: cd apps/web && bun install --frozen-lockfile && bun run build
+      - name: Backend tests
+        run: cargo test --workspace
 
   musl:
     name: musl release build
