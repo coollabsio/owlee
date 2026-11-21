@@ -26,7 +26,7 @@ owlee-errors = { path = "../../crates/errors" }
 owlee-insights = { path = "../../crates/insights" }
 owlee-platform = { path = "../../crates/platform" }
 isbot = "0.1.3"
-maxminddb = "0.30.3"
+maxminddb = "0.33.0"
 http-body-util = "0.1"
 include_dir = "0.7"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
