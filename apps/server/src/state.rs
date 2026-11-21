@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
 use crate::connectivity::Connectivity;
 use crate::dns::{SystemResolver, TxtResolver};
@@ -22,7 +23,7 @@ pub struct AppState {
     pub inflight: Inflight,
     pub connectivity: Connectivity,
     pub insights_salt: Arc<crate::insights::Salt>,
-    pub public_limit: Arc<crate::insights::RateLimiter>,
+    pub insights_limits: Arc<crate::insights::Limits>,
     pub error_project_limit: Arc<TokenBucket>,
     pub error_ip_limit: Arc<TokenBucket>,
     pub analytics_site_limit: Arc<TokenBucket>,
@@ -30,7 +31,17 @@ pub struct AppState {
     pub error_intake: Arc<crate::intake::IntakeStats>,
     pub analytics_intake: Arc<crate::intake::IntakeStats>,
     pub login_ip_limit: Arc<TokenBucket>,
+    /// Failed passwords per account and client address.
     pub login_account_limit: Arc<TokenBucket>,
+    /// Failed passwords per account from every address. Five times the rate
+    /// of `login_account_limit`, so one address cannot empty it.
+    pub login_account_wide_limit: Arc<TokenBucket>,
+    pub public_page_limit: Arc<TokenBucket>,
+    pub agent_result_limit: Arc<TokenBucket>,
+    pub agent_checks_limit: Arc<TokenBucket>,
+    /// One permit per CPU for argon2, so password requests cannot take every
+    /// blocking thread and all the memory at once.
+    pub hash_permits: Arc<Semaphore>,
     /// Account mails per address, so the auth routes cannot flood an inbox.
     pub mail_address_limit: Arc<TokenBucket>,
     /// Checks an editor starts by hand, per user: "Run check" and the unsaved test.
@@ -132,7 +143,7 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         connectivity: Connectivity::new(config.connectivity_targets.clone()),
         passwords,
         insights_salt: Arc::default(),
-        public_limit: insights.public_limit,
+        insights_limits: insights.limits,
         error_project_limit: Arc::new(TokenBucket::per_minute(
             ingest.error_rate_project_per_min,
             ingest.error_rate_project_burst,
@@ -157,6 +168,16 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
             ingest.login_rate_account_per_min,
             ingest.login_rate_account_burst,
         )),
+        login_account_wide_limit: Arc::new(TokenBucket::per_minute(
+            ingest.login_rate_account_per_min.saturating_mul(5),
+            ingest.login_rate_account_burst.saturating_mul(20),
+        )),
+        public_page_limit: Arc::new(TokenBucket::per_minute(600, 200)),
+        agent_result_limit: Arc::new(TokenBucket::per_minute(600, 200)),
+        agent_checks_limit: Arc::new(TokenBucket::per_minute(6, 3)),
+        hash_permits: Arc::new(Semaphore::new(
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+        )),
         mail_address_limit: Arc::new(TokenBucket::per_hour(3, 3)),
         check_limit: Arc::new(TokenBucket::per_minute(30, 15)),
         outbox: None,
@@ -166,25 +187,36 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
     })
 }
 
-pub async fn hash_password(
-    passwords: &PasswordService,
-    password: String,
-) -> Result<String, PasswordError> {
-    let passwords = passwords.clone();
-    tokio::task::spawn_blocking(move || passwords.hash(&password))
-        .await
-        .unwrap_or(Err(PasswordError::HashingFailed))
+pub async fn hash_password(state: &AppState, password: String) -> Result<String, PasswordError> {
+    let passwords = state.passwords.clone();
+    argon(state, move || passwords.hash(&password)).await
 }
 
 pub async fn verify_password(
-    passwords: &PasswordService,
+    state: &AppState,
     password: String,
     encoded: String,
 ) -> Result<bool, PasswordError> {
-    let passwords = passwords.clone();
-    tokio::task::spawn_blocking(move || passwords.verify(&password, &encoded))
+    let passwords = state.passwords.clone();
+    argon(state, move || passwords.verify(&password, &encoded)).await
+}
+
+/// The blocking task owns the permit, so a request that is dropped while it
+/// waits does not free the permit before the hash ends.
+async fn argon<T: Send + 'static>(
+    state: &AppState,
+    work: impl FnOnce() -> Result<T, PasswordError> + Send + 'static,
+) -> Result<T, PasswordError> {
+    let permit = Arc::clone(&state.hash_permits)
+        .acquire_owned()
         .await
-        .unwrap_or(Err(PasswordError::HashingFailed))
+        .map_err(|_| PasswordError::HashingFailed)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .unwrap_or(Err(PasswordError::HashingFailed))
 }
 
 #[must_use]

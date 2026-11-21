@@ -748,3 +748,302 @@ async fn members_can_read_a_site_but_not_change_it() {
         (json!("Docs"), json!(1_000_000), json!(false))
     );
 }
+
+async fn get_with(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Option<String>) {
+    let mut request = Request::builder().uri(uri).header("user-agent", BROWSER);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (response.status(), location)
+}
+
+async fn create_link(app: &Router, session: &TestSession, hostname: &str, slug: &str) -> Value {
+    let (status, domain, _) = call(
+        app,
+        "POST",
+        "/api/domains",
+        Some(json!({"hostname": hostname})),
+        Some(session),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{domain}");
+    let (status, link, _) = call(
+        app,
+        "POST",
+        "/api/links",
+        Some(json!({
+            "project_id": session.project_id,
+            "domain_id": domain["id"],
+            "slug": slug,
+            "destination": "https://example.org/landing"
+        })),
+        Some(session),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    link
+}
+
+#[tokio::test]
+async fn requests_from_another_origin_do_not_use_the_site_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = testing_config(dir.path().join("owlee.sqlite"));
+    config.ingest.analytics_rate_site_per_min = 1;
+    config.ingest.analytics_rate_site_burst = 2;
+    let state = boot(config).await.unwrap();
+    let app = router(state.clone());
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let receive = |url: &'static str| {
+        let app = app.clone();
+        let body = json!({"site": site["public_id"], "type": "pageview", "url": url});
+        async move {
+            call(
+                &app,
+                "POST",
+                "/api/receive",
+                Some(body),
+                None,
+                Some(BROWSER),
+            )
+            .await
+            .0
+        }
+    };
+    for _ in 0..5 {
+        assert_eq!(
+            receive("https://attacker.test/").await,
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(receive("https://coolify.io/").await, StatusCode::ACCEPTED);
+    assert_eq!(receive("https://coolify.io/").await, StatusCode::ACCEPTED);
+    assert_eq!(
+        receive("https://coolify.io/").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn clicks_past_the_limit_redirect_without_being_counted() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let link = create_link(&app, &editor, "go.limit.test", "launch").await;
+    for _ in 0..12 {
+        let (status, location) = get_with(&app, "/go/launch", &[]).await;
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location.as_deref(), Some("https://example.org/landing"));
+    }
+    let (status, location) = get_with(&app, "/launch", &[("host", "go.limit.test")]).await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location.as_deref(), Some("https://example.org/landing"));
+    let (_, link, _) = call(
+        &app,
+        "GET",
+        &format!("/api/links/{}", link["id"].as_str().unwrap()),
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(link["total_clicks"], 10);
+}
+
+#[tokio::test]
+async fn values_past_the_daily_cap_are_counted_as_other() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let link = create_link(&app, &editor, "go.cap.test", "launch").await;
+    let day = owlee_insights::day(owlee_insights::now_secs());
+    let mut tx = state.db.begin().await.unwrap();
+    for (table, owner_column, owner, dimension) in [
+        ("insight_dimension_daily", "site_id", &site["id"], "path"),
+        (
+            "insight_link_dimension_daily",
+            "link_id",
+            &link["id"],
+            "referrer",
+        ),
+    ] {
+        for index in 0..1000 {
+            sqlx::query(&format!(
+                "INSERT INTO {table} ({owner_column}, day, dimension, value, count) VALUES ($1, $2, $3, $4, 1)"
+            ))
+            .bind(owner.as_str().unwrap())
+            .bind(day)
+            .bind(dimension)
+            .bind(format!("/p{index}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+
+    pageview(&app, &site, "/p7").await;
+    pageview(&app, &site, "/new-one").await;
+    pageview(&app, &site, "/new-two").await;
+    for referrer in ["https://one.test/", "https://two.test/"] {
+        let (status, _) = get_with(&app, "/go/launch", &[("referer", referrer)]).await;
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    }
+
+    let counts = |table: &'static str, dimension: &'static str| {
+        let pool = state.db.pool().clone();
+        async move {
+            let rows: Vec<(String, i64)> = sqlx::query_as(&format!(
+                "SELECT value, count FROM {table} WHERE dimension = $1 \
+                 AND (count > 1 OR value NOT LIKE '/p%') ORDER BY value"
+            ))
+            .bind(dimension)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let total: i64 = sqlx::query_scalar(&format!(
+                "SELECT CAST(COUNT(*) AS BIGINT) FROM {table} WHERE dimension = $1"
+            ))
+            .bind(dimension)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            (rows, total)
+        }
+    };
+    assert_eq!(
+        counts("insight_dimension_daily", "path").await,
+        (vec![("(other)".to_owned(), 2), ("/p7".to_owned(), 2)], 1001)
+    );
+    assert_eq!(
+        counts("insight_link_dimension_daily", "referrer").await,
+        (vec![("(other)".to_owned(), 2)], 1001)
+    );
+}
+
+#[tokio::test]
+async fn public_stats_are_limited_per_client() {
+    let (app, state) = app().await;
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/sites/{}/public", site["id"].as_str().unwrap()),
+        Some(json!({"enabled": true, "slug": "open-stats", "threshold": 0, "sections": []})),
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let uri = "/api/public/sites/open-stats/overview";
+    for _ in 0..60 {
+        assert_eq!(get_with(&app, uri, &[]).await.0, StatusCode::OK);
+    }
+    assert_eq!(
+        get_with(&app, uri, &[]).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn a_link_hostname_redirects_only_after_its_txt_record_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = testing_config(dir.path().join("owlee.sqlite"));
+    config.environment = owlee_platform::EnvironmentMode::Production;
+    config.public_origin = "http://owlee.example.com".to_owned();
+    let mut state = boot(config).await.unwrap();
+    let dns = owlee_server::MapResolver::default();
+    state.dns = std::sync::Arc::new(dns.clone());
+    let app = router(state.clone());
+    let editor = editor_session(&state).await.unwrap();
+
+    let (status, own, _) = call(
+        &app,
+        "POST",
+        "/api/domains",
+        Some(json!({"hostname": "Owlee.Example.com"})),
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{own}");
+
+    let link = create_link(&app, &editor, "go.brand.test", "launch").await;
+    let domain_id = link["domain_id"].as_str().unwrap();
+    for slug in ["api", "login/now"] {
+        let (status, body, _) = call(
+            &app,
+            "POST",
+            "/api/links",
+            Some(json!({
+                "project_id": editor.project_id,
+                "domain_id": domain_id,
+                "slug": slug,
+                "destination": "https://example.org/phish"
+            })),
+            Some(&editor),
+            Some(BROWSER),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{slug}: {body}");
+    }
+
+    let on_host = [("host", "go.brand.test")];
+    let (status, location) = get_with(&app, "/launch", &on_host).await;
+    assert!(!status.is_redirection(), "{status}");
+    assert_eq!(location, None);
+
+    let verify = format!("/api/domains/{domain_id}/verify");
+    let (status, body, _) = call(&app, "POST", &verify, None, Some(&editor), Some(BROWSER)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A domain made before verification existed has no token yet.
+    sqlx::query("UPDATE insight_domains SET verify_token = ''")
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    let (_, domains, _) = call(
+        &app,
+        "GET",
+        "/api/domains",
+        None,
+        Some(&editor),
+        Some(BROWSER),
+    )
+    .await;
+    assert_eq!(domains[0]["verified"], false);
+    assert_eq!(domains[0]["redirect_open"], false);
+    assert_eq!(domains[0]["verify_name"], "_owlee-verify.go.brand.test");
+    let value = domains[0]["verify_value"].as_str().unwrap().to_owned();
+    assert!(value.len() > "owlee-verify=".len(), "{value}");
+    dns.set("_owlee-verify.go.brand.test", vec![value]);
+    let (status, body, _) = call(&app, "POST", &verify, None, Some(&editor), Some(BROWSER)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["verified"], true);
+
+    let (status, location) = get_with(&app, "/launch", &on_host).await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location.as_deref(), Some("https://example.org/landing"));
+
+    dns.set("_owlee-verify.go.brand.test", Vec::new());
+    assert_eq!(owlee_server::recheck_verified(&state).await.unwrap(), 1);
+    let (status, location) = get_with(&app, "/launch", &on_host).await;
+    assert!(!status.is_redirection(), "{status}");
+    assert_eq!(location, None);
+}

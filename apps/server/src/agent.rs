@@ -280,6 +280,13 @@ impl Server {
                 "the server rejected the agent token; create a new agent".to_owned(),
             ));
         }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(Rejected::Retry(
+                response
+                    .error_for_status()
+                    .expect_err("429 is an error status"),
+            ));
+        }
         if status.is_client_error() {
             let problem: serde_json::Value = response.json().await.unwrap_or_default();
             let reason = problem["fields"]["checks"]
@@ -377,6 +384,30 @@ body_contains = "ok"
             error,
             "check \"Main DB\": environment variable PG_PASSWORD is not set"
         );
+    }
+
+    async fn register_against(status: axum::http::StatusCode) -> Rejected {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/api/agent/checks",
+            axum::routing::post(move || async move { status }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server = Server {
+            client: reqwest::Client::new(),
+            base: format!("http://{addr}"),
+            token: "token".to_owned(),
+        };
+        server.register(&[]).await.err().expect("refused")
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_registration_is_retried() {
+        let rejected = register_against(axum::http::StatusCode::TOO_MANY_REQUESTS).await;
+        assert!(matches!(rejected, Rejected::Retry(_)));
+        let rejected = register_against(axum::http::StatusCode::UNPROCESSABLE_ENTITY).await;
+        assert!(matches!(rejected, Rejected::Final(_)));
     }
 
     #[test]

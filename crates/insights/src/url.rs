@@ -63,7 +63,7 @@ pub fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        let decoded = (bytes[index] == b'%' && index + 2 < bytes.len())
+        let decoded = (bytes[index] == b'%' && index + 3 <= bytes.len())
             .then(|| std::str::from_utf8(&bytes[index + 1..index + 3]).ok())
             .flatten()
             .and_then(|hex| u8::from_str_radix(hex, 16).ok());

@@ -8,7 +8,7 @@
 //! its address or the Cloudflare geo headers.
 
 use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
@@ -19,6 +19,9 @@ use crate::state::AppState;
 
 pub struct Client {
     pub ip: String,
+    /// Rate-limit key. An IPv6 client is its /64, because one host usually
+    /// owns the whole /64 and can rotate through it.
+    pub limit_key: String,
     /// `OWLEE_PROXY_HOPS` when the peer is a trusted proxy, else 0.
     pub hops: usize,
 }
@@ -31,11 +34,25 @@ impl Client {
                 .iter()
                 .any(|network| network.contains(&ip))
         });
+        if trusted && config.proxy_hops == 0 && headers.contains_key("x-forwarded-for") {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "a trusted proxy sent X-Forwarded-For, but OWLEE_PROXY_HOPS is 0, so every \
+                     client behind the proxy shares one rate limit; set OWLEE_PROXY_HOPS to the \
+                     number of proxies in front of Owlee"
+                );
+            });
+        }
         let hops = if trusted { config.proxy_hops } else { 0 };
-        let ip = forwarded(headers, hops)
-            .or(peer)
-            .map_or_else(|| "0.0.0.0".to_owned(), |ip| ip.to_string());
-        Self { ip, hops }
+        let addr = forwarded(headers, hops).or(peer);
+        let ip = addr.map_or_else(|| "0.0.0.0".to_owned(), |ip| ip.to_string());
+        let limit_key = addr.map_or_else(|| ip.clone(), limit_key);
+        Self {
+            ip,
+            limit_key,
+            hops,
+        }
     }
 
     pub fn of(config: &Config, headers: &HeaderMap, extensions: &Extensions) -> Self {
@@ -68,6 +85,16 @@ fn forwarded(headers: &HeaderMap, hops: usize) -> Option<IpAddr> {
         .map(str::trim)
         .collect();
     entries.iter().rev().nth(hops - 1)?.parse().ok()
+}
+
+fn limit_key(addr: IpAddr) -> String {
+    match addr.to_canonical() {
+        IpAddr::V6(v6) => {
+            let network = u128::from(v6) & !((1u128 << 64) - 1);
+            format!("{}/64", Ipv6Addr::from(network))
+        }
+        v4 => v4.to_string(),
+    }
 }
 
 fn peer_addr(extensions: &Extensions) -> Option<IpAddr> {
@@ -105,6 +132,17 @@ mod tests {
             ip(&config(1), &["198.51.100.4, 203.0.113.9"], "10.0.0.8"),
             "203.0.113.9"
         );
+    }
+
+    #[test]
+    fn an_ipv6_client_is_limited_by_its_64() {
+        let key = |peer: &str| {
+            Client::resolve(&config(0), &HeaderMap::new(), Some(peer.parse().unwrap())).limit_key
+        };
+        assert_eq!(key("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+        assert_eq!(key("2001:db8:1:2:bbbb::9"), "2001:db8:1:2::/64");
+        assert_eq!(key("::ffff:203.0.113.9"), "203.0.113.9");
+        assert_eq!(key("203.0.113.9"), "203.0.113.9");
     }
 
     #[test]

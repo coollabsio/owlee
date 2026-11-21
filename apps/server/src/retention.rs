@@ -1,5 +1,6 @@
-//! Deletes raw ingest rows in batches. Issue counts and analytics daily
-//! rollups stay, because those are what the dashboards read. Analytics visits
+//! Deletes raw ingest rows in batches. Analytics daily rollups stay, because
+//! those are what the dashboards read. An issue stays while it has a stored
+//! event, and goes once its last event has aged out. Analytics visits
 //! and per-day visitor ids go with the raw events, and `insight_event_data`
 //! follows its event by foreign-key cascade. Dead sessions and used or expired
 //! email links go too.
@@ -12,6 +13,7 @@ const BATCH: i64 = 500;
 
 pub struct PruneStats {
     pub error_events: u64,
+    pub error_issues: u64,
     pub analytics_events: u64,
 }
 
@@ -27,7 +29,10 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
             .saturating_mul(86_400);
     prune_auth(&state.db, now.timestamp_millis()).await?;
     // Loading this month's salt deletes last month's, even with no analytics traffic.
-    state.insights_salt.for_time(&state.db, now.timestamp()).await?;
+    state
+        .insights_salt
+        .for_time(&state.db, now.timestamp())
+        .await?;
     prune_before(&state.db, &error_before, analytics_before).await
 }
 
@@ -56,6 +61,15 @@ pub async fn prune_before(
         error_before,
     )
     .await?;
+    // An issue seen again inside the retention window stays, even when a
+    // privacy request has removed its events.
+    let error_issues = delete_batches(
+        db,
+        "DELETE FROM issues WHERE id IN (SELECT id FROM issues WHERE last_seen < $1 \
+         AND NOT EXISTS (SELECT 1 FROM events WHERE events.issue_id = issues.id) LIMIT 500)",
+        error_before,
+    )
+    .await?;
     let analytics_events = delete_unix(
         db,
         "DELETE FROM insight_events WHERE id IN (SELECT id FROM insight_events WHERE timestamp < $1 ORDER BY timestamp LIMIT 500)",
@@ -73,6 +87,7 @@ pub async fn prune_before(
     }
     Ok(PruneStats {
         error_events,
+        error_issues,
         analytics_events,
     })
 }

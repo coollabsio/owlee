@@ -13,7 +13,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         return Ok(false);
     }
     let now = TimestampMillis::now();
-    let hash = state::hash_password(&state.passwords, DEMO_PASSWORD.to_owned())
+    let hash = state::hash_password(state, DEMO_PASSWORD.to_owned())
         .await
         .map_err(|_| AppError::Internal)?;
     let user_id = Id::new();

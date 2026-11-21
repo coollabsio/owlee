@@ -244,6 +244,7 @@ async fn members_get_403_on_every_mutating_route_and_still_read() {
             Some(json!({"project_id": project, "name": "edge"})),
         ),
         ("DELETE", format!("/api/agents/{id}"), None),
+        ("POST", format!("/api/agents/{id}/token"), None),
         ("POST", "/api/pages".into(), Some(page.clone())),
         ("PUT", format!("/api/pages/{id}"), Some(page)),
         ("DELETE", format!("/api/pages/{id}"), None),
@@ -1014,5 +1015,128 @@ async fn smtp_password_is_sealed_in_the_database() {
     assert_eq!(
         settings.body["smtp"]["has_password"], false,
         "plaintext is not used"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_link_token_costs_no_password_hash() {
+    let app = app().await;
+    register(&app, "member@coollabs.io").await;
+    call(
+        &app.router,
+        "POST",
+        "/api/auth/recovery",
+        Some(json!({"email": "member@coollabs.io"})),
+        None,
+        &[],
+    )
+    .await;
+    let token = link_token(&mails(&app.outbox).last().unwrap().text);
+    // With no permits, a request that reaches the hash fails on the password.
+    app.state.hash_permits.close();
+
+    for uri in ["/api/auth/register/complete", "/api/auth/recovery/complete"] {
+        let wrong = call(
+            &app.router,
+            "POST",
+            uri,
+            Some(json!({"token": "not-a-token", "password": PASSWORD})),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(wrong.status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+        assert_eq!(
+            wrong.body["fields"],
+            json!({"token": "This link is invalid or has expired. Ask for a new one."}),
+            "{uri}"
+        );
+    }
+
+    let failed = call(
+        &app.router,
+        "POST",
+        "/api/auth/recovery/complete",
+        Some(json!({"token": token, "password": PASSWORD})),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        failed.body["fields"],
+        json!({"password": "password hashing failed"})
+    );
+    let unused: i64 = sqlx::query(
+        "SELECT COUNT(*) AS n FROM email_tokens WHERE purpose = 'recovery' AND used_at IS NULL",
+    )
+    .fetch_one(app.state.db.pool())
+    .await
+    .unwrap()
+    .get("n");
+    assert_eq!(unused, 1, "a hash that fails leaves the link working");
+}
+
+async fn login_from(app: &App, peer: &str, password: &str) -> StatusCode {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"email": "root@coollabs.io", "password": password}).to_string(),
+        ))
+        .unwrap();
+    let peer: std::net::IpAddr = peer.parse().unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            peer, 4000,
+        )));
+    app.router.clone().oneshot(request).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn wrong_passwords_lock_one_address_and_not_the_account() {
+    let app = app().await;
+    let attacker = "203.0.113.1";
+    // Sent together: each attempt takes its token before the hash.
+    let attempts = (0..8).map(|_| login_from(&app, attacker, "wrong-password-1"));
+    let mut statuses: Vec<u16> = futures_util::future::join_all(attempts)
+        .await
+        .into_iter()
+        .map(|status| status.as_u16())
+        .collect();
+    statuses.sort_unstable();
+    assert_eq!(statuses, [401, 401, 401, 401, 401, 429, 429, 429]);
+
+    assert_eq!(
+        login_from(&app, attacker, PASSWORD).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the address that guessed stays locked"
+    );
+    assert_eq!(
+        login_from(&app, "203.0.113.2", PASSWORD).await,
+        StatusCode::OK,
+        "the owner signs in from another address"
+    );
+}
+
+#[tokio::test]
+async fn a_json_body_over_512_kib_is_refused() {
+    let app = app().await;
+    let post = |uri: &'static str, bytes: usize| {
+        let body = json!({"email": "root@coollabs.io", "password": "p".repeat(bytes)});
+        call(&app.router, "POST", uri, Some(body), None, &[])
+    };
+    assert_eq!(
+        post("/api/auth/login", 512 * 1024).await.status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        post("/api/agent/results", 512 * 1024).await.status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        post("/api/auth/login", 400 * 1024).await.status,
+        StatusCode::UNAUTHORIZED
     );
 }

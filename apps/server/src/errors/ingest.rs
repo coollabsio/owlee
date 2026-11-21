@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::response::Response;
 use http_body_util::BodyExt;
-use owlee_errors::{decode_body, normalize_event, parse_envelope};
+use owlee_errors::{BodyError, decode_body, normalize_event, parse_envelope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -36,22 +36,10 @@ pub async fn ingest_envelope(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let max_body = state.config.ingest.error_max_body_bytes;
-    let client = Client::of(&state.config, &headers, request.extensions());
-    let bytes = match read_limited(request, max_body, &headers).await {
-        Ok(bytes) => bytes,
+    let decoded = match read_body(&state, &app_id, &headers, request).await {
+        Ok(decoded) => decoded,
         Err(response) => return response,
     };
-    let decoded = match decode_body(header_str(&headers, header::CONTENT_ENCODING), &bytes) {
-        Ok(decoded) => decoded,
-        Err(error) => {
-            tracing::warn!(error = %error, "rejected compressed envelope");
-            return ingest_error(&headers, StatusCode::BAD_REQUEST, error.to_string());
-        }
-    };
-    if decoded.len() > max_body {
-        return too_large(&headers);
-    }
     let envelope = match parse_envelope(&decoded) {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -72,34 +60,46 @@ pub async fn ingest_envelope(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, &client, &app.id) {
+    if let Some(response) = enforce_app_rate(&state, &headers, &app.id) {
         return response;
     }
     let mut last_id = None;
+    let mut seen_event = false;
     for item in &envelope.items {
         match item.item_type.as_str() {
-            "event" => match serde_json::from_slice::<Value>(&item.payload) {
-                Ok(payload) => {
-                    let event = normalize_event(payload);
-                    match accept_event(&state, &headers, &app, &event).await {
-                        Ok(Accepted::Stored(id)) => last_id = Some(id),
-                        Ok(Accepted::Limited(response)) => return response,
-                        Err(error) => {
-                            state.error_intake.dropped(&app.id, DropReason::StorageFailed);
-                            tracing::error!(error = %error, "failed to store sentry event");
-                            return ingest_error(
-                                &headers,
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "failed to store event".into(),
-                            );
+            // An envelope carries at most one event. More would be stored for
+            // a single rate-limit token.
+            "event" if seen_event => {
+                state.error_intake.dropped(&app.id, DropReason::Malformed);
+                tracing::warn!("dropped extra event item in envelope");
+            }
+            "event" => {
+                seen_event = true;
+                match serde_json::from_slice::<Value>(&item.payload) {
+                    Ok(payload) => {
+                        let event = normalize_event(payload);
+                        match accept_event(&state, &headers, &app, &event).await {
+                            Ok(Accepted::Stored(id)) => last_id = Some(id),
+                            Ok(Accepted::Limited(response)) => return response,
+                            Err(error) => {
+                                state
+                                    .error_intake
+                                    .dropped(&app.id, DropReason::StorageFailed);
+                                tracing::error!(error = %error, "failed to store sentry event");
+                                return ingest_error(
+                                    &headers,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "failed to store event".into(),
+                                );
+                            }
                         }
                     }
+                    Err(error) => {
+                        state.error_intake.dropped(&app.id, DropReason::Malformed);
+                        tracing::warn!(error = %error, "skipped malformed event item");
+                    }
                 }
-                Err(error) => {
-                    state.error_intake.dropped(&app.id, DropReason::Malformed);
-                    tracing::warn!(error = %error, "skipped malformed event item");
-                }
-            },
+            }
             other => {
                 tracing::debug!(
                     item_type = other,
@@ -123,19 +123,10 @@ pub async fn ingest_store(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let max_body = state.config.ingest.error_max_body_bytes;
-    let client = Client::of(&state.config, &headers, request.extensions());
-    let bytes = match read_limited(request, max_body, &headers).await {
-        Ok(bytes) => bytes,
+    let decoded = match read_body(&state, &app_id, &headers, request).await {
+        Ok(decoded) => decoded,
         Err(response) => return response,
     };
-    let decoded = match decode_body(header_str(&headers, header::CONTENT_ENCODING), &bytes) {
-        Ok(decoded) => decoded,
-        Err(error) => return ingest_error(&headers, StatusCode::BAD_REQUEST, error.to_string()),
-    };
-    if decoded.len() > max_body {
-        return too_large(&headers);
-    }
     let payload: Value = match serde_json::from_slice(&decoded) {
         Ok(payload) => payload,
         Err(_) => {
@@ -154,7 +145,7 @@ pub async fn ingest_store(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_rate(&state, &headers, &client, &app.id) {
+    if let Some(response) = enforce_app_rate(&state, &headers, &app.id) {
         return response;
     }
     let event = normalize_event(payload);
@@ -162,7 +153,9 @@ pub async fn ingest_store(
         Ok(Accepted::Stored(id)) => json_ok(&headers, json!({ "id": id })),
         Ok(Accepted::Limited(response)) => response,
         Err(error) => {
-            state.error_intake.dropped(&app.id, DropReason::StorageFailed);
+            state
+                .error_intake
+                .dropped(&app.id, DropReason::StorageFailed);
             tracing::error!(error = %error, "failed to store sentry event");
             ingest_error(
                 &headers,
@@ -182,24 +175,49 @@ enum Accepted {
     Limited(Response),
 }
 
-fn enforce_rate(
+/// Takes the sender's rate-limit token before any of the body is read, then
+/// reads and decodes at most `error_max_body_bytes`. A sender with a wrong key
+/// or a malformed body spends tokens too.
+async fn read_body(
     state: &AppState,
+    claimed_app_id: &str,
     headers: &HeaderMap,
-    client: &Client,
-    app_id: &str,
-) -> Option<Response> {
+    request: Request,
+) -> Result<Vec<u8>, Response> {
+    let client = Client::of(&state.config, headers, request.extensions());
     let ip_limit = state
         .error_ip_limit
-        .check(&format!("error-ip:{}", client.ip));
+        .check(&format!("error-ip:{}", client.limit_key));
     if !ip_limit.allowed {
-        state.error_intake.dropped(app_id, DropReason::ClientRateLimit);
-        return Some(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
+        state
+            .error_intake
+            .dropped_if_known(claimed_app_id, DropReason::ClientRateLimit);
+        return Err(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
     }
+    let max_body = state.config.ingest.error_max_body_bytes;
+    let bytes = read_limited(request, max_body, headers).await?;
+    decode_body(
+        header_str(headers, header::CONTENT_ENCODING),
+        &bytes,
+        max_body,
+    )
+    .map_err(|error| {
+        tracing::warn!(error = %error, "rejected error ingest body");
+        match error {
+            BodyError::TooLarge => too_large(headers),
+            other => ingest_error(headers, StatusCode::BAD_REQUEST, other.to_string()),
+        }
+    })
+}
+
+fn enforce_app_rate(state: &AppState, headers: &HeaderMap, app_id: &str) -> Option<Response> {
     let app_limit = state
         .error_project_limit
         .check(&format!("error-app:{app_id}"));
     if !app_limit.allowed {
-        state.error_intake.dropped(app_id, DropReason::SourceRateLimit);
+        state
+            .error_intake
+            .dropped(app_id, DropReason::SourceRateLimit);
         return Some(rate_limited(headers, app_limit.retry_after_secs, "key", ""));
     }
     None

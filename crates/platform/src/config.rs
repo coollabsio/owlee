@@ -74,6 +74,8 @@ pub struct IngestConfig {
     pub analytics_daily_quota: Option<i64>,
     pub login_rate_ip_per_min: u32,
     pub login_rate_ip_burst: u32,
+    /// Failed passwords per account and client address. The limit for the
+    /// account across all addresses is 5 times this rate and 20 times the burst.
     pub login_rate_account_per_min: u32,
     pub login_rate_account_burst: u32,
     pub analytics_geo: GeoPrecision,
@@ -126,7 +128,7 @@ impl Default for IngestConfig {
             analytics_daily_quota: None,
             login_rate_ip_per_min: 30,
             login_rate_ip_burst: 10,
-            login_rate_account_per_min: 10,
+            login_rate_account_per_min: 1,
             login_rate_account_burst: 5,
             analytics_geo: GeoPrecision::City,
         }

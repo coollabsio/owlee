@@ -236,6 +236,11 @@ async fn post_event(app: &Router, id: &str, key: &str, body: Vec<u8>) -> Hit {
 async fn exercise(config: Config) {
     oversized_body(&config).await;
     burst_is_429(config.clone()).await;
+    inflating_body_is_413(config.clone()).await;
+    wrong_keys_spend_the_ip_limit(config.clone()).await;
+    envelope_stores_one_event(config.clone()).await;
+    event_ids_do_not_collide_across_apps(config.clone()).await;
+    retention_drops_issues_without_events(config.clone()).await;
     wrong_origin(config.clone()).await;
     flood_is_capped(config.clone()).await;
     retention_keeps_rollups(config.clone()).await;
@@ -367,7 +372,252 @@ async fn burst_is_429(mut config: Config) {
     let intake = &listed.body["intake"];
     assert_eq!(intake["stored"], 2, "{intake}");
     assert_eq!(intake["dropped"], 1, "{intake}");
-    assert_eq!(intake["last_drop"]["reason"], "client_rate_limit", "{intake}");
+    assert_eq!(
+        intake["last_drop"]["reason"], "client_rate_limit",
+        "{intake}"
+    );
+}
+
+async fn count(state: &AppState, sql: &str, id: &str) -> i64 {
+    sqlx::query(sql)
+        .bind(id)
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap()
+        .try_get::<i64, _>("n")
+        .unwrap()
+}
+
+async fn intake_of(app: &Router, id: &str, cookie: &Session) -> Value {
+    let listed = send(
+        app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(cookie),
+        &[],
+    )
+    .await;
+    listed.body["intake"].clone()
+}
+
+async fn inflating_body_is_413(config: Config) {
+    use std::io::Write;
+    let (app, state, token) = boot_app(config.clone()).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let mut event = event(&event_id(), "bomb");
+    event["extra"] = json!({"pad": "a".repeat(config.ingest.error_max_body_bytes * 2)});
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gzip.write_all(&envelope(&event.to_string())).unwrap();
+    let small = gzip.finish().unwrap();
+    assert!(small.len() < 16 * 1024, "{}", small.len());
+    for uri in [
+        format!("/api/{id}/envelope/?sentry_key={key}"),
+        format!("/api/{id}/store/?sentry_key={key}"),
+    ] {
+        let hit = send(
+            &app,
+            "POST",
+            &uri,
+            small.clone(),
+            None,
+            &[("content-encoding", "gzip")],
+        )
+        .await;
+        assert_eq!(
+            hit.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{uri}: {}",
+            hit.body
+        );
+    }
+    assert_eq!(
+        count(
+            &state,
+            "SELECT COUNT(*) AS n FROM events WHERE app_id = $1",
+            &id
+        )
+        .await,
+        0
+    );
+}
+
+async fn wrong_keys_spend_the_ip_limit(mut config: Config) {
+    config.ingest.error_rate_ip_burst = 2;
+    config.ingest.error_rate_ip_per_min = 2;
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let body = || envelope(&event(&event_id(), "guess").to_string());
+    let wrong = post_event(&app, &id, "not-the-key", body()).await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED, "{}", wrong.body);
+    let junk = send(
+        &app,
+        "POST",
+        &format!("/api/{id}/store/?sentry_key={key}"),
+        b"not json".to_vec(),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(junk.status, StatusCode::BAD_REQUEST, "{}", junk.body);
+    for uri in [
+        format!("/api/{id}/envelope/?sentry_key=not-the-key"),
+        format!("/api/{id}/store/?sentry_key=not-the-key"),
+        format!("/api/{id}/envelope/?sentry_key={key}"),
+    ] {
+        let blocked = send(&app, "POST", &uri, body(), None, &[]).await;
+        assert_eq!(
+            blocked.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{uri}: {}",
+            blocked.body
+        );
+    }
+    assert_eq!(
+        count(
+            &state,
+            "SELECT COUNT(*) AS n FROM events WHERE app_id = $1",
+            &id
+        )
+        .await,
+        0
+    );
+    // Nothing was accepted for this app, so the refusals made before the key
+    // check are not counted against it.
+    assert_eq!(intake_of(&app, &id, &cookie).await["dropped"], 0);
+}
+
+async fn envelope_stores_one_event(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let first = event_id();
+    let mut body = b"{}\n".to_vec();
+    for (event_id, message) in [
+        (first.clone(), "first failure"),
+        (event_id(), "second failure"),
+        (event_id(), "third failure"),
+    ] {
+        let payload = event(&event_id, message).to_string();
+        body.extend_from_slice(
+            format!("{{\"type\":\"event\",\"length\":{}}}\n", payload.len()).as_bytes(),
+        );
+        body.extend_from_slice(payload.as_bytes());
+        body.push(b'\n');
+    }
+    let hit = post_event(&app, &id, &key, body).await;
+    assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
+    assert_eq!(hit.body["id"], first);
+    assert_eq!(
+        count(
+            &state,
+            "SELECT COUNT(*) AS n FROM events WHERE app_id = $1",
+            &id
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &state,
+            "SELECT COUNT(*) AS n FROM issues WHERE app_id = $1",
+            &id
+        )
+        .await,
+        1
+    );
+    let intake = intake_of(&app, &id, &cookie).await;
+    assert_eq!(intake["stored"], 1, "{intake}");
+    assert_eq!(intake["dropped"], 2, "{intake}");
+    assert_eq!(intake["last_drop"]["reason"], "malformed", "{intake}");
+}
+
+async fn event_ids_do_not_collide_across_apps(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (first_app, first_key) = error_app(&app, &cookie).await;
+    let (second_app, second_key) = error_app(&app, &cookie).await;
+    let shared = event_id();
+    let body = || envelope(&event(&shared, "same id").to_string());
+
+    let original = post_event(&app, &first_app, &first_key, body()).await;
+    assert_eq!(original.status, StatusCode::OK, "{}", original.body);
+    assert_eq!(original.body["id"], shared);
+    let resent = post_event(&app, &first_app, &first_key, body()).await;
+    assert_eq!(resent.body["id"], shared);
+
+    let other = post_event(&app, &second_app, &second_key, body()).await;
+    assert_eq!(other.status, StatusCode::OK, "{}", other.body);
+    let other_id = other.body["id"].as_str().unwrap();
+    assert_ne!(other_id, shared);
+    assert_eq!(other_id.len(), 32);
+    let other_resent = post_event(&app, &second_app, &second_key, body()).await;
+    assert_eq!(other_resent.body["id"], other_id, "a resend keeps its id");
+
+    let events = "SELECT COUNT(*) AS n FROM events WHERE app_id = $1";
+    assert_eq!(count(&state, events, &first_app).await, 1);
+    assert_eq!(count(&state, events, &second_app).await, 1);
+    let owner_of_shared = sqlx::query("SELECT app_id FROM events WHERE id = $1")
+        .bind(&shared)
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap()
+        .try_get::<String, _>("app_id")
+        .unwrap();
+    assert_eq!(owner_of_shared, first_app);
+}
+
+async fn retention_drops_issues_without_events(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    for message in ["expired failure", "erased failure", "live failure"] {
+        let mut event = event(&event_id(), message);
+        event["fingerprint"] = json!([message]);
+        let hit = post_event(&app, &id, &key, envelope(&event.to_string())).await;
+        assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
+    }
+    // Aged out: every event and the last sighting are past retention.
+    for sql in [
+        "UPDATE events SET timestamp = '2000-01-01T00:00:00.000Z' WHERE app_id = $1 AND title = 'Error: expired failure'",
+        "UPDATE issues SET last_seen = '2000-01-01T00:00:00.000Z' WHERE app_id = $1 AND title = 'Error: expired failure'",
+        // Seen recently, events removed some other way: stays.
+        "DELETE FROM events WHERE app_id = $1 AND title = 'Error: erased failure'",
+    ] {
+        let changed = sqlx::query(sql)
+            .bind(&id)
+            .execute(state.db.pool())
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(changed, 1, "{sql}");
+    }
+    let stats = prune_before(&state.db, "2020-01-01T00:00:00.000Z", 0)
+        .await
+        .unwrap();
+    assert!(stats.error_events >= 1);
+    assert!(stats.error_issues >= 1);
+    let rows = sqlx::query("SELECT title FROM issues WHERE app_id = $1 ORDER BY title")
+        .bind(&id)
+        .fetch_all(state.db.pool())
+        .await
+        .unwrap();
+    let titles: Vec<String> = rows
+        .iter()
+        .map(|row| row.try_get("title").unwrap())
+        .collect();
+    assert_eq!(titles, ["Error: erased failure", "Error: live failure"]);
+    assert_eq!(
+        count(
+            &state,
+            "SELECT COUNT(*) AS n FROM event_users WHERE event_id IN (SELECT id FROM events WHERE app_id = $1 AND timestamp < '2020')",
+            &id
+        )
+        .await,
+        0
+    );
 }
 
 async fn wrong_origin(config: Config) {
@@ -443,7 +693,10 @@ async fn wrong_origin(config: Config) {
     let intake = &site.body["intake"];
     assert_eq!(intake["stored"], 1, "{intake}");
     assert_eq!(intake["dropped"], 1, "{intake}");
-    assert_eq!(intake["last_drop"]["reason"], "origin_not_allowed", "{intake}");
+    assert_eq!(
+        intake["last_drop"]["reason"], "origin_not_allowed",
+        "{intake}"
+    );
 }
 
 async fn flood_is_capped(config: Config) {
@@ -1106,12 +1359,12 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
     }
     // A random wrong guess, so the test has no fixed credential in it.
     let guess = format!("guess-{}", owlee_platform::Id::new());
-    // Wrong guesses from another address use it up.
+    // Wrong guesses use up the bucket of the address that sends them.
     for _ in 0..2 {
         let bad = login(&app, &email, &guess, "203.0.113.21").await;
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
-    let blocked = login(&app, &email, &guess, "203.0.113.22").await;
+    let blocked = login(&app, &email, &guess, "203.0.113.21").await;
     assert_eq!(
         blocked.status,
         StatusCode::TOO_MANY_REQUESTS,
@@ -1124,7 +1377,7 @@ async fn wrong_guesses_do_not_block_the_right_password(mut config: Config) {
         let bad = login(&app, "ghost@coollabs.io", &guess, "203.0.113.23").await;
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED, "{}", bad.body);
     }
-    let ghost = login(&app, "ghost@coollabs.io", &guess, "203.0.113.24").await;
+    let ghost = login(&app, "ghost@coollabs.io", &guess, "203.0.113.23").await;
     assert_eq!(
         ghost.status,
         StatusCode::TOO_MANY_REQUESTS,

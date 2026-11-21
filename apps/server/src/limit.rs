@@ -38,26 +38,23 @@ impl TokenBucket {
         }
     }
 
-    /// Same answer as [`check`](Self::check), but does not use a token.
-    /// Login uses this so only a failed attempt costs the account a token.
-    pub fn peek(&self, key: &str) -> RateDecision {
-        let now = Instant::now();
-        let buckets = self
-            .buckets
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let level = buckets
-            .get(key)
-            .map_or(self.burst, |bucket| self.level(*bucket, now));
-        self.decide(level)
-    }
-
     /// Drops the bucket, for example after a successful login.
     pub fn forget(&self, key: &str) {
         self.buckets
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(key);
+    }
+
+    /// Gives back one token that [`check`](Self::check) took.
+    pub fn refund(&self, key: &str) {
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(bucket) = buckets.get_mut(key) {
+            bucket.1 = (bucket.1 + 1.0).min(self.burst);
+        }
     }
 
     fn decide(&self, level: f64) -> RateDecision {
@@ -135,14 +132,18 @@ mod tests {
     }
 
     #[test]
-    fn peek_uses_no_token_and_forget_resets() {
-        let bucket = TokenBucket::per_minute(1, 1);
-        assert!(bucket.peek("account").allowed);
-        assert!(bucket.peek("account").allowed);
+    fn forget_resets_and_refund_returns_one_token() {
+        let bucket = TokenBucket::per_hour(1, 2);
         assert!(bucket.check("account").allowed);
-        assert!(!bucket.peek("account").allowed);
+        assert!(bucket.check("account").allowed);
+        assert!(!bucket.check("account").allowed);
+        bucket.refund("account");
+        assert!(bucket.check("account").allowed);
+        assert!(!bucket.check("account").allowed);
         bucket.forget("account");
-        assert!(bucket.peek("account").allowed);
+        assert!(bucket.check("account").allowed);
+        assert!(bucket.check("account").allowed);
+        assert!(!bucket.check("account").allowed);
     }
 
     #[test]

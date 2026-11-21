@@ -11,8 +11,8 @@ use http_body_util::BodyExt;
 use isbot::Bots;
 use owlee_insights::{
     Bounds, EventPayload, Incoming, LINK_SECTIONS, SITE_SECTIONS, clean_color, clean_destination,
-    clean_host, clean_name, clean_public_slug, clean_slug, clean_vitals, clip, flatten, now_secs,
-    parse_page, parse_user_agent, percentile, referrer_domain, same_site, sections_json,
+    clean_host, clean_link_slug, clean_name, clean_public_slug, clean_vitals, clip, flatten,
+    now_secs, parse_page, parse_user_agent, percentile, referrer_domain, same_site, sections_json,
     session_id, slugify,
 };
 use owlee_platform::{Database, EnvironmentMode, Id, generate_token};
@@ -27,6 +27,7 @@ use crate::intake::DropReason;
 use crate::peer::Client;
 use crate::quota;
 use crate::state::AppState;
+use crate::verify::Owned;
 use crate::workspaces::{Member, ProjectFilter, require_project};
 
 const SCRIPT: &str = include_str!("tracker.js");
@@ -69,6 +70,7 @@ pub fn api_routes() -> Router<AppState> {
             "/domains/{id}",
             axum::routing::put(update_domain).delete(delete_domain),
         )
+        .route("/domains/{id}/verify", axum::routing::post(verify_domain))
         .route("/links", axum::routing::get(list_links).post(create_link))
         .route(
             "/links/{id}",
@@ -175,7 +177,7 @@ async fn receive(State(state): State<AppState>, request: Request) -> Response<Bo
     };
     let ip_limit = state
         .analytics_ip_limit
-        .check(&format!("analytics-ip:{}", client.ip));
+        .check(&format!("analytics-ip:{}", client.limit_key));
     if !ip_limit.allowed {
         return with_cors(AppError::limited(ip_limit.retry_after_secs).into_response());
     }
@@ -222,13 +224,6 @@ async fn accept_event(
     };
     let site_id: String = site.try_get("id")?;
     let intake = &state.analytics_intake;
-    let site_limit = state
-        .analytics_site_limit
-        .check(&format!("analytics-site:{site_id}"));
-    if !site_limit.allowed {
-        intake.dropped(&site_id, DropReason::SourceRateLimit);
-        return Err(AppError::limited(site_limit.retry_after_secs));
-    }
     let domain: String = site.try_get("domain")?;
     let verified: i64 = site.try_get("verified")?;
     let custom_quota: Option<i64> = site.try_get("daily_quota")?;
@@ -247,6 +242,15 @@ async fn accept_event(
         return Err(AppError::Forbidden(
             "Verify this domain before it can collect analytics.",
         ));
+    }
+    // After the origin and verification checks, so traffic from other web
+    // pages cannot use up the site's bucket. A script can still forge Origin.
+    let site_limit = state
+        .analytics_site_limit
+        .check(&format!("analytics-site:{site_id}"));
+    if !site_limit.allowed {
+        intake.dropped(&site_id, DropReason::SourceRateLimit);
+        return Err(AppError::limited(site_limit.retry_after_secs));
     }
     let ua = headers
         .get(header::USER_AGENT)
@@ -375,13 +379,19 @@ async fn host_redirect(
     if app.as_deref() == Some(host.as_str()) {
         return None;
     }
-    let row = sqlx::query("SELECT id FROM insight_domains WHERE hostname = $1 AND enabled = 1")
-        .bind(&host)
-        .fetch_optional(state.db.pool())
-        .await
-        .ok()
-        .flatten()?;
-    let _ = row;
+    // Development serves an unverified hostname, the same rule as for sites.
+    sqlx::query(
+        "SELECT id FROM insight_domains \
+         WHERE hostname = $1 AND enabled = 1 AND (verified = 1 OR $2 = 1)",
+    )
+    .bind(&host)
+    .bind(i64::from(
+        state.config.environment == EnvironmentMode::Development,
+    ))
+    .fetch_optional(state.db.pool())
+    .await
+    .ok()
+    .flatten()?;
     let slug = uri.path().trim_matches('/');
     Some(resolve_slug(state, method.clone(), headers, client, Some(&host), slug).await)
 }
@@ -432,7 +442,15 @@ async fn resolve_slug(
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if method != Method::HEAD && !ua.is_empty() && !bots().is_bot(ua) {
+    if method != Method::HEAD
+        && !ua.is_empty()
+        && !bots().is_bot(ua)
+        && state
+            .insights_limits
+            .link_clicks
+            .check(&format!("link-click:{}", client.limit_key))
+            .allowed
+    {
         let ip = client.ip.clone();
         let (browser, os, device) = parse_user_agent(ua);
         let now = now_secs();
@@ -986,16 +1004,15 @@ async fn list_domains(
     State(state): State<AppState>,
     member: Member,
 ) -> Result<Json<Value>, AppError> {
-    let rows = sqlx::query(
-        "SELECT id, site_id, hostname, note, enabled, created_at FROM insight_domains \
-         WHERE workspace_id = $1 ORDER BY hostname",
-    )
+    let rows = sqlx::query(&format!(
+        "SELECT {DOMAIN_COLUMNS} FROM insight_domains WHERE workspace_id = $1 ORDER BY hostname"
+    ))
     .bind(member.workspace_id.to_string())
     .fetch_all(state.db.pool())
     .await?;
     let mut output = Vec::new();
     for row in &rows {
-        output.push(domain_json(row)?);
+        output.push(domain_json(&state, row).await?);
     }
     Ok(Json(Value::Array(output)))
 }
@@ -1007,7 +1024,7 @@ async fn create_domain(
 ) -> Result<(StatusCode, Json<Value>), AppError> {
     member.require_editor()?;
     let id = Id::new().to_string();
-    let hostname = field("hostname", clean_host(&body.hostname))?;
+    let hostname = link_hostname(&state, &body.hostname)?;
     let note = body.note.unwrap_or_default();
     if note.chars().count() > 200 {
         return Err(AppError::field("note", "Use at most 200 characters."));
@@ -1016,8 +1033,8 @@ async fn create_domain(
         require_site(&state.db, member.workspace_id, site_id).await?;
     }
     sqlx::query(
-        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at, verify_token) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(member.workspace_id.to_string())
@@ -1026,13 +1043,11 @@ async fn create_domain(
     .bind(&note)
     .bind(i64::from(body.enabled.unwrap_or(true)))
     .bind(now_secs())
+    .bind(generate_token())
     .execute(state.db.pool())
     .await
     .map_err(map_db)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(fetch_domain(&state.db, &id).await?),
-    ))
+    Ok((StatusCode::CREATED, Json(fetch_domain(&state, &id).await?)))
 }
 
 async fn update_domain(
@@ -1043,12 +1058,15 @@ async fn update_domain(
 ) -> Result<Json<Value>, AppError> {
     member.require_editor()?;
     require_domain(&state.db, member.workspace_id, &id).await?;
-    let hostname = field("hostname", clean_host(&body.hostname))?;
+    let hostname = link_hostname(&state, &body.hostname)?;
     if let Some(site_id) = &body.site_id {
         require_site(&state.db, member.workspace_id, site_id).await?;
     }
     let changed = sqlx::query(
-        "UPDATE insight_domains SET hostname = $1, note = $2, enabled = $3, site_id = $4 WHERE id = $5",
+        "UPDATE insight_domains SET \
+         verified = CASE WHEN hostname = $1 THEN verified ELSE 0 END, \
+         verified_at = CASE WHEN hostname = $1 THEN verified_at ELSE NULL END, \
+         hostname = $1, note = $2, enabled = $3, site_id = $4 WHERE id = $5",
     )
     .bind(hostname)
     .bind(body.note.unwrap_or_default())
@@ -1062,7 +1080,35 @@ async fn update_domain(
     if changed == 0 {
         return Err(AppError::NotFound);
     }
-    Ok(Json(fetch_domain(&state.db, &id).await?))
+    Ok(Json(fetch_domain(&state, &id).await?))
+}
+
+async fn verify_domain(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    member.require_editor()?;
+    require_domain(&state.db, member.workspace_id, &id).await?;
+    if crate::verify::verify(&state, Owned::LinkDomain, &id).await? {
+        Ok(Json(fetch_domain(&state, &id).await?))
+    } else {
+        Err(AppError::BadRequest(
+            "The TXT record does not match this hostname yet.".into(),
+        ))
+    }
+}
+
+/// A link hostname is never this server's own host, which serves the app.
+fn link_hostname(state: &AppState, raw: &str) -> Result<String, AppError> {
+    let hostname = field("hostname", clean_host(raw))?;
+    if origin_host(&state.config.public_origin).as_deref() == Some(hostname.as_str()) {
+        return Err(AppError::field(
+            "hostname",
+            "This is the Owlee server's own hostname. Links on it use /go/{slug}.",
+        ));
+    }
+    Ok(hostname)
 }
 
 async fn delete_domain(
@@ -1137,7 +1183,7 @@ async fn update_link(
 ) -> Result<Json<Value>, AppError> {
     member.require_editor()?;
     require_link(&state.db, member.workspace_id, &id).await?;
-    let slug = field("slug", clean_slug(&body.slug))?;
+    let slug = field("slug", clean_link_slug(&body.slug))?;
     let destination = field("destination", clean_destination(&body.destination))?;
     let redirect_type = redirect_type(body.redirect_type.as_deref())?;
     require_domain(&state.db, member.workspace_id, &body.domain_id).await?;
@@ -1615,10 +1661,11 @@ async fn public_link(db: &Database, slug: &str) -> Result<PublicResource, AppErr
 }
 
 fn limit_public(state: &AppState, client: &Client) -> Result<(), AppError> {
-    if state.public_limit.allow(&client.ip) {
+    let decision = state.insights_limits.public.check(&client.limit_key);
+    if decision.allowed {
         Ok(())
     } else {
-        Err(AppError::limited(60))
+        Err(AppError::limited(decision.retry_after_secs))
     }
 }
 
@@ -1661,7 +1708,7 @@ async fn save_public(
 
 async fn insert_link(db: &Database, project_id: Id, body: &LinkBody) -> Result<String, AppError> {
     let id = Id::new().to_string();
-    let slug = field("slug", clean_slug(&body.slug))?;
+    let slug = field("slug", clean_link_slug(&body.slug))?;
     let destination = field("destination", clean_destination(&body.destination))?;
     let redirect_type = redirect_type(body.redirect_type.as_deref())?;
     let public_slug = format!("link-{}", &id[id.len().saturating_sub(8)..]);
@@ -1722,17 +1769,7 @@ async fn fetch_site(state: &AppState, id: &str) -> Result<Value, AppError> {
 async fn site_json(state: &AppState, row: &sqlx::any::AnyRow) -> Result<Value, AppError> {
     let id: String = row.try_get("id")?;
     let domain: String = row.try_get("domain")?;
-    let mut token: String = row.try_get("verify_token")?;
-    if token.is_empty() {
-        token = generate_token();
-        sqlx::query(
-            "UPDATE insight_sites SET verify_token = $1 WHERE id = $2 AND verify_token = ''",
-        )
-        .bind(&token)
-        .bind(&id)
-        .execute(state.db.pool())
-        .await?;
-    }
+    let token = verify_token(state, "insight_sites", &id, row).await?;
     let verified = row.try_get::<i64, _>("verified")? != 0;
     let custom: Option<i64> = row.try_get("daily_quota")?;
     let global = quota::analytics_quota(&state.db).await?;
@@ -1812,7 +1849,7 @@ async fn verify_site(
 ) -> Result<Json<Value>, AppError> {
     member.require_editor()?;
     require_site(&state.db, member.workspace_id, &id).await?;
-    let ok = crate::verify::verify_site(&state, &id).await?;
+    let ok = crate::verify::verify(&state, Owned::Site, &id).await?;
     let site = fetch_site(&state, &id).await?;
     if ok {
         Ok(Json(site))
@@ -1823,22 +1860,57 @@ async fn verify_site(
     }
 }
 
-async fn fetch_domain(db: &Database, id: &str) -> Result<Value, AppError> {
-    let row = sqlx::query(
-        "SELECT id, site_id, hostname, note, enabled, created_at FROM insight_domains WHERE id = $1",
-    )
+const DOMAIN_COLUMNS: &str =
+    "id, site_id, hostname, note, enabled, created_at, verified, verify_token, verified_at";
+
+async fn fetch_domain(state: &AppState, id: &str) -> Result<Value, AppError> {
+    let row = sqlx::query(&format!(
+        "SELECT {DOMAIN_COLUMNS} FROM insight_domains WHERE id = $1"
+    ))
     .bind(id)
-    .fetch_optional(db.pool())
+    .fetch_optional(state.db.pool())
     .await?
     .ok_or(AppError::NotFound)?;
-    domain_json(&row)
+    domain_json(state, &row).await
 }
 
-fn domain_json(row: &sqlx::any::AnyRow) -> Result<Value, AppError> {
+/// Rows made before verification existed have no token. Give them one the
+/// first time they are shown.
+async fn verify_token(
+    state: &AppState,
+    table: &str,
+    id: &str,
+    row: &sqlx::any::AnyRow,
+) -> Result<String, AppError> {
+    let token: String = row.try_get("verify_token")?;
+    if !token.is_empty() {
+        return Ok(token);
+    }
+    let token = generate_token();
+    sqlx::query(&format!(
+        "UPDATE {table} SET verify_token = $1 WHERE id = $2 AND verify_token = ''"
+    ))
+    .bind(&token)
+    .bind(id)
+    .execute(state.db.pool())
+    .await?;
+    Ok(token)
+}
+
+async fn domain_json(state: &AppState, row: &sqlx::any::AnyRow) -> Result<Value, AppError> {
+    let id: String = row.try_get("id")?;
+    let token = verify_token(state, "insight_domains", &id, row).await?;
+    let hostname: String = row.try_get("hostname")?;
+    let verified = row.try_get::<i64, _>("verified")? != 0;
     Ok(json!({
-        "id": row.try_get::<String, _>("id")?,
+        "id": id,
         "site_id": row.try_get::<Option<String>, _>("site_id")?,
-        "hostname": row.try_get::<String, _>("hostname")?,
+        "verified": verified,
+        "verified_at": row.try_get::<Option<i64>, _>("verified_at")?,
+        "verify_name": crate::verify::record_name(&hostname),
+        "verify_value": crate::verify::record_value(&token),
+        "redirect_open": verified || state.config.environment == EnvironmentMode::Development,
+        "hostname": hostname,
         "note": row.try_get::<String, _>("note")?,
         "enabled": row.try_get::<i64, _>("enabled")? != 0,
         "created_at": row.try_get::<i64, _>("created_at")?,

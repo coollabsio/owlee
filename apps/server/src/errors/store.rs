@@ -554,19 +554,42 @@ pub async fn ingest_event(
     window_secs: i64,
 ) -> Result<Ingested, AppError> {
     let mut tx = db.pool().begin().await?;
-    let sql = statement(db, "SELECT id FROM events WHERE id = ?");
-    let existing = sqlx::query(&sql)
-        .bind(&event.event_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if existing.is_some() {
-        tx.commit().await?;
-        return Ok(Ingested {
-            id: event.event_id.clone(),
-            quota_exceeded: false,
-            retry_after_secs: 0,
-        });
+    // `events.id` is unique across apps. A resend from the same app is a
+    // duplicate. The same id from another app is a different event, and must
+    // not be swallowed by a row its sender cannot see, so it is stored under
+    // an id derived from the app. That id is stable, so its resends dedup too.
+    let sql = statement(db, "SELECT app_id FROM events WHERE id = ?");
+    let derived = Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{}:{}", app.id, event.event_id).as_bytes(),
+    )
+    .simple()
+    .to_string();
+    let mut event_id = None;
+    for candidate in [event.event_id.clone(), derived] {
+        let owner: Option<String> = sqlx::query(&sql)
+            .bind(&candidate)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|row| row.try_get("app_id"))
+            .transpose()?;
+        match owner {
+            None => {
+                event_id = Some(candidate);
+                break;
+            }
+            Some(owner) if owner == app.id => {
+                tx.commit().await?;
+                return Ok(Ingested {
+                    id: candidate,
+                    quota_exceeded: false,
+                    retry_after_secs: 0,
+                });
+            }
+            Some(_) => {}
+        }
     }
+    let event_id = event_id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
     if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &app.id, quota).await? {
         tx.commit().await?;
         return Ok(Ingested {
@@ -648,7 +671,7 @@ pub async fn ingest_event(
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         sqlx::query(&insert_event)
-            .bind(&event.event_id)
+            .bind(&event_id)
             .bind(&app.id)
             .bind(&issue_id)
             .bind(&event.timestamp)
@@ -663,7 +686,7 @@ pub async fn ingest_event(
         for hash in &hashes {
             sqlx::query(&insert_user)
                 .bind(hash)
-                .bind(&event.event_id)
+                .bind(&event_id)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -686,7 +709,7 @@ pub async fn ingest_event(
     }
     tx.commit().await?;
     Ok(Ingested {
-        id: event.event_id.clone(),
+        id: event_id,
         quota_exceeded: false,
         retry_after_secs: 0,
     })

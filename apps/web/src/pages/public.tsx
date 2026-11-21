@@ -43,7 +43,8 @@ export function PublicStatusPage() {
       </div>
     );
   }
-  if (query.error || !query.data) {
+  // A failed refetch keeps the last page on screen.
+  if (!query.data) {
     return (
       <div className="grid min-h-svh place-items-center bg-[var(--ui-canvas)] px-4">
         <div className="w-full max-w-md">

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, ORIGIN};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -37,6 +37,10 @@ use crate::state::{self, AppState};
 use crate::workspaces::{self, Member, ProjectFilter, audit, require_project};
 
 const DAY_MS: i64 = 86_400_000;
+// Above the 64 KiB monitor body that validation allows, after JSON escaping.
+const MAX_JSON_BODY_BYTES: usize = 512 * 1024;
+/// 100 checks with the longest names and targets still fit in the body limit.
+const MAX_AGENT_CHECKS: usize = 100;
 
 pub fn router(state: AppState) -> Router {
     let cookie_api = Router::new()
@@ -75,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/monitors/{id}/active", post(set_active))
         .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/{id}", delete(delete_agent))
+        .route("/agents/{id}/token", post(rotate_agent_token))
         .route("/pages", get(list_pages).post(create_page))
         .route(
             "/pages/{id}",
@@ -99,10 +104,12 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::errors::api_routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), same_origin));
     // Bearer-token agents and public ingest are called from other origins on purpose.
+    // The ingest routes below read raw bodies with their own caps.
     let api = cookie_api
         .route("/agent/checks", post(agent_checks))
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/results", post(agent_result))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .merge(crate::insights::ingest_routes())
         .merge(crate::errors::ingest_routes())
         .fallback(api_missing);
@@ -197,7 +204,7 @@ async fn register(
     client: Client,
     Json(body): Json<EmailBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    limit_auth_ip(&state, &client.ip)?;
+    limit_auth_ip(&state, &client.limit_key)?;
     let normalized = request_email(&body.email)?;
     ensure_signup_open(&state).await?;
     if mail_allowed(&state, &normalized) {
@@ -252,24 +259,25 @@ async fn register_complete(
     jar: CookieJar,
     Json(body): Json<RegisterCompleteBody>,
 ) -> Result<(StatusCode, CookieJar, Json<present::UserResponse>), AppError> {
-    limit_auth_ip(&state, &client.ip)?;
+    limit_auth_ip(&state, &client.limit_key)?;
     state
         .passwords
         .validate(&body.password)
         .map_err(password_field)?;
     let display_name = display_name_field(body.display_name)?;
     ensure_signup_open(&state).await?;
-    let hash = state::hash_password(&state.passwords, body.password)
+    let token_hash = hash_token(&body.token);
+    let now = TimestampMillis::now();
+    // A wrong token must not buy a hash. The token is used up only after the
+    // hash, so a hash that fails leaves the link working.
+    if !repo::email_token_live(&state.db, &token_hash, repo::Purpose::Register, now).await? {
+        return Err(invalid_link());
+    }
+    let hash = state::hash_password(&state, body.password)
         .await
         .map_err(password_field)?;
-    let now = TimestampMillis::now();
-    let Some(token) = repo::consume_email_token(
-        &state.db,
-        &hash_token(&body.token),
-        repo::Purpose::Register,
-        now,
-    )
-    .await?
+    let Some(token) =
+        repo::consume_email_token(&state.db, &token_hash, repo::Purpose::Register, now).await?
     else {
         return Err(invalid_link());
     };
@@ -317,7 +325,7 @@ async fn recovery(
     client: Client,
     Json(body): Json<EmailBody>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    limit_auth_ip(&state, &client.ip)?;
+    limit_auth_ip(&state, &client.limit_key)?;
     let normalized = request_email(&body.email)?;
     if mail_allowed(&state, &normalized)
         && let Some(user) = repo::user_by_email(&state.db, &normalized).await?
@@ -357,22 +365,22 @@ async fn recovery_complete(
     jar: CookieJar,
     Json(body): Json<RecoveryCompleteBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
-    limit_auth_ip(&state, &client.ip)?;
+    limit_auth_ip(&state, &client.limit_key)?;
     state
         .passwords
         .validate(&body.password)
         .map_err(password_field)?;
-    let hash = state::hash_password(&state.passwords, body.password)
+    let token_hash = hash_token(&body.token);
+    let now = TimestampMillis::now();
+    // Same order as `register_complete`: look, hash, then use the token up.
+    if !repo::email_token_live(&state.db, &token_hash, repo::Purpose::Recovery, now).await? {
+        return Err(invalid_link());
+    }
+    let hash = state::hash_password(&state, body.password)
         .await
         .map_err(password_field)?;
-    let now = TimestampMillis::now();
-    let token = repo::consume_email_token(
-        &state.db,
-        &hash_token(&body.token),
-        repo::Purpose::Recovery,
-        now,
-    )
-    .await?;
+    let token =
+        repo::consume_email_token(&state.db, &token_hash, repo::Purpose::Recovery, now).await?;
     let Some(user_id) = token.and_then(|token| token.user_id) else {
         return Err(invalid_link());
     };
@@ -381,9 +389,10 @@ async fn recovery_complete(
     };
     repo::revoke_user_sessions(&state.db, user.id, None, now).await?;
     repo::set_password(&state.db, user.id, &hash, now).await?;
-    state
-        .login_account_limit
-        .forget(&login_account_key(&normalize_email(&user.email)));
+    state.login_account_limit.forget(&login_account_key(
+        &normalize_email(&user.email),
+        &client.limit_key,
+    ));
     let jar = issue_session(&state, jar, &user, now).await?;
     let _ = repo::insert_audit(
         &state.db,
@@ -405,34 +414,31 @@ struct PasswordBody {
 
 async fn change_password(
     State(state): State<AppState>,
+    client: Client,
     jar: CookieJar,
     Json(body): Json<PasswordBody>,
 ) -> Result<StatusCode, AppError> {
     let user = require_user(&state, &jar).await?;
-    let account_key = login_account_key(&normalize_email(&user.email));
-    let account_limit = state.login_account_limit.peek(&account_key);
+    let account_key = login_account_key(&normalize_email(&user.email), &client.limit_key);
+    let account_limit = state.login_account_limit.check(&account_key);
     if !account_limit.allowed {
         return Err(AppError::limited(account_limit.retry_after_secs));
     }
-    let valid = state::verify_password(
-        &state.passwords,
-        body.current_password,
-        user.password_hash.clone(),
-    )
-    .await
-    .unwrap_or(false);
+    let valid = state::verify_password(&state, body.current_password, user.password_hash.clone())
+        .await
+        .unwrap_or(false);
     if !valid {
-        state.login_account_limit.check(&account_key);
         return Err(AppError::field(
             "current_password",
             "The current password is wrong.",
         ));
     }
+    state.login_account_limit.forget(&account_key);
     state
         .passwords
         .validate(&body.new_password)
         .map_err(|error| AppError::field("new_password", error.to_string()))?;
-    let hash = state::hash_password(&state.passwords, body.new_password)
+    let hash = state::hash_password(&state, body.new_password)
         .await
         .map_err(|error| AppError::field("new_password", error.to_string()))?;
     let now = TimestampMillis::now();
@@ -530,8 +536,13 @@ fn invalid_link() -> AppError {
     )
 }
 
-fn login_account_key(normalized_email: &str) -> String {
-    format!("login-account:{}", hash_token(normalized_email))
+/// One client address guessing at one account. Another address has its own
+/// bucket, so a stranger's wrong guesses do not lock the owner out.
+fn login_account_key(normalized_email: &str, client_key: &str) -> String {
+    format!(
+        "login-account:{}:{client_key}",
+        hash_token(normalized_email)
+    )
 }
 
 async fn setup_status(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
@@ -554,7 +565,7 @@ async fn setup_complete(
     jar: CookieJar,
     Json(body): Json<SetupBody>,
 ) -> Result<(StatusCode, CookieJar, Json<present::UserResponse>), AppError> {
-    limit_auth_ip(&state, &client.ip)?;
+    limit_auth_ip(&state, &client.limit_key)?;
     let now = TimestampMillis::now();
     // A finished install refuses setup even when the body still carries the old token.
     // A wrong or expired token, while setup is still open, is unauthorized.
@@ -568,7 +579,7 @@ async fn setup_complete(
     if let Err(error) = state.passwords.validate(&body.password) {
         return Err(password_field(error));
     }
-    let password_hash = state::hash_password(&state.passwords, body.password)
+    let password_hash = state::hash_password(&state, body.password)
         .await
         .map_err(password_field)?;
     let completed = setup::complete_setup(
@@ -606,13 +617,22 @@ async fn login(
     Json(body): Json<LoginBody>,
 ) -> Result<(CookieJar, Json<present::UserResponse>), AppError> {
     let normalized = normalize_email(&body.email);
-    limit_auth_ip(&state, &client.ip)?;
-    // Only failed passwords cost the account a token, so a user who types the
-    // right password is not locked out by someone else's guesses for long.
-    let account_key = login_account_key(&normalized);
-    let account_limit = state.login_account_limit.peek(&account_key);
-    if !account_limit.allowed {
-        return Err(AppError::limited(account_limit.retry_after_secs));
+    limit_auth_ip(&state, &client.limit_key)?;
+    // Each attempt takes its tokens before the hash, so attempts that run at
+    // the same time cannot all pass. A right password gives them back.
+    let account_key = login_account_key(&normalized, &client.limit_key);
+    let wide_key = format!("login-account-wide:{}", hash_token(&normalized));
+    for (limit, key) in [
+        (&state.login_account_limit, &account_key),
+        (&state.login_account_wide_limit, &wide_key),
+    ] {
+        let decision = limit.check(key);
+        if !decision.allowed {
+            if key == &wide_key {
+                state.login_account_limit.refund(&account_key);
+            }
+            return Err(AppError::limited(decision.retry_after_secs));
+        }
     }
     let user = repo::user_by_email(&state.db, &normalized).await?;
     // Unknown emails still pay for one hash, so the response time does not
@@ -621,14 +641,14 @@ async fn login(
         Some(user) => user.password_hash.clone(),
         None => dummy_hash(&state).await,
     };
-    let valid = state::verify_password(&state.passwords, body.password, encoded)
+    let valid = state::verify_password(&state, body.password, encoded)
         .await
         .unwrap_or(false);
     let Some(user) = user.filter(|_| valid) else {
-        state.login_account_limit.check(&account_key);
         return Err(AppError::InvalidLogin);
     };
     state.login_account_limit.forget(&account_key);
+    state.login_account_wide_limit.refund(&wide_key);
     let now = TimestampMillis::now();
     let jar = issue_session(&state, jar, &user, now).await?;
     let _ = repo::insert_audit(
@@ -645,7 +665,11 @@ async fn login(
 
 /// Login, register, recovery, and setup share one bucket per client IP.
 fn limit_auth_ip(state: &AppState, ip: &str) -> Result<(), AppError> {
-    let decision = state.login_ip_limit.check(&format!("auth-ip:{ip}"));
+    limit(&state.login_ip_limit, &format!("auth-ip:{ip}"))
+}
+
+fn limit(bucket: &crate::limit::TokenBucket, key: &str) -> Result<(), AppError> {
+    let decision = bucket.check(key);
     if decision.allowed {
         Ok(())
     } else {
@@ -658,7 +682,7 @@ async fn dummy_hash(state: &AppState) -> String {
     static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
     DUMMY
         .get_or_init(|| async {
-            state::hash_password(&state.passwords, owlee_platform::generate_token())
+            state::hash_password(state, owlee_platform::generate_token())
                 .await
                 .unwrap_or_default()
         })
@@ -993,8 +1017,8 @@ async fn overview(
     Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Value>, AppError> {
     let project = filter.resolve(&state.db, member.workspace_id).await?;
-    let stats = load_stats(&state).await?;
     let monitors = repo::list_monitors(&state.db, member.workspace_id, project).await?;
+    let stats = load_stats(&state, &monitor_ids(&monitors)).await?;
     let monitors = monitors
         .iter()
         .map(|monitor| {
@@ -1046,8 +1070,8 @@ async fn list_monitors(
     Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<present::MonitorResponse>>, AppError> {
     let project = filter.resolve(&state.db, member.workspace_id).await?;
-    let stats = load_stats(&state).await?;
     let monitors = repo::list_monitors(&state.db, member.workspace_id, project).await?;
+    let stats = load_stats(&state, &monitor_ids(&monitors)).await?;
     Ok(Json(
         monitors
             .iter()
@@ -1249,6 +1273,32 @@ async fn create_agent(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+/// Replaces the agent's token. The old token stops working at once.
+async fn rotate_agent_token(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, AppError> {
+    member.require_editor()?;
+    let agent = repo::workspace_agent(&state.db, member.workspace_id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let token = generate_token();
+    repo::set_agent_token(&state.db, id, &hash_token(&token)).await?;
+    audit(
+        &state.db,
+        &member,
+        "agent.token_rotated",
+        "agent",
+        Some(id),
+        TimestampMillis::now(),
+    )
+    .await;
+    let mut response = json!(present::AgentResponse::from(&agent));
+    response["token"] = json!(token);
+    Ok(Json(response))
+}
+
 async fn delete_agent(
     State(state): State<AppState>,
     member: Member,
@@ -1298,6 +1348,13 @@ async fn agent_checks(
     Json(body): Json<AgentChecksBody>,
 ) -> Result<Json<Value>, AppError> {
     let agent = require_agent(&state, &headers).await?;
+    limit(&state.agent_checks_limit, &format!("agent:{}", agent.id))?;
+    if body.checks.len() > MAX_AGENT_CHECKS {
+        return Err(AppError::field(
+            "checks",
+            format!("Send at most {MAX_AGENT_CHECKS} checks."),
+        ));
+    }
     let mut checks: Vec<repo::AgentCheck> = Vec::new();
     for check in body.checks {
         let name = check.name.trim().to_owned();
@@ -1374,6 +1431,7 @@ async fn agent_result(
     Json(body): Json<AgentResultBody>,
 ) -> Result<StatusCode, AppError> {
     let agent = require_agent(&state, &headers).await?;
+    limit(&state.agent_result_limit, &format!("agent:{}", agent.id))?;
     let monitor = repo::get_monitor(&state.db, body.monitor_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1951,8 +2009,13 @@ async fn test_channel(
 
 async fn public_page(
     State(state): State<AppState>,
+    client: Client,
     Path(slug): Path<String>,
 ) -> Result<Json<present::PublicPage>, AppError> {
+    limit(
+        &state.public_page_limit,
+        &format!("public-page:{}", client.limit_key),
+    )?;
     let page = repo::page_by_slug(&state.db, &slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -1960,7 +2023,11 @@ async fn public_page(
         return Err(AppError::NotFound);
     }
     let components = repo::components(&state.db, page.id).await?;
-    let stats = load_stats(&state).await?;
+    let component_monitors = components
+        .iter()
+        .map(|component| component.monitor_id)
+        .collect::<Vec<_>>();
+    let stats = load_stats(&state, &component_monitors).await?;
     let mut public_components = Vec::new();
     let mut states = Vec::new();
     for component in &components {
@@ -1982,8 +2049,22 @@ async fn public_page(
             bars: response.bars,
         });
     }
-    let incidents =
-        incident_views(&state, repo::incidents_for_page(&state.db, page.id).await?).await?;
+    let incidents = repo::incidents_for_page(&state.db, page.id).await?;
+    let incident_ids = incidents
+        .iter()
+        .map(|incident| incident.id)
+        .collect::<Vec<_>>();
+    let updates = repo::updates_for(&state.db, &incident_ids).await?;
+    let incidents = incidents
+        .iter()
+        .map(|incident| {
+            let component = components
+                .iter()
+                .find(|component| Some(component.monitor_id) == incident.monitor_id)
+                .map(|component| component.name.as_str());
+            present::public_incident(incident, &updates, component)
+        })
+        .collect::<Vec<_>>();
     let open = incidents
         .iter()
         .filter(|incident| incident.status != IncidentStatus::Resolved)
@@ -1998,6 +2079,7 @@ async fn public_page(
         .iter()
         .map(|maintenance| present::maintenance_response(maintenance, now))
         .filter(|maintenance| maintenance.ends_at.as_millis() >= now.as_millis() - DAY_MS)
+        .map(present::PublicMaintenance::from)
         .collect();
     Ok(Json(present::PublicPage {
         title: page.title,
@@ -2023,11 +2105,15 @@ fn stats_view(stats: &LoadedStats) -> Stats<'_> {
     }
 }
 
-async fn load_stats(state: &AppState) -> Result<LoadedStats, AppError> {
+fn monitor_ids(monitors: &[Monitor]) -> Vec<Id> {
+    monitors.iter().map(|monitor| monitor.id).collect()
+}
+
+async fn load_stats(state: &AppState, monitor_ids: &[Id]) -> Result<LoadedStats, AppError> {
     let now = TimestampMillis::now();
     Ok(LoadedStats {
-        daily: repo::daily_since(&state.db, now.unix_day() - 89).await?,
-        counts: repo::counts_since(&state.db, now.as_millis() - DAY_MS).await?,
+        daily: repo::daily_since(&state.db, monitor_ids, now.unix_day() - 89).await?,
+        counts: repo::counts_since(&state.db, monitor_ids, now.as_millis() - DAY_MS).await?,
     })
 }
 
@@ -2037,7 +2123,7 @@ async fn detail(
     id: Id,
 ) -> Result<present::MonitorDetail, AppError> {
     let monitor = workspace_monitor(state, member, id).await?;
-    let stats = load_stats(state).await?;
+    let stats = load_stats(state, &[id]).await?;
     let recent = repo::recent_checks(&state.db, id, 60).await?;
     let channels = repo::channels_for_monitor(&state.db, monitor.project_id, Some(id)).await?;
     let alert_channel_count = channels.len();

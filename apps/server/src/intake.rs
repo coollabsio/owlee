@@ -55,6 +55,19 @@ impl IntakeStats {
         });
     }
 
+    /// For a refusal made before the sender's key is checked, when the id is
+    /// only a claim from the URL. Counts it against an id that is already
+    /// tracked, so made-up ids cannot grow the map.
+    pub fn dropped_if_known(&self, id: &str, reason: DropReason) {
+        if let Some(counts) = self.lock().get_mut(id) {
+            counts.dropped += 1;
+            counts.last_drop = Some(LastDrop {
+                at: TimestampMillis::now(),
+                reason,
+            });
+        }
+    }
+
     pub fn get(&self, id: &str) -> IntakeCounts {
         self.lock().get(id).cloned().unwrap_or_default()
     }
@@ -64,6 +77,8 @@ impl IntakeStats {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, IntakeCounts>> {
-        self.counts.lock().unwrap_or_else(|error| error.into_inner())
+        self.counts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }

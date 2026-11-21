@@ -30,7 +30,7 @@ pub async fn seed_demo(state: &AppState, scope: &DemoScope) -> Result<(), AppErr
 
     let domain_id = Id::new().to_string();
     sqlx::query(
-        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at) VALUES ($1, $2, $3, $4, $5, 1, $6)",
+        "INSERT INTO insight_domains (id, workspace_id, site_id, hostname, note, enabled, created_at, verify_token) VALUES ($1, $2, $3, $4, $5, 1, $6, $7)",
     )
     .bind(&domain_id)
     .bind(scope.workspace_id.to_string())
@@ -38,6 +38,7 @@ pub async fn seed_demo(state: &AppState, scope: &DemoScope) -> Result<(), AppErr
     .bind("go.owlee.test")
     .bind("Demo short domain. On this server, open /go/{slug}.")
     .bind(now)
+    .bind(owlee_platform::generate_token())
     .execute(state.db.pool())
     .await?;
 

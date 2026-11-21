@@ -4,15 +4,13 @@ use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use serde_json::Value;
 use thiserror::Error;
 
-const MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
-
 #[derive(Debug, Error)]
 pub enum BodyError {
     #[error("unsupported content encoding: {0}")]
     Encoding(String),
     #[error("failed to decompress body: {0}")]
     Decompress(String),
-    #[error("decompressed body exceeds {MAX_DECODED_BYTES} bytes")]
+    #[error("decoded body exceeds the size limit")]
     TooLarge,
 }
 
@@ -39,7 +37,13 @@ pub struct EnvelopeItem {
     pub payload: Vec<u8>,
 }
 
-pub fn decode_body(content_encoding: Option<&str>, body: &[u8]) -> Result<Vec<u8>, BodyError> {
+/// Decodes a request body to at most `max` bytes. A body that inflates past
+/// `max` is refused without being buffered.
+pub fn decode_body(
+    content_encoding: Option<&str>,
+    body: &[u8],
+    max: usize,
+) -> Result<Vec<u8>, BodyError> {
     let encoding = content_encoding
         .unwrap_or("")
         .split(',')
@@ -48,44 +52,34 @@ pub fn decode_body(content_encoding: Option<&str>, body: &[u8]) -> Result<Vec<u8
         .trim()
         .to_ascii_lowercase();
     match encoding.as_str() {
-        "" => {
-            if body.starts_with(&[0x1f, 0x8b]) {
-                gunzip(body)
-            } else {
-                Ok(body.to_vec())
-            }
-        }
-        "gzip" | "x-gzip" => gunzip(body),
-        "deflate" => inflate(body),
+        "" if body.starts_with(&[0x1f, 0x8b]) => gunzip(body, max),
+        "" if body.len() > max => Err(BodyError::TooLarge),
+        "" => Ok(body.to_vec()),
+        "gzip" | "x-gzip" => gunzip(body, max),
+        "deflate" => inflate(body, max),
         other => Err(BodyError::Encoding(other.to_owned())),
     }
 }
 
-fn gunzip(body: &[u8]) -> Result<Vec<u8>, BodyError> {
-    read_limited(GzDecoder::new(body))
+fn gunzip(body: &[u8], max: usize) -> Result<Vec<u8>, BodyError> {
+    read_limited(GzDecoder::new(body), max)
 }
 
-fn inflate(body: &[u8]) -> Result<Vec<u8>, BodyError> {
-    match read_limited(ZlibDecoder::new(body)) {
-        Ok(bytes) => Ok(bytes),
-        Err(_) => read_limited(DeflateDecoder::new(body)),
+fn inflate(body: &[u8], max: usize) -> Result<Vec<u8>, BodyError> {
+    match read_limited(ZlibDecoder::new(body), max) {
+        Err(BodyError::Decompress(_)) => read_limited(DeflateDecoder::new(body), max),
+        result => result,
     }
 }
 
-fn read_limited(mut reader: impl Read) -> Result<Vec<u8>, BodyError> {
+fn read_limited(reader: impl Read, max: usize) -> Result<Vec<u8>, BodyError> {
     let mut output = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| BodyError::Decompress(error.to_string()))?;
-        if read == 0 {
-            break;
-        }
-        if output.len() + read > MAX_DECODED_BYTES {
-            return Err(BodyError::TooLarge);
-        }
-        output.extend_from_slice(&buffer[..read]);
+    reader
+        .take((max as u64).saturating_add(1))
+        .read_to_end(&mut output)
+        .map_err(|error| BodyError::Decompress(error.to_string()))?;
+    if output.len() > max {
+        return Err(BodyError::TooLarge);
     }
     Ok(output)
 }
@@ -117,11 +111,12 @@ pub fn parse_envelope(bytes: &[u8]) -> Result<Envelope, EnvelopeError> {
             .unwrap_or("")
             .to_owned();
         let payload = if let Some(length) = json_usize(item_header.get("length")) {
-            if index + length > bytes.len() {
-                return Err(EnvelopeError::Truncated);
-            }
-            let payload = bytes[index..index + length].to_vec();
-            index += length;
+            let end = index
+                .checked_add(length)
+                .filter(|end| *end <= bytes.len())
+                .ok_or(EnvelopeError::Truncated)?;
+            let payload = bytes[index..end].to_vec();
+            index = end;
             if index < bytes.len() && (bytes[index] == b'\n' || bytes[index] == b'\r') {
                 if bytes[index] == b'\r' && index + 1 < bytes.len() && bytes[index + 1] == b'\n' {
                     index += 2;
@@ -216,9 +211,51 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(raw).unwrap();
         let gzipped = encoder.finish().unwrap();
-        let decoded = decode_body(Some("gzip"), &gzipped).unwrap();
+        let decoded = decode_body(Some("gzip"), &gzipped, 1024).unwrap();
         assert_eq!(decoded, raw);
-        let sniffed = decode_body(None, &gzipped).unwrap();
+        let sniffed = decode_body(None, &gzipped, 1024).unwrap();
         assert_eq!(sniffed, raw);
+    }
+
+    #[test]
+    fn refuses_a_body_that_inflates_past_the_limit() {
+        let bomb = vec![b'a'; 4 * 1024 * 1024];
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::best());
+        gzip.write_all(&bomb).unwrap();
+        let gzipped = gzip.finish().unwrap();
+        assert!(gzipped.len() < 8 * 1024, "{}", gzipped.len());
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), Compression::best());
+        zlib.write_all(&bomb).unwrap();
+        let deflated = zlib.finish().unwrap();
+
+        let max = 1024 * 1024;
+        for (encoding, body) in [
+            (Some("gzip"), &gzipped),
+            (None, &gzipped),
+            (Some("deflate"), &deflated),
+        ] {
+            let refused = decode_body(encoding, body, max);
+            assert!(
+                matches!(refused, Err(BodyError::TooLarge)),
+                "{encoding:?}: {refused:?}"
+            );
+        }
+        assert!(matches!(
+            decode_body(None, &bomb, max),
+            Err(BodyError::TooLarge)
+        ));
+        assert_eq!(
+            decode_body(Some("gzip"), &gzipped, bomb.len()).unwrap(),
+            bomb
+        );
+    }
+
+    #[test]
+    fn item_length_that_overflows_is_truncated_not_a_panic() {
+        let body = format!("{{}}\n{{\"type\":\"event\",\"length\":{}}}\n{{}}", u64::MAX);
+        assert!(matches!(
+            parse_envelope(body.as_bytes()),
+            Err(EnvelopeError::Truncated)
+        ));
     }
 }

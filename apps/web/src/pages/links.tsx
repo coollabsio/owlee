@@ -4,9 +4,41 @@ import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview } from "@/lib/api";
+import { CodeBlock, ZoneDownload } from "@/components/setup-guide";
+import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview, type Meta } from "@/lib/api";
+import { type DnsRecord, pointRecord } from "@/lib/dns";
 import { useCanEdit } from "@/lib/me";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
+
+function VerifyDomain({ domain, onDone }: { domain: InsightDomain; onDone: () => void }) {
+  const client = useQueryClient();
+  const verify = useMutation({
+    mutationFn: () => api<InsightDomain>(`/api/domains/${domain.id}/verify`, { method: "POST" }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["domains"] });
+      onDone();
+    },
+  });
+  const origin = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") }).data?.public_origin;
+  const point = origin ? pointRecord(domain.hostname, origin) : undefined;
+  const records: DnsRecord[] = [{ name: domain.verify_name, type: "TXT", value: domain.verify_value }, ...(point ? [point] : [])];
+  return (
+    <div className="space-y-4">
+      <p className="text-[0.8125rem] text-[var(--ui-fg-dim)]">
+        Add these records at your DNS host, then verify. The TXT record proves that you own the hostname. The {point?.type ?? "CNAME"} record sends its visitors to Owlee.
+        {domain.redirect_open ? "" : " Links on this hostname do not redirect until it verifies."}
+      </p>
+      <CodeBlock file="TXT name" code={domain.verify_name} />
+      <CodeBlock file="TXT value" code={domain.verify_value} />
+      {point ? <CodeBlock file={`${point.type} ${point.name}`} code={point.value} /> : null}
+      <ZoneDownload hostname={domain.hostname} records={records} />
+      <ErrorText error={verify.error} />
+      <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>
+        {verify.isPending ? <><Spinner />Verifying…</> : "Verify"}
+      </Button>
+    </div>
+  );
+}
 
 export function LinksPage() {
   const client = useQueryClient();
@@ -18,6 +50,7 @@ export function LinksPage() {
   const [openDomain, setOpenDomain] = useState(false);
   const [openLink, setOpenLink] = useState(false);
   const [hostname, setHostname] = useState("");
+  const [verifyId, setVerifyId] = useState("");
   const [slug, setSlug] = useState("");
   const [destination, setDestination] = useState("https://");
   const [domainId, setDomainId] = useState("");
@@ -52,6 +85,7 @@ export function LinksPage() {
     status: (domain) => (domain.enabled ? "Enabled" : "Off"),
   });
   const domainRows = domainSort.rows;
+  const verifying = domains.data?.find((domain) => domain.id === verifyId);
   const linkRows = linkSort.rows;
   return (
     <div className="flex flex-col gap-6">
@@ -101,7 +135,7 @@ export function LinksPage() {
       </LayerCard>
       <LayerCard
         title="Domains"
-        description="A hostname here is only used for redirects when it is not this server's own host."
+        description="A hostname redirects after its DNS TXT record verifies. /go/{slug} on this server works without it."
         actions={canEdit ? <Button onClick={() => setOpenDomain(true)}>New domain</Button> : null}
         flush
       >
@@ -118,7 +152,12 @@ export function LinksPage() {
               {domainRows.map((domain) => (
                 <tr key={domain.id}>
                   <td className="font-medium text-[var(--ui-fg)]">{domain.hostname}</td>
-                  <td className="text-right"><StatusBadge tone={domain.enabled ? "success" : "neutral"}>{domain.enabled ? "Enabled" : "Off"}</StatusBadge></td>
+                  <td className="text-right">
+                    <span className="inline-flex items-center gap-2">
+                      {domain.verified ? null : canEdit ? <Button size="sm" onClick={() => setVerifyId(domain.id)}>Verify</Button> : <StatusBadge tone="warning">Unverified</StatusBadge>}
+                      <StatusBadge tone={domain.enabled ? "success" : "neutral"}>{domain.enabled ? "Enabled" : "Off"}</StatusBadge>
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -131,6 +170,9 @@ export function LinksPage() {
           <ErrorText error={createDomain.error} />
           <Button variant="primary" type="submit" disabled={createDomain.isPending}>{createDomain.isPending ? <><Spinner />Saving…</> : "Save domain"}</Button>
         </form>
+      </Dialog>
+      <Dialog open={canEdit && verifying !== undefined} title={`Verify ${verifying?.hostname ?? "domain"}`} onClose={() => setVerifyId("")}>
+        {verifying ? <VerifyDomain domain={verifying} onDone={() => setVerifyId("")} /> : null}
       </Dialog>
       <Dialog open={canEdit && openLink} title="New link" onClose={() => setOpenLink(false)}>
         <form className="space-y-4" onSubmit={(event: FormEvent) => { event.preventDefault(); createLink.mutate(); }}>

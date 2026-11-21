@@ -511,6 +511,25 @@ pub async fn insert_email_token(
     Ok(())
 }
 
+/// Whether `consume_email_token` would accept the token now. Uses nothing up.
+pub async fn email_token_live(
+    db: &Database,
+    token_hash: &str,
+    purpose: Purpose,
+    now: TimestampMillis,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT 1 FROM email_tokens \
+         WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > $3",
+    )
+    .bind(token_hash)
+    .bind(purpose.as_str())
+    .bind(now.as_millis())
+    .fetch_optional(db.pool())
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Marks a live token used and returns it. A second call for the same token,
 /// even a concurrent one, gets `None`.
 pub async fn consume_email_token(
@@ -797,6 +816,15 @@ pub async fn insert_agent(
     Ok(())
 }
 
+pub async fn set_agent_token(db: &Database, id: Id, token_hash: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE agents SET token_hash = $1 WHERE id = $2")
+        .bind(token_hash)
+        .bind(id.to_string())
+        .execute(db.pool())
+        .await?;
+    Ok(())
+}
+
 /// What an agent reports about one check in its config. Secrets never reach the server.
 #[derive(Clone, Debug)]
 pub struct AgentCheck {
@@ -1070,13 +1098,45 @@ fn map_check(row: &sqlx::any::AnyRow) -> Result<CheckRow, sqlx::Error> {
     })
 }
 
-pub async fn daily_since(db: &Database, start_day: i64) -> Result<Vec<DailyRow>, sqlx::Error> {
-    let rows = sqlx::query(
+/// Rows that match `{head} $1 AND monitor_id IN (...) {tail}` for these
+/// monitors only, so the query walks the `(monitor_id, ...)` index instead of
+/// the whole table. Long lists run in parts to stay under the bind limit.
+async fn rows_for_monitors(
+    db: &Database,
+    head: &str,
+    tail: &str,
+    since: i64,
+    monitor_ids: &[Id],
+) -> Result<Vec<sqlx::any::AnyRow>, sqlx::Error> {
+    let mut rows = Vec::new();
+    for ids in monitor_ids.chunks(500) {
+        let placeholders = (2..ids.len() + 2)
+            .map(|index| format!("${index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("{head} $1 AND monitor_id IN ({placeholders}) {tail}");
+        let mut query = sqlx::query(&sql).bind(since);
+        for id in ids {
+            query = query.bind(id.to_string());
+        }
+        rows.extend(query.fetch_all(db.pool()).await?);
+    }
+    Ok(rows)
+}
+
+pub async fn daily_since(
+    db: &Database,
+    monitor_ids: &[Id],
+    start_day: i64,
+) -> Result<Vec<DailyRow>, sqlx::Error> {
+    let rows = rows_for_monitors(
+        db,
         "SELECT monitor_id, day, success, degraded, failure, maintenance, latency_sum, latency_count \
-         FROM monitor_daily_stats WHERE day >= $1",
+         FROM monitor_daily_stats WHERE day >=",
+        "",
+        start_day,
+        monitor_ids,
     )
-    .bind(start_day)
-    .fetch_all(db.pool())
     .await?;
     rows.iter()
         .map(|row| {
@@ -1096,13 +1156,18 @@ pub async fn daily_since(db: &Database, start_day: i64) -> Result<Vec<DailyRow>,
         .collect()
 }
 
-pub async fn counts_since(db: &Database, since: i64) -> Result<Vec<StatusCount>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT monitor_id, status, COUNT(*) AS n FROM check_results \
-         WHERE checked_at >= $1 GROUP BY monitor_id, status",
+pub async fn counts_since(
+    db: &Database,
+    monitor_ids: &[Id],
+    since: i64,
+) -> Result<Vec<StatusCount>, sqlx::Error> {
+    let rows = rows_for_monitors(
+        db,
+        "SELECT monitor_id, status, COUNT(*) AS n FROM check_results WHERE checked_at >=",
+        "GROUP BY monitor_id, status",
+        since,
+        monitor_ids,
     )
-    .bind(since)
-    .fetch_all(db.pool())
     .await?;
     rows.iter()
         .map(|row| {

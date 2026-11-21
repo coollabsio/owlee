@@ -15,6 +15,7 @@ import {
   revokeSession,
   type User,
 } from "@/lib/api";
+import { downloadText } from "@/lib/dns";
 import { useCanEdit, useMe } from "@/lib/me";
 import { useWorkspace, workspaceRoleLabel } from "@/lib/workspace";
 import { formatTime, timeAgo } from "@/lib/utils";
@@ -457,12 +458,7 @@ function PrivacyCard({ workspaceName }: { workspaceName: string }) {
   const exported = useMutation({
     mutationFn: () => exportUserErrors(user.trim()),
     onSuccess: (data) => {
-      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "owlee-error-events.json";
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadText("owlee-error-events.json", JSON.stringify(data, null, 2), "application/json");
     },
   });
   const removed = useMutation({

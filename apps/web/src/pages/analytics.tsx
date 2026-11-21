@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
-import { CodeBlock, GuideStep } from "@/components/setup-guide";
+import { CodeBlock, GuideStep, ZoneDownload } from "@/components/setup-guide";
 import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
 import { ProjectField, ProjectTag } from "@/components/project";
@@ -600,6 +600,7 @@ function VerifyRecord({ site }: { site: InsightSite }) {
     <>
       <CodeBlock file="TXT name" code={site.verify_name} />
       <CodeBlock file="TXT value" code={site.verify_value} />
+      <ZoneDownload hostname={site.domain} records={[{ name: site.verify_name, type: "TXT", value: site.verify_value }]} />
       {canEdit ? (
         <div>
           <Button variant="primary" type="button" disabled={verify.isPending} onClick={() => verify.mutate()}>

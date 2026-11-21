@@ -36,6 +36,17 @@ impl Outcome {
     }
 }
 
+/// Longest check error that is stored. An agent chooses this text.
+const MAX_ERROR_BYTES: usize = 1024;
+
+pub fn auto_title(name: &str) -> String {
+    format!("{name} is down")
+}
+
+pub const AUTO_DOWN_PREFIX: &str = "Owlee recorded ";
+pub const AUTO_RECOVERED_SUFFIX: &str =
+    " are succeeding again. This incident was resolved automatically.";
+
 pub fn judge_probe(rules: &Rules, probe: &Probe) -> Outcome {
     let judgement = judge(rules, probe);
     Outcome {
@@ -124,8 +135,11 @@ async fn record(
         status,
         status_code,
         latency_ms,
-        error,
+        mut error,
     } = outcome;
+    if let Some(text) = &mut error {
+        text.truncate(text.floor_char_boundary(MAX_ERROR_BYTES));
+    }
     let transition = apply_outcome(
         monitor.state,
         monitor.consecutive_failures,
@@ -168,7 +182,7 @@ async fn record(
             let incident_id = Id::new();
             let detail = error.unwrap_or_else(|| "The check failed.".to_owned());
             let message = format!(
-                "Owlee recorded {} consecutive failed checks for {}. {detail}",
+                "{AUTO_DOWN_PREFIX}{} consecutive failed checks for {}. {detail}",
                 transition.consecutive_failures, monitor.name
             );
             let incident = Incident {
@@ -176,7 +190,7 @@ async fn record(
                 project_id: monitor.project_id,
                 page_id: None,
                 monitor_id: Some(id),
-                title: format!("{} is down", monitor.name),
+                title: auto_title(&monitor.name),
                 status: IncidentStatus::Investigating,
                 impact: IncidentImpact::Major,
                 auto: true,
@@ -209,10 +223,7 @@ async fn record(
                 .ok()
                 .and_then(|value| value.parse().ok());
             if let Some(incident_id) = incident_id {
-                let message = format!(
-                    "Checks for {} are succeeding again. This incident was resolved automatically.",
-                    monitor.name
-                );
+                let message = format!("Checks for {}{AUTO_RECOVERED_SUFFIX}", monitor.name);
                 repo::apply_incident_status(
                     &mut tx,
                     incident_id,
@@ -260,7 +271,7 @@ async fn record(
             }),
             incident: Some(PayloadIncident {
                 id: incident_id.to_string(),
-                title: format!("{} is down", monitor.name),
+                title: auto_title(&monitor.name),
                 status: if recovered {
                     IncidentStatus::Resolved
                 } else {

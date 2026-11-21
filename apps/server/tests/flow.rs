@@ -704,6 +704,32 @@ async fn agent_registers_its_own_checks_and_reports_outcomes() {
     assert_eq!(first["monitor_count"], 2);
     assert!(first.get("token").is_none());
 
+    let (status, rotated, _) = call(
+        &app,
+        "POST",
+        &format!("/api/agents/{agent_id}/token"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rotated}");
+    let fresh = rotated["token"].as_str().unwrap();
+    assert_ne!(fresh, token);
+    let (status, _) = agent_call(&app, "/api/agent/checks", checks(&["Main DB"]), &token).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the old token stops working"
+    );
+    let (status, _) = agent_call(
+        &app,
+        "/api/agent/checks",
+        checks(&["Main DB", "Replica"]),
+        fresh,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     let (status, problem, _) = call(
         &app,
         "DELETE",
@@ -1655,8 +1681,7 @@ async fn monitor_url_secrets_stay_out_of_incidents_errors_dashboard_and_alerts()
     }
     assert_eq!(
         public["incidents"][0]["updates"][0]["message"],
-        "Owlee recorded 1 consecutive failed checks for Billing API. error sending request: \
-         client error (Connect): tcp connect error: Connection refused (os error 111)",
+        "Automatic checks for Billing API are failing.",
         "{public}"
     );
     let (_, dashboard, _) = call(&app, "GET", "/api/dashboard", None, Some(&ada)).await;
@@ -1664,4 +1689,252 @@ async fn monitor_url_secrets_stay_out_of_incidents_errors_dashboard_and_alerts()
         dashboard["monitors"]["failing"][0]["url"], "http://127.0.0.1:9/health",
         "{dashboard}"
     );
+}
+
+async fn failing_monitor(app: &Router, who: &Who, name: &str) -> String {
+    let (status, monitor, _) = call(
+        app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": who.project, "name": name, "job_type": "http",
+            "url": "http://127.0.0.1:9/health", "timeout_ms": 2000, "failure_threshold": 1
+        })),
+        Some(who),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{monitor}");
+    assert_eq!(monitor["state"], "down", "{monitor}");
+    monitor["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn public_incidents_carry_no_internal_ids_or_monitor_names() {
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let id = failing_monitor(&app, &ada, "billing-db-primary").await;
+    let page = create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "Billing", "slug": "billing", "published": true, "monitor_ids": [id]}),
+    )
+    .await;
+    let starts = owlee_platform::TimestampMillis::now();
+    let ends = owlee_platform::TimestampMillis::from_millis(starts.as_millis() + 3_600_000);
+    create(
+        &app,
+        &ada,
+        "/api/maintenances",
+        json!({"project_id": ada.project, "title": "Disk swap", "message": "New disks.", "page_id": page, "monitor_ids": [id], "starts_at": starts, "ends_at": ends}),
+    )
+    .await;
+    exec(
+        &state,
+        "UPDATE page_components SET name = $1",
+        &["Payments"],
+    )
+    .await;
+    let (status, added, _) = call(&app, "GET", "/api/incidents", None, Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{added}");
+    let incident_id = added[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(added[0]["title"], "billing-db-primary is down");
+    create(
+        &app,
+        &ada,
+        &format!("/api/incidents/{incident_id}/updates"),
+        json!({"status": "identified", "message": "A disk is full."}),
+    )
+    .await;
+
+    let (status, public, _) = call(&app, "GET", "/api/public/billing", None, None).await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    let incident = &public["incidents"][0];
+    let mut keys: Vec<&str> = incident
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "auto",
+            "id",
+            "impact",
+            "resolved_at",
+            "started_at",
+            "status",
+            "title",
+            "updates"
+        ]
+    );
+    assert_eq!(incident["title"], "Payments is down");
+    let messages: Vec<&str> = incident["updates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|update| update["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Automatic checks for Payments are failing.",
+            "A disk is full."
+        ]
+    );
+    assert!(
+        !public["incidents"]
+            .to_string()
+            .contains("billing-db-primary"),
+        "{public}"
+    );
+    let mut keys: Vec<&str> = public["maintenances"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["active", "ends_at", "id", "message", "starts_at", "title"]
+    );
+}
+
+async fn public_get(app: &Router, uri: &str, peer: &str) -> (StatusCode, Option<String>, Value) {
+    let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let peer: std::net::IpAddr = peer.parse().unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+            peer, 4000,
+        )));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .map(|value| value.to_str().unwrap().to_owned());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        retry_after,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn public_page_counts_only_its_monitors_and_limits_each_address() {
+    let (app, token) = app().await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let address = local_health().await;
+    let (status, healthy, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(json!({
+            "project_id": ada.project, "name": "API", "job_type": "http",
+            "url": format!("http://{address}/health"), "timeout_ms": 3000
+        })),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{healthy}");
+    failing_monitor(&app, &ada, "Not on the page").await;
+    create(
+        &app,
+        &ada,
+        "/api/pages",
+        json!({"project_id": ada.project, "title": "Status", "slug": "status", "published": true, "monitor_ids": [healthy["id"]]}),
+    )
+    .await;
+
+    let (status, _, public) = public_get(&app, "/api/public/status", "203.0.113.1").await;
+    assert_eq!(status, StatusCode::OK, "{public}");
+    assert_eq!(public["components"].as_array().unwrap().len(), 1);
+    assert_eq!(public["components"][0]["name"], "API");
+    assert_eq!(public["components"][0]["uptime_90d"], 1.0);
+    assert_eq!(public["components"][0]["bars"][89]["total"], 1);
+    assert_eq!(public["banner"], "operational");
+    assert_eq!(public["incidents"], json!([]));
+
+    // The bucket refills while the loop runs, so count the requests that pass.
+    let mut passed = 1;
+    let retry_after = loop {
+        let (status, retry_after, _) = public_get(&app, "/api/public/status", "203.0.113.1").await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            break retry_after;
+        }
+        assert_eq!(status, StatusCode::OK);
+        passed += 1;
+        assert!(passed <= 400, "the limit never answered 429");
+    };
+    assert!(passed >= 200, "only {passed} requests passed");
+    assert_eq!(retry_after.as_deref(), Some("1"));
+    let (status, _, _) = public_get(&app, "/api/public/status", "203.0.113.2").await;
+    assert_eq!(status, StatusCode::OK, "another address has its own bucket");
+}
+
+#[tokio::test]
+async fn agent_errors_are_cut_to_1_kib_and_agent_calls_are_capped() {
+    let (app, token) = app().await;
+    let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
+    let (_, agent, _) = call(
+        &app,
+        "POST",
+        "/api/agents",
+        Some(json!({ "project_id": ada.project, "name": "vpc-eu" })),
+        Some(&ada),
+    )
+    .await;
+    let token = agent["token"].as_str().unwrap().to_owned();
+    let checks = |count: usize| {
+        json!({
+            "checks": (0..count).map(|index| json!({
+                "name": format!("db-{index}"),
+                "check_type": "postgres",
+                "target": "10.0.0.5:5432",
+                "interval_seconds": 30,
+                "timeout_ms": 10000,
+                "failure_threshold": 1,
+            })).collect::<Vec<_>>()
+        })
+    };
+
+    let (status, problem) = agent_call(&app, "/api/agent/checks", checks(101), &token).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(problem["fields"]["checks"], "Send at most 100 checks.");
+    let (status, registered) = agent_call(&app, "/api/agent/checks", checks(1), &token).await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
+    let id = registered["checks"][0]["monitor_id"].as_str().unwrap();
+
+    let (status, body) = agent_call(
+        &app,
+        "/api/agent/results",
+        json!({
+            "monitor_id": id, "status": "failure", "status_code": null, "latency_ms": 12,
+            "error": format!("a{}", "é".repeat(1000)),
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, monitor, _) = call(
+        &app,
+        "GET",
+        &format!("/api/monitors/{id}"),
+        None,
+        Some(&ada),
+    )
+    .await;
+    let stored = monitor["recent"][0]["error"].as_str().unwrap();
+    assert_eq!(stored.len(), 1023, "the cut does not split the last é");
+    assert_eq!(stored, format!("a{}", "é".repeat(511)));
+
+    let (status, _) = agent_call(&app, "/api/agent/checks", checks(1), &token).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = agent_call(&app, "/api/agent/checks", checks(1), &token).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "3 a minute at once");
 }

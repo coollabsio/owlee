@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { useCopy } from "@/components/ui";
+import { Button, useCopy } from "@/components/ui";
+import { type DnsRecord, downloadText, zoneFile } from "@/lib/dns";
 import type { GuideCode } from "@/lib/platform-guides";
 
 export function GuideStep({ number, title, children }: { number: number; title: string; children: ReactNode }) {
@@ -33,6 +34,19 @@ export function CodeBlock({ file, code }: GuideCode) {
       <pre className="overflow-auto rounded-lg border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-3 font-mono text-[0.75rem] leading-5 text-[var(--ui-fg)]">
         {code}
       </pre>
+    </div>
+  );
+}
+
+export function ZoneDownload({ hostname, records }: { hostname: string; records: DnsRecord[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button type="button" onClick={() => downloadText(`${hostname}.zone.txt`, zoneFile(records))}>
+        Download zone file
+      </Button>
+      <span className="text-[0.75rem] text-[var(--ui-fg-faint)]">
+        A BIND zone file. Import it at your DNS host if it accepts zone files, or add the records by hand.
+      </span>
     </div>
   );
 }

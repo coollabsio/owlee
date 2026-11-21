@@ -1,4 +1,4 @@
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeDelta, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -99,17 +99,17 @@ pub fn normalize_event(raw: Value) -> NormalizedEvent {
     let fingerprint = fingerprint_of(&event, &exceptions, message.as_deref());
     NormalizedEvent {
         event_id: event_id_of(&event),
-        timestamp: timestamp_of(event.get("timestamp")),
+        timestamp: timestamp_of(event.get("timestamp"), Utc::now()),
         level: level_of(event.get("level").and_then(Value::as_str)),
         title,
         message,
-        culprit,
-        platform: string_field(&event, "platform"),
-        environment: string_field(&event, "environment"),
-        release: string_field(&event, "release"),
-        server_name: string_field(&event, "server_name"),
-        transaction: string_field(&event, "transaction"),
-        logger: string_field(&event, "logger"),
+        culprit: culprit.map(|culprit| truncate(&culprit, MAX_NAME)),
+        platform: capped_field(&event, "platform", MAX_LABEL),
+        environment: capped_field(&event, "environment", MAX_LABEL),
+        release: capped_field(&event, "release", MAX_NAME),
+        server_name: capped_field(&event, "server_name", MAX_NAME),
+        transaction: capped_field(&event, "transaction", MAX_NAME),
+        logger: capped_field(&event, "logger", MAX_NAME),
         fingerprint,
         sdk,
         exceptions,
@@ -123,51 +123,55 @@ pub fn normalize_event(raw: Value) -> NormalizedEvent {
     }
 }
 
+/// Character caps for the fields that become `issues` and `events` columns.
+const MAX_LABEL: usize = 64;
+const MAX_NAME: usize = 200;
+
+/// Events dated further ahead than this are stamped with the receive time.
+const MAX_CLOCK_SKEW: TimeDelta = TimeDelta::days(1);
+
+/// Always 32 lowercase hex characters. Anything else from the client is replaced.
 fn event_id_of(event: &Value) -> String {
-    if let Some(id) = event.get("event_id").and_then(Value::as_str) {
-        let cleaned: String = id.chars().filter(|ch| *ch != '-').collect();
-        if !cleaned.is_empty() {
-            return cleaned.to_ascii_lowercase();
-        }
-    }
-    Uuid::new_v4().simple().to_string()
+    event
+        .get("event_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::try_parse(id).ok())
+        .unwrap_or_else(Uuid::new_v4)
+        .simple()
+        .to_string()
 }
 
-fn timestamp_of(value: Option<&Value>) -> String {
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let Some(value) = value else {
-        return now;
-    };
+/// Always RFC3339 UTC with milliseconds, because retention compares these as
+/// text. A time that cannot be read, or one in the future, becomes `now`.
+fn timestamp_of(value: Option<&Value>, now: DateTime<Utc>) -> String {
+    value
+        .and_then(parse_time)
+        .filter(|time| *time <= now + MAX_CLOCK_SKEW)
+        .unwrap_or(now)
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn parse_time(value: &Value) -> Option<DateTime<Utc>> {
     if let Some(seconds) = value.as_f64() {
-        return unix_to_rfc3339(seconds).unwrap_or(now);
+        return unix_time(seconds);
     }
-    if let Some(seconds) = value.as_i64() {
-        return unix_to_rfc3339(seconds as f64).unwrap_or(now);
+    let text = value.as_str()?.trim();
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
+        return Some(parsed.with_timezone(&Utc));
     }
-    if let Some(text) = value.as_str() {
-        if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
-            return parsed
-                .with_timezone(&Utc)
-                .to_rfc3339_opts(SecondsFormat::Millis, true);
-        }
-        if let Ok(seconds) = text.parse::<f64>() {
-            return unix_to_rfc3339(seconds).unwrap_or(now);
-        }
-        if !text.is_empty() {
-            return text.to_owned();
-        }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(naive.and_utc());
     }
-    now
+    text.parse::<f64>().ok().and_then(unix_time)
 }
 
-fn unix_to_rfc3339(seconds: f64) -> Option<String> {
+fn unix_time(seconds: f64) -> Option<DateTime<Utc>> {
     if !seconds.is_finite() || seconds < 0.0 {
         return None;
     }
     let whole = seconds.trunc() as i64;
     let nanos = ((seconds.fract()) * 1_000_000_000.0).round() as u32;
     DateTime::from_timestamp(whole, nanos.min(999_999_999))
-        .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 fn level_of(value: Option<&str>) -> String {
@@ -188,6 +192,10 @@ fn string_field(event: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn capped_field(event: &Value, key: &str, max: usize) -> Option<String> {
+    string_field(event, key).map(|value| truncate(&value, max))
 }
 
 fn object_field(event: &Value, key: &str) -> Value {
@@ -377,7 +385,7 @@ fn parse_breadcrumbs(event: &Value) -> Vec<BreadcrumbInfo> {
         .map(|crumb| BreadcrumbInfo {
             timestamp: crumb
                 .get("timestamp")
-                .map(|value| timestamp_of(Some(value))),
+                .map(|value| timestamp_of(Some(value), Utc::now())),
             type_name: crumb
                 .get("type")
                 .and_then(Value::as_str)
@@ -648,7 +656,7 @@ mod tests {
 
     fn sample() -> Value {
         serde_json::json!({
-            "event_id": "ABC-def",
+            "event_id": "9EC79C33-EC99-42AB-8353-589FCB2E04DC",
             "timestamp": 1_700_000_000.5,
             "level": "error",
             "platform": "php",
@@ -687,7 +695,7 @@ mod tests {
     #[test]
     fn normalizes_exception_stack_and_groups_without_numbers() {
         let event = normalize_event(sample());
-        assert_eq!(event.event_id, "abcdef");
+        assert_eq!(event.event_id, "9ec79c33ec9942ab8353589fcb2e04dc");
         assert!(event.timestamp.starts_with("2023-11-14"));
         assert_eq!(event.exceptions.len(), 1);
         assert_eq!(
@@ -804,6 +812,93 @@ mod tests {
             "exception": {"values": [{"type": "panic", "value": "panic from the Rust example", "stacktrace": {"frames": [panic_frame("2")]}}]}
         }));
         assert_eq!(panic_a.fingerprint, panic_b.fingerprint);
+    }
+
+    #[test]
+    fn replaces_an_event_id_that_is_not_32_hex() {
+        for bad in ["abc", "zzc79c33ec9942ab8353589fcb2e04dc", &"a".repeat(5000)] {
+            let event = normalize_event(serde_json::json!({"event_id": bad, "message": "x"}));
+            assert_ne!(event.event_id, bad);
+            assert_eq!(event.event_id.len(), 32, "{}", event.event_id);
+            assert!(
+                event
+                    .event_id
+                    .chars()
+                    .all(|ch| matches!(ch, '0'..='9' | 'a'..='f')),
+                "{}",
+                event.event_id
+            );
+        }
+    }
+
+    #[test]
+    fn caps_the_fields_stored_as_columns() {
+        let long = "é".repeat(5000);
+        let event = normalize_event(serde_json::json!({
+            "message": "x",
+            "platform": long,
+            "environment": long,
+            "release": long,
+            "server_name": long,
+            "transaction": long,
+            "logger": long,
+        }));
+        let label = format!("{}…", "é".repeat(63));
+        let name = format!("{}…", "é".repeat(199));
+        assert_eq!(event.platform.as_deref(), Some(label.as_str()));
+        assert_eq!(event.environment.as_deref(), Some(label.as_str()));
+        assert_eq!(event.release.as_deref(), Some(name.as_str()));
+        assert_eq!(event.server_name.as_deref(), Some(name.as_str()));
+        assert_eq!(event.transaction.as_deref(), Some(name.as_str()));
+        assert_eq!(event.logger.as_deref(), Some(name.as_str()));
+        assert_eq!(event.culprit.as_deref(), Some(name.as_str()));
+
+        let from_frame = normalize_event(serde_json::json!({
+            "exception": {"values": [{
+                "type": "E",
+                "stacktrace": {"frames": [{"function": "f".repeat(5000), "in_app": true}]}
+            }]}
+        }));
+        assert_eq!(from_frame.culprit, Some(format!("{}…", "f".repeat(199))));
+    }
+
+    #[test]
+    fn timestamps_are_rfc3339_and_never_in_the_future() {
+        let now = DateTime::parse_from_rfc3339("2026-11-21T12:00:00.250Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stamp = |value: Value| timestamp_of(Some(&value), now);
+        let received = "2026-11-21T12:00:00.250Z";
+
+        assert_eq!(stamp(serde_json::json!("zzzz")), received);
+        assert_eq!(stamp(serde_json::json!("9999-12-31T23:59:59Z")), received);
+        assert_eq!(stamp(serde_json::json!("2026-11-22T12:00:01Z")), received);
+        assert_eq!(stamp(serde_json::json!(253_402_300_799_i64)), received);
+        assert_eq!(stamp(serde_json::json!(1e300)), received);
+        assert_eq!(stamp(serde_json::json!(-5)), received);
+        assert_eq!(stamp(serde_json::json!({"a": 1})), received);
+        assert_eq!(timestamp_of(None, now), received);
+
+        assert_eq!(
+            stamp(serde_json::json!("2026-11-22T12:00:00Z")),
+            "2026-11-22T12:00:00.000Z"
+        );
+        assert_eq!(
+            stamp(serde_json::json!("2026-11-21T14:00:00+02:00")),
+            "2026-11-21T12:00:00.000Z"
+        );
+        assert_eq!(
+            stamp(serde_json::json!("2026-11-20T08:30:00.123456")),
+            "2026-11-20T08:30:00.123Z"
+        );
+        assert_eq!(
+            stamp(serde_json::json!(1_700_000_000.5)),
+            "2023-11-14T22:13:20.500Z"
+        );
+        assert_eq!(
+            stamp(serde_json::json!("1700000000")),
+            "2023-11-14T22:13:20.000Z"
+        );
     }
 
     #[test]

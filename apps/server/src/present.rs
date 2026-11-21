@@ -389,6 +389,64 @@ pub fn incident_response(incident: &Incident, updates: &[IncidentUpdate]) -> Inc
     }
 }
 
+/// An incident on the public page: no project, page, or monitor id.
+#[derive(Serialize)]
+pub struct PublicIncident {
+    pub id: Id,
+    pub title: String,
+    pub status: IncidentStatus,
+    pub impact: IncidentImpact,
+    pub auto: bool,
+    pub started_at: TimestampMillis,
+    pub resolved_at: Option<TimestampMillis>,
+    pub updates: Vec<UpdateResponse>,
+}
+
+/// `component` is the public name of the incident's monitor on this page.
+/// The texts Owlee writes for an automatic incident carry the monitor's
+/// internal name and the check error, so they are written again with the
+/// component name. Updates a person wrote stay as they are.
+pub fn public_incident(
+    incident: &Incident,
+    updates: &[IncidentUpdate],
+    component: Option<&str>,
+) -> PublicIncident {
+    let view = incident_response(incident, updates);
+    let name = component.unwrap_or("A component");
+    PublicIncident {
+        id: view.id,
+        title: if incident.auto {
+            crate::engine::auto_title(name)
+        } else {
+            view.title
+        },
+        status: view.status,
+        impact: view.impact,
+        auto: view.auto,
+        started_at: view.started_at,
+        resolved_at: view.resolved_at,
+        updates: view
+            .updates
+            .into_iter()
+            .map(|update| UpdateResponse {
+                message: if !incident.auto {
+                    update.message
+                } else if update.message.starts_with(crate::engine::AUTO_DOWN_PREFIX) {
+                    format!("Automatic checks for {name} are failing.")
+                } else if update
+                    .message
+                    .ends_with(crate::engine::AUTO_RECOVERED_SUFFIX)
+                {
+                    format!("Checks for {name}{}", crate::engine::AUTO_RECOVERED_SUFFIX)
+                } else {
+                    update.message
+                },
+                ..update
+            })
+            .collect(),
+    }
+}
+
 #[derive(Serialize)]
 pub struct MaintenanceResponse {
     pub id: Id,
@@ -417,6 +475,30 @@ pub fn maintenance_response(
         ends_at: maintenance.ends_at,
         monitor_ids: maintenance.monitor_ids.clone(),
         active: maintenance.starts_at.as_millis() <= now && maintenance.ends_at.as_millis() >= now,
+    }
+}
+
+/// A maintenance window on a public page, without workspace ids.
+#[derive(Serialize)]
+pub struct PublicMaintenance {
+    pub id: Id,
+    pub title: String,
+    pub message: String,
+    pub starts_at: TimestampMillis,
+    pub ends_at: TimestampMillis,
+    pub active: bool,
+}
+
+impl From<MaintenanceResponse> for PublicMaintenance {
+    fn from(view: MaintenanceResponse) -> Self {
+        Self {
+            id: view.id,
+            title: view.title,
+            message: view.message,
+            starts_at: view.starts_at,
+            ends_at: view.ends_at,
+            active: view.active,
+        }
     }
 }
 
@@ -504,8 +586,8 @@ pub struct PublicPage {
     pub homepage_url: Option<String>,
     pub banner: &'static str,
     pub components: Vec<PublicComponent>,
-    pub incidents: Vec<IncidentResponse>,
-    pub maintenances: Vec<MaintenanceResponse>,
+    pub incidents: Vec<PublicIncident>,
+    pub maintenances: Vec<PublicMaintenance>,
 }
 
 pub fn banner_label(banner: PageBanner) -> &'static str {

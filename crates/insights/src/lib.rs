@@ -16,7 +16,8 @@ pub use event::{
 };
 pub use identity::{VISIT_IDLE, session_id, visit_id};
 pub use text::{
-    clean_color, clean_destination, clean_host, clean_name, clean_public_slug, clean_slug, slugify,
+    clean_color, clean_destination, clean_host, clean_link_slug, clean_name, clean_public_slug,
+    slugify,
 };
 pub use ua::parse_user_agent;
 pub use url::{PageUrl, clip, parse as parse_page, referrer_domain, same_site};
@@ -120,5 +121,19 @@ mod tests {
         );
         assert!(same_site("docs.coolify.io", "coolify.io"));
         assert!(!same_site("coolify.io.evil.test", "coolify.io"));
+    }
+
+    #[test]
+    fn decodes_an_escape_at_the_end_of_the_path() {
+        assert_eq!(url::parse("/a%20").unwrap().path, "/a ");
+        assert_eq!(url::parse("/a%2").unwrap().path, "/a%2");
+        assert_eq!(url::parse("/caf%C3%A9").unwrap().path, "/café");
+    }
+
+    #[test]
+    fn link_slugs_cannot_start_with_a_server_path() {
+        assert_eq!(clean_link_slug("api"), Err("That slug is reserved."));
+        assert_eq!(clean_link_slug("/Login/now"), Err("That slug is reserved."));
+        assert_eq!(clean_link_slug("docs/api"), Ok("docs/api".to_owned()));
     }
 }

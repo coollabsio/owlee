@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
 use axum::http::HeaderMap;
-use owlee_insights::clip;
 use maxminddb::{Reader, geoip2};
+use owlee_insights::clip;
 use owlee_platform::GeoPrecision;
 
 #[derive(Clone, Debug, Default)]

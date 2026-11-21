@@ -127,6 +127,8 @@ export type CreatedAgent = Agent & { token: string };
 export const createAgent = (input: { name: string; project_id: string }) =>
   api<CreatedAgent>("/api/agents", { method: "POST", body: JSON.stringify(input) });
 
+export const rotateAgentToken = (id: string) => api<CreatedAgent>(`/api/agents/${id}/token`, { method: "POST" });
+
 export const deleteAgent = (id: string) => api<void>(`/api/agents/${id}`, { method: "DELETE" });
 
 export type Component = {
@@ -427,9 +429,13 @@ export type PublicPage = {
   homepage_url: string | null;
   banner: "operational" | "degraded" | "partial_outage" | "major_outage";
   components: PublicComponent[];
-  incidents: Incident[];
-  maintenances: Maintenance[];
+  incidents: PublicIncident[];
+  maintenances: PublicMaintenance[];
 };
+
+export type PublicIncident = Omit<Incident, "project_id" | "page_id" | "monitor_id">;
+
+export type PublicMaintenance = Omit<Maintenance, "project_id" | "page_id" | "monitor_ids">;
 
 export type Meta = {
   version: string;
@@ -519,6 +525,12 @@ export type InsightDomain = {
   note: string;
   enabled: boolean;
   created_at: number;
+  verified: boolean;
+  verified_at: number | null;
+  verify_name: string;
+  verify_value: string;
+  /** False when redirects on this hostname wait for verification. */
+  redirect_open: boolean;
 };
 
 export type InsightLink = {

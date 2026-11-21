@@ -26,7 +26,10 @@ impl MapResolver {
         self.records
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(name.into().trim_end_matches('.').to_ascii_lowercase(), values);
+            .insert(
+                name.into().trim_end_matches('.').to_ascii_lowercase(),
+                values,
+            );
     }
 }
 
@@ -90,7 +93,10 @@ async fn lookup_txt(server: &str, name: &str) -> Result<Vec<String>, String> {
         .connect(address)
         .await
         .map_err(|error| error.to_string())?;
-    socket.send(&query).await.map_err(|error| error.to_string())?;
+    socket
+        .send(&query)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut buffer = [0_u8; 4096];
     let length = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buffer))
         .await

@@ -203,18 +203,7 @@ async fn insert(tx: &mut Transaction<'_, Any>, event: Incoming) -> Result<(), sq
                 ("device", event.device.as_ref()),
             ] {
                 if let Some(value) = value {
-                    sqlx::query(
-                        "INSERT INTO insight_dimension_daily (site_id, day, dimension, value, count) \
-                         VALUES ($1, $2, $3, $4, 1) \
-                         ON CONFLICT (site_id, day, dimension, value) DO UPDATE SET \
-                         count = insight_dimension_daily.count + 1",
-                    )
-                    .bind(site)
-                    .bind(day)
-                    .bind(dimension)
-                    .bind(value)
-                    .execute(&mut **tx)
-                    .await?;
+                    count_value(tx, SITE_VALUES, site, day, dimension, value).await?;
                 }
             }
         }
@@ -252,21 +241,68 @@ async fn insert(tx: &mut Transaction<'_, Any>, event: Incoming) -> Result<(), sq
             ("device", event.device.as_ref()),
         ] {
             if let Some(value) = value {
-                sqlx::query(
-                    "INSERT INTO insight_link_dimension_daily (link_id, day, dimension, value, count) \
-                     VALUES ($1, $2, $3, $4, 1) \
-                     ON CONFLICT (link_id, day, dimension, value) DO UPDATE SET \
-                     count = insight_link_dimension_daily.count + 1",
-                )
-                .bind(link)
-                .bind(day)
-                .bind(dimension)
-                .bind(value)
-                .execute(&mut **tx)
-                .await?;
+                count_value(tx, LINK_VALUES, link, day, dimension, value).await?;
             }
         }
     }
+    Ok(())
+}
+
+/// Distinct values one site or link keeps per dimension per day. A path or a
+/// referrer comes from the visitor, so without a cap each request could add a row.
+const MAX_VALUES: i64 = 1000;
+const OTHER: &str = "(other)";
+
+/// Daily value table and the column that holds its owner.
+const SITE_VALUES: (&str, &str) = ("insight_dimension_daily", "site_id");
+const LINK_VALUES: (&str, &str) = ("insight_link_dimension_daily", "link_id");
+
+async fn count_value(
+    tx: &mut Transaction<'_, Any>,
+    (table, owner_column): (&str, &str),
+    owner: &str,
+    day: i64,
+    dimension: &str,
+    value: &str,
+) -> Result<(), sqlx::Error> {
+    let known = sqlx::query(&format!(
+        "UPDATE {table} SET count = count + 1 \
+         WHERE {owner_column} = $1 AND day = $2 AND dimension = $3 AND value = $4"
+    ))
+    .bind(owner)
+    .bind(day)
+    .bind(dimension)
+    .bind(value)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if known > 0 {
+        return Ok(());
+    }
+    // Only a new value pays for the count, which reads the primary key.
+    let values: i64 = sqlx::query_scalar(&format!(
+        "SELECT CAST(COUNT(*) AS BIGINT) FROM {table} \
+         WHERE {owner_column} = $1 AND day = $2 AND dimension = $3 AND value <> $4"
+    ))
+    .bind(owner)
+    .bind(day)
+    .bind(dimension)
+    .bind(OTHER)
+    .fetch_one(&mut **tx)
+    .await?;
+    let value = if values >= MAX_VALUES { OTHER } else { value };
+    sqlx::query(&format!(
+        "INSERT INTO {table} ({owner_column}, day, dimension, value, count) \
+         VALUES ($1, $2, $3, $4, 1) \
+         ON CONFLICT ({owner_column}, day, dimension, value) DO UPDATE SET \
+         count = {table}.count + 1"
+    ))
+    .bind(owner)
+    .bind(day)
+    .bind(dimension)
+    .bind(value)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

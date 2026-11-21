@@ -5,30 +5,40 @@
 //! routes use Owlee's session cookie.
 
 mod geo;
-mod limit;
 mod record;
 mod routes;
 mod seed;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use owlee_platform::{Config, Database, generate_token};
 use maxminddb::Reader;
+use owlee_platform::{Config, Database, generate_token};
 use sqlx::Row;
 
-pub use limit::RateLimiter;
+use crate::limit::TokenBucket;
+
 pub use routes::{api_routes, fallback, ingest_routes, public_routes};
 pub use seed::seed_demo;
 
+/// Per-client buckets for the routes that need no sign-in.
+pub struct Limits {
+    /// Public stats pages.
+    pub public: TokenBucket,
+    /// Recorded short-link clicks. A client over the limit is still redirected.
+    pub link_clicks: TokenBucket,
+}
+
 pub struct Runtime {
-    pub public_limit: Arc<RateLimiter>,
+    pub limits: Arc<Limits>,
     pub geo: Option<Arc<Reader<Vec<u8>>>>,
 }
 
 pub fn prepare(config: &Config) -> Runtime {
     Runtime {
-        public_limit: Arc::new(RateLimiter::new(60, Duration::from_secs(60))),
+        limits: Arc::new(Limits {
+            public: TokenBucket::per_minute(60, 60),
+            link_clicks: TokenBucket::per_minute(30, 10),
+        }),
         geo: config
             .geoip_path
             .as_ref()
@@ -79,6 +89,8 @@ impl Salt {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(String, String)>> {
-        self.cached.lock().unwrap_or_else(|error| error.into_inner())
+        self.cached
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }

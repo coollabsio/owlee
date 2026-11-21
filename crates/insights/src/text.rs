@@ -30,7 +30,7 @@ pub fn clean_name(value: &str) -> Result<String, &'static str> {
     }
 }
 
-pub fn clean_slug(value: &str) -> Result<String, &'static str> {
+fn clean_slug(value: &str) -> Result<String, &'static str> {
     let value = value.trim().trim_matches('/').to_lowercase();
     if value.is_empty()
         || value.len() > 120
@@ -49,6 +49,18 @@ pub fn clean_public_slug(value: &str) -> Result<String, &'static str> {
     if value.contains('/') {
         Err("The public slug is a single path segment.")
     } else if RESERVED_SLUGS.contains(&value.as_str()) {
+        Err("That slug is reserved.")
+    } else {
+        Ok(value)
+    }
+}
+
+/// A link slug may have several segments. The first one must not be a path
+/// this server answers itself.
+pub fn clean_link_slug(value: &str) -> Result<String, &'static str> {
+    let value = clean_slug(value)?;
+    let first = value.split('/').next().unwrap_or("");
+    if RESERVED_SLUGS.contains(&first) {
         Err("That slug is reserved.")
     } else {
         Ok(value)
