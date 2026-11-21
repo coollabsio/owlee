@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode } from "react";
 import { Link } from "react-router";
+import { products } from "@/app/nav";
 import { Sparkline } from "@/components/error-charts";
 import { ErrorText, LayerCard, PageHeader, Skeleton, StatusBadge } from "@/components/ui";
 import { api, type Dashboard, type DashboardIncident, type DashboardPageRow } from "@/lib/api";
@@ -15,9 +16,59 @@ function tone(state: string): "success" | "warning" | "error" | "neutral" | "inf
   return "neutral";
 }
 
-function isFresh(data: Dashboard) {
-  const count = data.monitors.up + data.monitors.down + data.monitors.degraded + data.monitors.pending + data.monitors.paused;
-  return count === 0 && data.pages.length === 0 && data.incidents.open === 0 && data.errors.apps === 0 && data.analytics.sites === 0 && data.analytics.links === 0;
+type ProductId = "status" | "errors" | "analytics";
+
+const setup: Record<ProductId, { title: string; text: string; actions: { to: string; label: string }[] }> = {
+  status: {
+    title: "Uptime monitoring",
+    text: "Get an alert when a site or service goes down, and publish a status page.",
+    actions: [{ to: "/monitors", label: "Create a monitor" }],
+  },
+  errors: {
+    title: "Error tracking",
+    text: "Collect exceptions from your apps, grouped into issues.",
+    actions: [{ to: "/errors/apps", label: "Connect an app" }],
+  },
+  analytics: {
+    title: "Web analytics",
+    text: "Cookieless visitor stats and short links for your sites.",
+    actions: [
+      { to: "/analytics", label: "Add a site" },
+      { to: "/links", label: "Create a short link" },
+    ],
+  },
+};
+
+function inUse(data: Dashboard): Record<ProductId, boolean> {
+  const { up, down, degraded, pending, paused } = data.monitors;
+  return {
+    status: up + down + degraded + pending + paused > 0 || data.pages.length > 0 || data.incidents.open > 0,
+    errors: data.errors.apps > 0,
+    analytics: data.analytics.sites > 0 || data.analytics.links > 0,
+  };
+}
+
+function SetupCard({ id }: { id: ProductId }) {
+  const card = setup[id];
+  const Icon = products.find((product) => product.id === id)!.icon;
+  return (
+    <LayerCard>
+      <div className="flex flex-col gap-3 p-1">
+        <div className="flex items-center gap-2.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] text-[var(--ui-fg)]">
+            <Icon className="size-4" aria-hidden="true" />
+          </span>
+          <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{card.title}</h2>
+        </div>
+        <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">{card.text}</p>
+        <div className="flex flex-wrap gap-2">
+          {card.actions.map((action) => (
+            <Link key={action.to} className="button button-highlighted" to={action.to}>{action.label}</Link>
+          ))}
+        </div>
+      </div>
+    </LayerCard>
+  );
 }
 
 export function HomePage() {
@@ -48,23 +99,17 @@ export function HomePage() {
     );
   }
 
-  if (isFresh(data)) {
+  const used = inUse(data);
+
+  if (!used.status && !used.errors && !used.analytics) {
     return (
       <div className="flex flex-col gap-6">
-        <PageHeader title="Dashboard" description="Monitors, incidents, errors, and traffic." />
-        <LayerCard>
-          <div className="flex min-h-48 flex-col items-center justify-center px-2 py-8 text-center">
-            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">Nothing to report yet</h2>
-            <p className="mx-auto mt-1 max-w-[28rem] text-[0.8125rem] text-[var(--ui-fg-faint)]">
-              Create a monitor, a site, or an error app. This page fills in as soon as one of them has data.
-            </p>
-            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-              <Link className="button button-highlighted" to="/monitors">Create a monitor</Link>
-              <Link className="button" to="/analytics">Add a site</Link>
-              <Link className="button" to="/errors/apps">Create an app</Link>
-            </div>
-          </div>
-        </LayerCard>
+        <PageHeader title="Get started" description="Owlee does three things. Set up the ones you need." />
+        <div className="grid items-start gap-6 lg:grid-cols-3">
+          <SetupCard id="status" />
+          <SetupCard id="errors" />
+          <SetupCard id="analytics" />
+        </div>
       </div>
     );
   }
@@ -74,15 +119,20 @@ export function HomePage() {
       <PageHeader title="Dashboard" description="Monitors, incidents, errors, and traffic." />
       <ErrorText error={home.error} />
       <QuotaNotice hits={data.quota_hits} />
-      <MonitorsCard data={data} />
+      {used.status ? (
+        <>
+          <MonitorsCard data={data} />
+          <div className="grid items-start gap-6 lg:grid-cols-2">
+            <IncidentsCard incidents={data.incidents} />
+            <PagesCard pages={data.pages} />
+          </div>
+        </>
+      ) : null}
       <div className="grid items-start gap-6 lg:grid-cols-2">
-        <IncidentsCard incidents={data.incidents} />
-        <PagesCard pages={data.pages} />
+        {used.errors ? <ErrorsCard errors={data.errors} /> : <SetupCard id="errors" />}
+        {used.analytics ? <TrafficCard analytics={data.analytics} /> : <SetupCard id="analytics" />}
       </div>
-      <div className="grid items-start gap-6 lg:grid-cols-2">
-        <ErrorsCard errors={data.errors} />
-        <TrafficCard analytics={data.analytics} />
-      </div>
+      {used.status ? null : <SetupCard id="status" />}
     </div>
   );
 }
@@ -297,46 +347,40 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
   const events = errors.events_24h.reduce((sum, value) => sum + value, 0);
   return (
     <LayerCard title="Errors" description="Last 24 hours" actions={viewAll("/errors")} flush>
-      {errors.apps === 0 ? (
-        <Note>No error apps. <Link className="auth-text-link" to="/errors/apps">Create an app</Link></Note>
+      <div className="flex items-end justify-between gap-4 border-b border-[var(--ui-divider)] px-4 py-4">
+        <div className="grid flex-1 grid-cols-3 gap-4">
+          <Metric label="Unresolved" value={String(errors.unresolved)} emphasize={errors.unresolved > 0} />
+          <Metric label="New" value={String(errors.new_24h)} />
+          <Metric label="Events" value={events.toLocaleString()} />
+        </div>
+        <div aria-label="Events over the last 24 hours">
+          <Sparkline values={errors.events_24h} />
+        </div>
+      </div>
+      {errors.issues.length === 0 ? (
+        <Note>No unresolved issues.</Note>
       ) : (
-        <>
-          <div className="flex items-end justify-between gap-4 border-b border-[var(--ui-divider)] px-4 py-4">
-            <div className="grid flex-1 grid-cols-3 gap-4">
-              <Metric label="Unresolved" value={String(errors.unresolved)} emphasize={errors.unresolved > 0} />
-              <Metric label="New" value={String(errors.new_24h)} />
-              <Metric label="Events" value={events.toLocaleString()} />
-            </div>
-            <div aria-label="Events over the last 24 hours">
-              <Sparkline values={errors.events_24h} />
-            </div>
-          </div>
-          {errors.issues.length === 0 ? (
-            <Note>No unresolved issues.</Note>
-          ) : (
-            <table className="cool-table">
-              <tbody>
-                {errors.issues.map((issue) => {
-                  const to = `/errors/${issue.short_id || issue.id}`;
-                  return (
-                    <tr key={issue.id} className="clickable-row">
-                      <td className="cell-link max-w-[18rem]">
-                        <Link className="row-link" to={to}>{issue.title}</Link>
-                        {rowCover(to)}
-                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
-                      </td>
-                      <td className="cell-link whitespace-nowrap text-right">
-                        {rowCover(to)}
-                        <div className="font-mono text-[0.75rem]">{issue.event_count.toLocaleString()}</div>
-                        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </>
+        <table className="cool-table">
+          <tbody>
+            {errors.issues.map((issue) => {
+              const to = `/errors/${issue.short_id || issue.id}`;
+              return (
+                <tr key={issue.id} className="clickable-row">
+                  <td className="cell-link max-w-[18rem]">
+                    <Link className="row-link" to={to}>{issue.title}</Link>
+                    {rowCover(to)}
+                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
+                  </td>
+                  <td className="cell-link whitespace-nowrap text-right">
+                    {rowCover(to)}
+                    <div className="font-mono text-[0.75rem]">{issue.event_count.toLocaleString()}</div>
+                    <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       )}
     </LayerCard>
   );
@@ -344,46 +388,40 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
 
 function TrafficCard({ analytics }: { analytics: Dashboard["analytics"] }) {
   return (
-    <LayerCard title="Traffic" description={`Last ${analytics.days} days, against the ${analytics.days} days before`} actions={viewAll("/analytics")} flush>
-      {analytics.sites === 0 && analytics.links === 0 ? (
-        <Note>No sites or short links. <Link className="auth-text-link" to="/analytics">Add a site</Link></Note>
+    <LayerCard title="Traffic" description={`Last ${analytics.days} days, against the ${analytics.days} days before`} actions={<>{viewAll("/analytics", "Sites")}{viewAll("/links", "Links")}</>} flush>
+      <div className="grid grid-cols-3 gap-4 border-b border-[var(--ui-divider)] px-4 py-4">
+        <Metric label="Visitors" value={analytics.visitors.toLocaleString()} previous={{ current: analytics.visitors, previous: analytics.previous_visitors }} />
+        <Metric label="Pageviews" value={analytics.pageviews.toLocaleString()} previous={{ current: analytics.pageviews, previous: analytics.previous_pageviews }} />
+        <Metric label="Link clicks" value={analytics.clicks.toLocaleString()} previous={{ current: analytics.clicks, previous: analytics.previous_clicks }} />
+      </div>
+      {analytics.top_sites.length === 0 ? (
+        <Note>No sites yet. <Link className="auth-text-link" to="/analytics">Add a site</Link></Note>
       ) : (
-        <>
-          <div className="grid grid-cols-3 gap-4 border-b border-[var(--ui-divider)] px-4 py-4">
-            <Metric label="Visitors" value={analytics.visitors.toLocaleString()} previous={{ current: analytics.visitors, previous: analytics.previous_visitors }} />
-            <Metric label="Pageviews" value={analytics.pageviews.toLocaleString()} previous={{ current: analytics.pageviews, previous: analytics.previous_pageviews }} />
-            <Metric label="Link clicks" value={analytics.clicks.toLocaleString()} previous={{ current: analytics.clicks, previous: analytics.previous_clicks }} />
-          </div>
-          {analytics.top_sites.length === 0 ? (
-            <Note>No sites yet. <Link className="auth-text-link" to="/analytics">Add a site</Link></Note>
-          ) : (
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <th>Site</th>
-                  <th className="text-right">Visitors</th>
-                  <th className="text-right">Views</th>
+        <table className="cool-table">
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th className="text-right">Visitors</th>
+              <th className="text-right">Views</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.top_sites.map((site) => {
+              const to = `/analytics/${site.id}`;
+              return (
+                <tr key={site.id} className="clickable-row">
+                  <td className="cell-link">
+                    <Link className="row-link" to={to}>{site.name}</Link>
+                    {rowCover(to)}
+                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{site.domain}</div>
+                  </td>
+                  <td className="cell-link text-right font-mono">{rowCover(to)}{site.visitors.toLocaleString()}</td>
+                  <td className="cell-link text-right font-mono">{rowCover(to)}{site.pageviews.toLocaleString()}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {analytics.top_sites.map((site) => {
-                  const to = `/analytics/${site.id}`;
-                  return (
-                    <tr key={site.id} className="clickable-row">
-                      <td className="cell-link">
-                        <Link className="row-link" to={to}>{site.name}</Link>
-                        {rowCover(to)}
-                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{site.domain}</div>
-                      </td>
-                      <td className="cell-link text-right font-mono">{rowCover(to)}{site.visitors.toLocaleString()}</td>
-                      <td className="cell-link text-right font-mono">{rowCover(to)}{site.pageviews.toLocaleString()}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </>
+              );
+            })}
+          </tbody>
+        </table>
       )}
     </LayerCard>
   );
