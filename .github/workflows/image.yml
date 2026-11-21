@@ -141,3 +141,13 @@ jobs:
             echo "expected a plain linux/amd64 + linux/arm64 manifest list" >&2
             exit 1
           fi
+
+      # Each push to main redeploys owlee.coollabs.io, which runs the :main
+      # image. COOLIFY_TOKEN is a deploy-only token.
+      - name: Deploy main to Coolify
+        if: github.ref == 'refs/heads/main' && github.repository == 'coollabsio/owlee'
+        env:
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            "https://app.coolify.io/api/v1/deploy?uuid=jkatadjg8ysb57f7lvymouaf"
