@@ -129,6 +129,7 @@ pub fn router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(60),
         ))
+        .layer(middleware::from_fn(crate::security_headers::add))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

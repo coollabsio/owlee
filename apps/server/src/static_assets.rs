@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, Response, StatusCode, Uri, header};
+use axum::http::{Method, Response, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 use include_dir::{Dir, include_dir};
 
@@ -46,11 +46,19 @@ fn file_response(path: &str, contents: &'static [u8], immutable: bool) -> Respon
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime.as_ref())
         .header(header::CACHE_CONTROL, cache)
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(
-            header::REFERRER_POLICY,
-            HeaderValue::from_static("strict-origin-when-cross-origin"),
-        )
         .body(Body::from(contents))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// The bodies of the `<script>` elements without `src` in `index.html`, for the CSP hashes.
+pub fn inline_scripts() -> impl Iterator<Item = &'static str> {
+    let html = DIST
+        .get_file("index.html")
+        .and_then(|file| file.contents_utf8())
+        .unwrap_or_default();
+    html.split("<script").skip(1).filter_map(|element| {
+        let (attributes, rest) = element.split_once('>')?;
+        let (body, _) = rest.split_once("</script>")?;
+        (!attributes.contains("src=")).then_some(body)
+    })
 }

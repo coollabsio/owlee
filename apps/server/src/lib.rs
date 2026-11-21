@@ -29,6 +29,7 @@ mod retention;
 mod routes;
 mod scheduler;
 mod secret_box;
+mod security_headers;
 mod seed;
 mod setup;
 mod state;
