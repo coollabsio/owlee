@@ -62,8 +62,7 @@ pub struct Monitor {
     pub job_type: JobType,
     pub url: String,
     pub method: String,
-    pub headers: Vec<HeaderPair>,
-    pub body: String,
+    pub request: SealedRequest,
     pub timeout_ms: i64,
     pub interval_seconds: i64,
     pub degraded_after_ms: Option<i64>,
@@ -86,6 +85,59 @@ pub struct Monitor {
     pub check_type: Option<CheckType>,
     /// Set while the monitor is down because its agent is silent. No check failed.
     pub agent_lost_at: Option<TimestampMillis>,
+}
+
+/// What a monitor sends besides the URL.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MonitorRequest {
+    pub headers: Vec<HeaderPair>,
+    pub body: String,
+}
+
+/// A `MonitorRequest` as stored. Headers and bodies often carry API tokens, so
+/// both columns are sealed under `OWLEE_APP_KEY` and bound to the monitor id.
+#[derive(Clone, Debug)]
+pub struct SealedRequest {
+    headers_json: String,
+    body: String,
+}
+
+impl SealedRequest {
+    pub fn seal(key: &AppKey, monitor_id: Id, request: &MonitorRequest) -> Self {
+        Self {
+            headers_json: crate::secret_box::seal(
+                key,
+                monitor_aad("headers_json", monitor_id).as_bytes(),
+                &json(&request.headers),
+            ),
+            body: crate::secret_box::seal(
+                key,
+                monitor_aad("body", monitor_id).as_bytes(),
+                &request.body,
+            ),
+        }
+    }
+
+    /// `None` when either column does not open with `OWLEE_APP_KEY`.
+    pub fn open(&self, key: &AppKey, monitor_id: Id) -> Option<MonitorRequest> {
+        let headers = crate::secret_box::open(
+            key,
+            monitor_aad("headers_json", monitor_id).as_bytes(),
+            &self.headers_json,
+        )?;
+        Some(MonitorRequest {
+            headers: serde_json::from_str(&headers).ok()?,
+            body: crate::secret_box::open(
+                key,
+                monitor_aad("body", monitor_id).as_bytes(),
+                &self.body,
+            )?,
+        })
+    }
+}
+
+fn monitor_aad(column: &str, id: Id) -> String {
+    format!("monitors.{column}:{id}")
 }
 
 #[derive(Clone, Debug)]
@@ -634,8 +686,8 @@ pub async fn insert_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
     .bind(monitor.job_type.as_str())
     .bind(&monitor.url)
     .bind(&monitor.method)
-    .bind(json(&monitor.headers))
-    .bind(&monitor.body)
+    .bind(&monitor.request.headers_json)
+    .bind(&monitor.request.body)
     .bind(monitor.timeout_ms)
     .bind(monitor.interval_seconds)
     .bind(monitor.degraded_after_ms)
@@ -672,8 +724,8 @@ pub async fn update_monitor(db: &Database, monitor: &Monitor) -> Result<(), sqlx
     .bind(monitor.job_type.as_str())
     .bind(&monitor.url)
     .bind(&monitor.method)
-    .bind(json(&monitor.headers))
-    .bind(&monitor.body)
+    .bind(&monitor.request.headers_json)
+    .bind(&monitor.request.body)
     .bind(monitor.timeout_ms)
     .bind(monitor.interval_seconds)
     .bind(monitor.degraded_after_ms)
@@ -857,6 +909,7 @@ pub struct AgentCheck {
 /// active, and the agent's other monitors are paused so their history stays.
 pub async fn sync_agent_checks(
     db: &Database,
+    key: &AppKey,
     agent: &Agent,
     checks: &[AgentCheck],
     now: TimestampMillis,
@@ -873,16 +926,17 @@ pub async fn sync_agent_checks(
     let mut ids = Vec::new();
     for check in checks {
         let previous = existing.iter().find(|monitor| monitor.name == check.name);
+        let id = previous.map_or_else(Id::new, |monitor| monitor.id);
         let monitor = Monitor {
-            id: previous.map_or_else(Id::new, |monitor| monitor.id),
+            id,
             project_id: agent.project_id,
             name: check.name.clone(),
             description: String::new(),
             job_type: check.check_type.job_type(),
             url: check.target.clone(),
             method: "GET".to_owned(),
-            headers: Vec::new(),
-            body: String::new(),
+            // The agent's config holds anything a check sends.
+            request: SealedRequest::seal(key, id, &MonitorRequest::default()),
             timeout_ms: check.timeout_ms,
             interval_seconds: check.interval_seconds,
             degraded_after_ms: None,
@@ -2228,8 +2282,10 @@ fn map_monitor(row: &sqlx::any::AnyRow) -> Result<Monitor, sqlx::Error> {
             .ok_or_else(|| corrupt(format!("job type {job_type}")))?,
         url: row.try_get("url")?,
         method: row.try_get("method")?,
-        headers: parse_json(&row.try_get::<String, _>("headers_json")?),
-        body: row.try_get("body")?,
+        request: SealedRequest {
+            headers_json: row.try_get("headers_json")?,
+            body: row.try_get("body")?,
+        },
         timeout_ms: row.try_get("timeout_ms")?,
         interval_seconds: row.try_get("interval_seconds")?,
         degraded_after_ms: row.try_get("degraded_after_ms")?,

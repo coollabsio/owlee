@@ -28,6 +28,11 @@ type Draft = {
   degraded_after_ms: string;
   failure_threshold: string;
   body_contains: string;
+  /** `saved` rows have a value on the server. A blank value keeps it. */
+  headers: { name: string; value: string; saved: boolean }[];
+  /** Blank keeps the saved body unless `clear_body` is set. */
+  body: string;
+  clear_body: boolean;
   active: boolean;
 };
 
@@ -45,6 +50,9 @@ const emptyDraft: Draft = {
   degraded_after_ms: "",
   failure_threshold: "3",
   body_contains: "",
+  headers: [],
+  body: "",
+  clear_body: false,
   active: true,
 };
 
@@ -64,6 +72,9 @@ function draftFrom(monitor: Monitor): Draft {
     degraded_after_ms: monitor.degraded_after_ms == null ? "" : String(monitor.degraded_after_ms),
     failure_threshold: String(monitor.failure_threshold),
     body_contains: typeof body?.target === "string" ? body.target : "",
+    headers: monitor.headers.map((header) => ({ name: header.name, value: "", saved: header.has_value })),
+    body: "",
+    clear_body: false,
     active: monitor.active,
   };
 }
@@ -95,8 +106,9 @@ function payload(draft: Draft) {
     assertions,
     follow_redirects: true,
     active: draft.active,
-    headers: [],
-    body: "",
+    headers: draft.headers.filter((header) => header.name.trim()).map(({ name, value }) => ({ name, value })),
+    body: draft.body,
+    clear_body: draft.clear_body,
   };
 }
 
@@ -669,7 +681,7 @@ const intervals = [15, 30, 60, 300, 600, 1800, 3600].map((seconds) => ({
 }));
 const methods = ["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE"].map((method) => ({ value: method, label: method }));
 
-const advancedFields = ["method", "expected_status", "timeout_ms", "degraded_after_ms", "failure_threshold", "assertions", "description"];
+const advancedFields = ["method", "headers", "body", "expected_status", "timeout_ms", "degraded_after_ms", "failure_threshold", "assertions", "description"];
 
 function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () => void; monitor?: MonitorDetail }) {
   const client = useQueryClient();
@@ -680,13 +692,19 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
   const [fields, setFields] = useState<Record<string, string>>({});
   const target = resolved(draft);
   const body = () => JSON.stringify({ ...payload(draft), project_id: monitor?.project_id ?? projectId });
+  // Test fills blank header values and body from the saved monitor.
+  const testBody = () => JSON.stringify({ ...payload(draft), project_id: monitor?.project_id ?? projectId, monitor_id: monitor?.id });
+  const keepsBody = Boolean(monitor?.has_body) && !draft.clear_body;
+  function setHeader(index: number, patch: Partial<Draft["headers"][number]>) {
+    update({ headers: draft.headers.map((header, at) => (at === index ? { ...header, ...patch } : header)) });
+  }
   function showFields(error: Error) {
     const next = error instanceof ApiError ? error.fields ?? {} : {};
     setFields(next);
     if (advancedFields.some((field) => next[field])) setAdvanced(true);
   }
   const test = useMutation({
-    mutationFn: () => api<CheckOutcome>("/api/monitors/test", { method: "POST", body: body() }),
+    mutationFn: () => api<CheckOutcome>("/api/monitors/test", { method: "POST", body: testBody() }),
     onError: showFields,
   });
   const save = useMutation({
@@ -783,6 +801,48 @@ function MonitorDialog({ open, onClose, monitor }: { open: boolean; onClose: () 
                 <Input value={draft.failure_threshold} onChange={(event) => update({ failure_threshold: event.target.value })} />
               </Field>
             </div>
+            {target.job_type === "http" ? (
+              <div className="space-y-3">
+                {monitor?.request_unreadable ? (
+                  <p className="field-error">The saved headers and body do not open with OWLEE_APP_KEY. Enter them again.</p>
+                ) : null}
+                <div>
+                  <span className="field-label">
+                    <span>Headers</span>
+                    {draft.headers.some((header) => header.saved) ? <span className="ml-auto text-[0.6875rem] font-normal">Leave a value blank to keep it</span> : null}
+                  </span>
+                  <div className="space-y-2">
+                    {draft.headers.map((header, index) => (
+                      <div key={index} className="flex gap-2">
+                        <Input className="flex-1" value={header.name} onChange={(event) => setHeader(index, { name: event.target.value })} placeholder="Authorization" aria-label="Header name" />
+                        <Input
+                          className="flex-1"
+                          type="password"
+                          autoComplete="new-password"
+                          value={header.value}
+                          onChange={(event) => setHeader(index, { value: event.target.value })}
+                          placeholder={header.saved ? "Leave blank to keep" : "Value"}
+                          aria-label="Header value"
+                        />
+                        <Button type="button" onClick={() => update({ headers: draft.headers.filter((_, at) => at !== index) })}>Remove</Button>
+                      </div>
+                    ))}
+                    <Button type="button" size="sm" onClick={() => update({ headers: [...draft.headers, { name: "", value: "", saved: false }] })}>Add header</Button>
+                  </div>
+                  {fields.headers ? <p className="field-error">{fields.headers}</p> : null}
+                </div>
+                {["POST", "PUT", "PATCH"].includes(draft.method) || monitor?.has_body ? (
+                  <Field label="Request body" hint={keepsBody ? "Leave blank to keep the saved body" : undefined} error={fields.body}>
+                    <Textarea value={draft.body} onChange={(event) => update({ body: event.target.value, clear_body: false })} placeholder={keepsBody ? "Saved body hidden" : undefined} />
+                  </Field>
+                ) : null}
+                {keepsBody ? (
+                  <Button type="button" size="sm" onClick={() => update({ body: "", clear_body: true })}>Remove saved body</Button>
+                ) : monitor?.has_body ? (
+                  <p className="text-[0.75rem] text-[var(--ui-fg-faint)]">The saved body is removed on save.</p>
+                ) : null}
+              </div>
+            ) : null}
             {target.job_type === "http" ? (
               <Field label="Body contains" error={fields.assertions}>
                 <Input value={draft.body_contains} onChange={(event) => update({ body_contains: event.target.value })} placeholder="optional assertion" />

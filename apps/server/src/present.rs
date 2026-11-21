@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use owlee_domain::{
-    Assertion, CheckStatus, CheckType, DailyCount, HeaderPair, IncidentImpact, IncidentStatus,
-    JobType, MonitorState, PageBanner, summarize,
+    Assertion, CheckStatus, CheckType, DailyCount, IncidentImpact, IncidentStatus, JobType,
+    MonitorState, PageBanner, summarize,
 };
-use owlee_platform::{Id, TimestampMillis};
+use owlee_platform::{AppKey, Id, TimestampMillis};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -66,6 +66,12 @@ pub struct CheckResponse {
 }
 
 #[derive(Serialize)]
+pub struct SavedHeader {
+    pub name: String,
+    pub has_value: bool,
+}
+
+#[derive(Serialize)]
 pub struct MonitorResponse {
     pub id: Id,
     pub project_id: Id,
@@ -74,8 +80,11 @@ pub struct MonitorResponse {
     pub job_type: JobType,
     pub url: String,
     pub method: String,
-    pub headers: Vec<HeaderPair>,
-    pub body: String,
+    /// Names only. Editors see which headers are saved, never their values.
+    pub headers: Vec<SavedHeader>,
+    pub has_body: bool,
+    /// The saved headers and body do not open with `OWLEE_APP_KEY`.
+    pub request_unreadable: bool,
     pub timeout_ms: i64,
     pub interval_seconds: i64,
     pub degraded_after_ms: Option<i64>,
@@ -207,8 +216,9 @@ pub fn monitor_response(
         job_type: monitor.job_type,
         url: monitor.url.clone(),
         method: monitor.method.clone(),
-        headers: monitor.headers.clone(),
-        body: monitor.body.clone(),
+        headers: Vec::new(),
+        has_body: false,
+        request_unreadable: false,
         timeout_ms: monitor.timeout_ms,
         interval_seconds: monitor.interval_seconds,
         degraded_after_ms: monitor.degraded_after_ms,
@@ -663,6 +673,24 @@ impl From<&repo::Agent> for AgentResponse {
             monitor_count: agent.monitor_count,
             created_at: agent.created_at,
         }
+    }
+}
+
+/// What an editor sees of the saved request: header names and whether a body is set.
+pub fn reveal_request(response: &mut MonitorResponse, key: &AppKey, monitor: &Monitor) {
+    match monitor.request.open(key, monitor.id) {
+        Some(request) => {
+            response.headers = request
+                .headers
+                .into_iter()
+                .map(|header| SavedHeader {
+                    has_value: !header.value.is_empty(),
+                    name: header.name,
+                })
+                .collect();
+            response.has_body = !request.body.is_empty();
+        }
+        None => response.request_unreadable = true,
     }
 }
 

@@ -975,7 +975,9 @@ async fn overview(
         .iter()
         .map(|monitor| {
             monitor_view(
+                &state,
                 member.is_editor(),
+                monitor,
                 present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
             )
         })
@@ -1004,8 +1006,15 @@ struct MonitorBody {
     job_type: JobType,
     url: String,
     method: Option<String>,
-    headers: Option<Vec<HeaderPair>>,
+    /// Omitted keeps the saved headers. A header without a value keeps the
+    /// saved value for its name.
+    headers: Option<Vec<HeaderBody>>,
+    /// Blank keeps the saved body. `clear_body` removes it.
     body: Option<String>,
+    clear_body: Option<bool>,
+    /// Read by the test endpoint only: the saved monitor whose headers and body
+    /// fill in what the body leaves blank.
+    monitor_id: Option<Id>,
     timeout_ms: Option<i64>,
     interval_seconds: Option<i64>,
     degraded_after_ms: Option<i64>,
@@ -1014,6 +1023,12 @@ struct MonitorBody {
     follow_redirects: Option<bool>,
     failure_threshold: Option<i32>,
     active: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct HeaderBody {
+    name: String,
+    value: Option<String>,
 }
 
 async fn list_monitors(
@@ -1029,7 +1044,9 @@ async fn list_monitors(
             .iter()
             .map(|monitor| {
                 monitor_view(
+                    &state,
                     member.is_editor(),
+                    monitor,
                     present::monitor_response(monitor, stats_view(&stats), 30, Vec::new()),
                 )
             })
@@ -1044,10 +1061,10 @@ async fn create_monitor(
 ) -> Result<(StatusCode, Json<present::MonitorDetail>), AppError> {
     member.require_editor()?;
     let project_id = body_project(&state, &member, body.project_id).await?;
-    let input = monitor_input(body);
+    let input = monitor_input(body, None)?;
     validate_monitor(&input).map_err(AppError::Validation)?;
     let now = TimestampMillis::now();
-    let monitor = materialize(Id::new(), project_id, &input, now, None);
+    let monitor = materialize(&state, Id::new(), project_id, &input, now, None);
     repo::insert_monitor(&state.db, &monitor).await?;
     audit(
         &state.db,
@@ -1099,10 +1116,21 @@ async fn update_monitor(
     member.require_editor()?;
     let existing = workspace_monitor(&state, &member, id).await?;
     reject_agent_monitor(&existing, "Edit this check in the agent config.")?;
-    let input = monitor_input(body);
+    let saved = existing
+        .request
+        .open(&state.config.app_key, id)
+        .map(|request| (request, existing.url.clone()));
+    let input = monitor_input(body, saved.as_ref())?;
     validate_monitor(&input).map_err(AppError::Validation)?;
     let now = TimestampMillis::now();
-    let mut monitor = materialize(id, existing.project_id, &input, now, Some(&existing));
+    let mut monitor = materialize(
+        &state,
+        id,
+        existing.project_id,
+        &input,
+        now,
+        Some(&existing),
+    );
     if monitor.active && !existing.active {
         monitor.next_check_at = now;
     }
@@ -1161,10 +1189,27 @@ async fn test_monitor(
 ) -> Result<Json<engine::Outcome>, AppError> {
     member.require_editor()?;
     let project_id = body_project(&state, &member, body.project_id).await?;
-    let input = monitor_input(body);
+    let saved = match body.monitor_id {
+        Some(id) => {
+            let monitor = workspace_monitor(&state, &member, id).await?;
+            monitor
+                .request
+                .open(&state.config.app_key, id)
+                .map(|request| (request, monitor.url))
+        }
+        None => None,
+    };
+    let input = monitor_input(body, saved.as_ref())?;
     validate_monitor(&input).map_err(AppError::Validation)?;
     limit_checks(&state, &member)?;
-    let monitor = materialize(Id::new(), project_id, &input, TimestampMillis::now(), None);
+    let monitor = materialize(
+        &state,
+        Id::new(),
+        project_id,
+        &input,
+        TimestampMillis::now(),
+        None,
+    );
     Ok(Json(engine::trial(&state, &monitor).await?))
 }
 
@@ -1392,13 +1437,21 @@ async fn agent_checks(
         checks.push(repo::AgentCheck {
             name,
             check_type: check.check_type,
-            target: input.url,
+            // The agent probes with its own config, so the stored target needs no credentials.
+            target: without_userinfo(&input.url),
             interval_seconds: input.interval_seconds,
             timeout_ms: input.timeout_ms,
             failure_threshold: input.failure_threshold,
         });
     }
-    let ids = repo::sync_agent_checks(&state.db, &agent, &checks, TimestampMillis::now()).await?;
+    let ids = repo::sync_agent_checks(
+        &state.db,
+        &state.config.app_key,
+        &agent,
+        &checks,
+        TimestampMillis::now(),
+    )
+    .await?;
     Ok(Json(json!({
         "checks": ids
             .iter()
@@ -2293,7 +2346,9 @@ async fn detail(
         .collect();
     Ok(present::MonitorDetail {
         monitor: monitor_view(
+            state,
             member.is_editor(),
+            &monitor,
             present::monitor_response(&monitor, stats_view(&stats), 90, recent),
         ),
         open_incident_id: repo::open_incident_for_monitor(&state.db, member.workspace_id, id)
@@ -2361,15 +2416,80 @@ async fn notify_incident(state: &AppState, incident: &Incident, message: &str) {
     .await;
 }
 
-fn monitor_input(body: MonitorBody) -> MonitorInput {
-    MonitorInput {
+/// `saved` fills in the header values and body that the request leaves blank.
+/// `saved` is the monitor's stored request and URL. Blank header values and
+/// body keep the stored ones only while the URL stays on the same origin, so a
+/// new URL cannot receive secrets its editor never saw.
+fn monitor_input(
+    body: MonitorBody,
+    saved: Option<&(repo::MonitorRequest, String)>,
+) -> Result<MonitorInput, AppError> {
+    let url = body.url.trim().to_owned();
+    if body.job_type == JobType::Http && has_userinfo(&url) {
+        return Err(AppError::field(
+            "url",
+            "Remove the user name and password from the URL. Send them in an Authorization header instead.",
+        ));
+    }
+    let moved = saved.filter(|(_, saved_url)| !same_target_origin(saved_url, &url));
+    let saved = saved
+        .filter(|(_, saved_url)| same_target_origin(saved_url, &url))
+        .map(|(request, _)| request);
+    let headers = match body.headers {
+        None if moved.is_some_and(|(request, _)| !request.headers.is_empty()) => {
+            return Err(AppError::field(
+                "headers",
+                "Enter the headers again. The URL now points to another site.",
+            ));
+        }
+        None => saved.map(|saved| saved.headers.clone()).unwrap_or_default(),
+        Some(headers) => headers
+            .into_iter()
+            .map(|header| {
+                let name = header.name.trim().to_owned();
+                let value = match header.value.filter(|value| !value.is_empty()) {
+                    Some(value) => value,
+                    None => saved
+                        .and_then(|saved| {
+                            saved
+                                .headers
+                                .iter()
+                                .find(|known| known.name.eq_ignore_ascii_case(&name))
+                        })
+                        .map(|known| known.value.clone())
+                        .ok_or_else(|| {
+                            AppError::field(
+                                "headers",
+                                format!("Enter a value for the {name} header."),
+                            )
+                        })?,
+                };
+                Ok(HeaderPair { name, value })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?,
+    };
+    let request_body = if body.clear_body == Some(true) {
+        String::new()
+    } else {
+        match body.body.filter(|text| !text.is_empty()) {
+            Some(text) => text,
+            None if moved.is_some_and(|(request, _)| !request.body.is_empty()) => {
+                return Err(AppError::field(
+                    "body",
+                    "Enter the body again, or remove it. The URL now points to another site.",
+                ));
+            }
+            None => saved.map(|saved| saved.body.clone()).unwrap_or_default(),
+        }
+    };
+    Ok(MonitorInput {
         name: body.name,
         description: body.description.unwrap_or_default(),
         job_type: body.job_type,
-        url: body.url.trim().to_owned(),
+        url,
         method: body.method.unwrap_or_else(|| "GET".to_owned()),
-        headers: body.headers.unwrap_or_default(),
-        body: body.body.unwrap_or_default(),
+        headers,
+        body: request_body,
         timeout_ms: body.timeout_ms.unwrap_or(30_000),
         interval_seconds: body.interval_seconds.unwrap_or(60),
         degraded_after_ms: body.degraded_after_ms,
@@ -2378,10 +2498,36 @@ fn monitor_input(body: MonitorBody) -> MonitorInput {
         follow_redirects: body.follow_redirects.unwrap_or(true),
         failure_threshold: body.failure_threshold.unwrap_or(3),
         active: body.active.unwrap_or(true),
+    })
+}
+
+/// Scheme, host, and port match. A target that is not a URL, such as a TCP
+/// `host:port`, must match exactly.
+fn same_target_origin(saved: &str, url: &str) -> bool {
+    match (reqwest::Url::parse(saved), reqwest::Url::parse(url)) {
+        (Ok(saved), Ok(url)) if saved.origin().is_tuple() => saved.origin() == url.origin(),
+        _ => saved.trim() == url,
+    }
+}
+
+/// Credentials in a URL would be stored and shown in plaintext, unlike headers.
+fn has_userinfo(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+}
+
+fn without_userinfo(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => raw.to_owned(),
     }
 }
 
 fn materialize(
+    state: &AppState,
     id: Id,
     project_id: Id,
     input: &MonitorInput,
@@ -2396,8 +2542,14 @@ fn materialize(
         job_type: input.job_type,
         url: input.url.clone(),
         method: input.method.clone(),
-        headers: input.headers.clone(),
-        body: input.body.clone(),
+        request: repo::SealedRequest::seal(
+            &state.config.app_key,
+            id,
+            &repo::MonitorRequest {
+                headers: input.headers.clone(),
+                body: input.body.clone(),
+            },
+        ),
         timeout_ms: input.timeout_ms,
         interval_seconds: input.interval_seconds,
         degraded_after_ms: input.degraded_after_ms,
@@ -2689,11 +2841,17 @@ pub(crate) async fn is_installation_admin(state: &AppState, user: &User) -> Resu
 }
 
 /// Request headers, bodies, URL credentials, and query strings often carry API
-/// tokens, so members get monitors without them.
-fn monitor_view(editor: bool, mut response: present::MonitorResponse) -> present::MonitorResponse {
-    if !editor {
-        response.headers.clear();
-        response.body.clear();
+/// tokens. Editors see the URL and which headers and body are saved, members
+/// see neither.
+fn monitor_view(
+    state: &AppState,
+    editor: bool,
+    monitor: &Monitor,
+    mut response: present::MonitorResponse,
+) -> present::MonitorResponse {
+    if editor {
+        present::reveal_request(&mut response, &state.config.app_key, monitor);
+    } else {
         response.url = present::without_secrets(&response.url);
     }
     response

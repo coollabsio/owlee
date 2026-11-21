@@ -7,7 +7,7 @@ use sqlx::postgres::{PgConnectOptions, PgConnection};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use crate::repo::Monitor;
+use crate::repo::{Monitor, MonitorRequest};
 use crate::state::HttpClients;
 
 const BODY_LIMIT: usize = 65_536;
@@ -24,14 +24,14 @@ pub struct Job {
     pub follow_redirects: bool,
 }
 
-impl From<&Monitor> for Job {
-    fn from(monitor: &Monitor) -> Self {
+impl Job {
+    pub fn new(monitor: &Monitor, request: MonitorRequest) -> Self {
         Self {
             job_type: monitor.job_type,
             url: monitor.url.clone(),
             method: monitor.method.clone(),
-            headers: monitor.headers.clone(),
-            body: monitor.body.clone(),
+            headers: request.headers,
+            body: request.body,
             timeout_ms: monitor.timeout_ms,
             follow_redirects: monitor.follow_redirects,
         }

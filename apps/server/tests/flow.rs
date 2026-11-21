@@ -1607,7 +1607,7 @@ async fn detail_reports_state_age_latency_and_incidents(state: &AppState) {
 async fn monitor_url_secrets_stay_out_of_incidents_errors_dashboard_and_alerts() {
     use sqlx::Row;
 
-    const SECRET_URL: &str = "http://usr-LEAK0:pw-LEAK1@127.0.0.1:9/health?token=LEAK2";
+    const SECRET_URL: &str = "http://127.0.0.1:9/health?token=LEAK2";
     let (app, state, token) = app_with_state(Vec::new()).await;
     let (_, ada) = owner(&app, token.as_deref().expect("setup token")).await;
     let member = Who::from(
@@ -1738,7 +1738,7 @@ async fn monitor_url_secrets_stay_out_of_incidents_errors_dashboard_and_alerts()
     let leaks: Vec<String> = surfaces
         .iter()
         .flat_map(|(name, text)| {
-            ["LEAK0", "LEAK1", "LEAK2"]
+            ["LEAK2"]
                 .into_iter()
                 .filter(move |secret| text.contains(secret))
                 .map(move |secret| format!("{name}: {secret}"))
@@ -2431,4 +2431,273 @@ async fn editor_renames_an_agent_inside_the_workspace() {
     );
     let (status, _, _) = call(&app, "PUT", &uri, rename("mine"), Some(&member)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn monitor_headers_and_body_are_sealed_masked_and_kept_on_edit() {
+    use sqlx::Row;
+    let (app, state, token) = app_with_state(Vec::new()).await;
+    let (_, ada) = owner(&app, &token.unwrap()).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String, String)>(8);
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_addr = echo.local_addr().unwrap();
+    tokio::spawn(async move {
+        let app = Router::new().route(
+            "/echo",
+            axum::routing::any(move |headers: axum::http::HeaderMap, body: String| {
+                let tx = tx.clone();
+                async move {
+                    let header = |name: &str| {
+                        headers
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_owned()
+                    };
+                    let _ = tx
+                        .send((header("authorization"), header("x-trace"), body))
+                        .await;
+                    "ok"
+                }
+            }),
+        );
+        axum::serve(echo, app).await.unwrap();
+    });
+    let url = format!("http://{echo_addr}/echo");
+    let mut received = async || {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the check reaches the echo server")
+            .unwrap()
+    };
+    let monitor = |extra: Value| {
+        let mut body = json!({
+            "project_id": ada.project, "name": "Billing", "job_type": "http", "url": url,
+            "method": "POST", "timeout_ms": 2000, "failure_threshold": 1
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    let (status, created, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(monitor(json!({
+            "headers": [
+                {"name": "Authorization", "value": "Bearer TOKEN-A"},
+                {"name": "X-Trace", "value": "trace-1"}
+            ],
+            "body": "BODY-SECRET"
+        }))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        received().await,
+        (
+            "Bearer TOKEN-A".into(),
+            "trace-1".into(),
+            "BODY-SECRET".into()
+        )
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        created["headers"],
+        json!([
+            {"name": "Authorization", "has_value": true},
+            {"name": "X-Trace", "has_value": true}
+        ])
+    );
+    assert_eq!(created["has_body"], true);
+    assert_eq!(created["request_unreadable"], false);
+
+    let row = sqlx::query("SELECT headers_json, body FROM monitors WHERE id = $1")
+        .bind(&id)
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap();
+    for column in ["headers_json", "body"] {
+        let stored: String = row.try_get(column).unwrap();
+        assert!(stored.starts_with("v1:"), "{column}: {stored}");
+        assert!(
+            !stored.contains("TOKEN-A") && !stored.contains("BODY-SECRET"),
+            "{column}: {stored}"
+        );
+    }
+
+    let detail = format!("/api/monitors/{id}");
+    let (status, edited, _) = call(
+        &app,
+        "PUT",
+        &detail,
+        Some(monitor(
+            json!({ "headers": [{"name": "authorization"}], "body": "" }),
+        )),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(
+        edited["headers"],
+        json!([{"name": "authorization", "has_value": true}]),
+        "X-Trace was removed, Authorization kept its value"
+    );
+    assert_eq!(edited["has_body"], true, "a blank body keeps the saved one");
+    let (_, listed, _) = call(&app, "GET", "/api/monitors", None, Some(&ada)).await;
+    for response in [&created, &edited, &listed] {
+        let text = response.to_string();
+        assert!(
+            !text.contains("TOKEN-A") && !text.contains("BODY-SECRET"),
+            "{text}"
+        );
+    }
+
+    let (status, ran, _) = call(&app, "POST", &format!("{detail}/checks"), None, Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{ran}");
+    assert_eq!(
+        received().await,
+        ("Bearer TOKEN-A".into(), String::new(), "BODY-SECRET".into())
+    );
+
+    let (status, tested, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(monitor(
+            json!({ "monitor_id": id, "headers": [{"name": "Authorization", "value": ""}] }),
+        )),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tested}");
+    assert_eq!(tested["status"], "success", "{tested}");
+    assert_eq!(
+        received().await,
+        ("Bearer TOKEN-A".into(), String::new(), "BODY-SECRET".into()),
+        "an unsaved test of an existing monitor uses its saved values"
+    );
+    let elsewhere = "http://collector.example/steal";
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(monitor(json!({
+            "monitor_id": id, "url": elsewhere,
+            "headers": [{"name": "Authorization", "value": ""}]
+        }))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["fields"]["headers"], "Enter a value for the Authorization header.",
+        "saved values never go to another origin"
+    );
+    let (status, problem, _) = call(
+        &app,
+        "PUT",
+        &detail,
+        Some(monitor(
+            json!({ "url": elsewhere, "headers": [{"name": "Authorization"}], "body": "" }),
+        )),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["fields"]["headers"],
+        "Enter a value for the Authorization header."
+    );
+    let (status, problem, _) = call(
+        &app,
+        "PUT",
+        &detail,
+        Some(monitor(json!({
+            "url": elsewhere,
+            "headers": [{"name": "Authorization", "value": "Bearer NEW"}],
+            "body": ""
+        }))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["fields"]["body"],
+        "Enter the body again, or remove it. The URL now points to another site."
+    );
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/monitors/test",
+        Some(monitor(json!({ "headers": [{"name": "Authorization"}] }))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["fields"]["headers"],
+        "Enter a value for the Authorization header."
+    );
+
+    let (status, cleared, _) = call(
+        &app,
+        "PUT",
+        &detail,
+        Some(monitor(json!({ "headers": [], "clear_body": true }))),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["headers"], json!([]));
+    assert_eq!(cleared["has_body"], false);
+    call(&app, "POST", &format!("{detail}/checks"), None, Some(&ada)).await;
+    assert_eq!(
+        received().await,
+        (String::new(), String::new(), String::new())
+    );
+
+    let (status, problem, _) = call(
+        &app,
+        "POST",
+        "/api/monitors",
+        Some(monitor(
+            json!({ "url": "https://ops:hunter2@example.com/health" }),
+        )),
+        Some(&ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["fields"]["url"],
+        "Remove the user name and password from the URL. Send them in an Authorization header instead."
+    );
+
+    sqlx::query("UPDATE monitors SET headers_json = $1 WHERE id = $2")
+        .bind(r#"[{"name":"Authorization","value":"Bearer TOKEN-A"}]"#)
+        .bind(&id)
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    let (status, broken, _) =
+        call(&app, "POST", &format!("{detail}/checks"), None, Some(&ada)).await;
+    assert_eq!(status, StatusCode::OK, "{broken}");
+    assert_eq!(broken["request_unreadable"], true, "{broken}");
+    assert_eq!(broken["headers"], json!([]), "{broken}");
+    assert_eq!(broken["state"], "down", "{broken}");
+    assert!(
+        broken["recent"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("OWLEE_APP_KEY"),
+        "{broken}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "an unreadable request is never sent"
+    );
 }

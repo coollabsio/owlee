@@ -424,7 +424,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
         "/api/monitors",
         Some(json!({
             "project_id": app.project,
-            "name": "API", "job_type": "http", "url": "https://ops:hunter2@example.com/health?api_key=abc", "method": "POST",
+            "name": "API", "job_type": "http", "url": "https://example.com/health?api_key=abc", "method": "POST",
             "headers": [{"name": "Authorization", "value": "Bearer secret"}],
             "body": "{\"token\":\"secret\"}"
         })),
@@ -447,13 +447,10 @@ async fn members_read_monitors_without_request_headers_or_body() {
     .await;
     assert_eq!(
         admin.body["headers"],
-        json!([{"name": "Authorization", "value": "Bearer secret"}])
+        json!([{"name": "Authorization", "has_value": true}])
     );
-    assert_eq!(admin.body["body"], "{\"token\":\"secret\"}");
-    assert_eq!(
-        admin.body["url"],
-        "https://ops:hunter2@example.com/health?api_key=abc"
-    );
+    assert_eq!(admin.body["has_body"], true);
+    assert_eq!(admin.body["url"], "https://example.com/health?api_key=abc");
 
     let seen = call(
         &app.router,
@@ -466,7 +463,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
     .await;
     assert_eq!(seen.status, StatusCode::OK, "{}", seen.body);
     assert_eq!(seen.body["headers"], json!([]));
-    assert_eq!(seen.body["body"], "");
+    assert_eq!(seen.body["has_body"], false);
     assert_eq!(seen.body["url"], "https://example.com/health");
     let list = call(
         &app.router,
@@ -478,7 +475,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
     )
     .await;
     assert_eq!(list.body[0]["headers"], json!([]));
-    assert_eq!(list.body[0]["body"], "");
+    assert_eq!(list.body[0]["has_body"], false);
     assert_eq!(list.body[0]["url"], "https://example.com/health");
     let overview = call(
         &app.router,
@@ -490,7 +487,7 @@ async fn members_read_monitors_without_request_headers_or_body() {
     )
     .await;
     assert_eq!(overview.body["monitors"][0]["headers"], json!([]));
-    assert_eq!(overview.body["monitors"][0]["body"], "");
+    assert_eq!(overview.body["monitors"][0]["has_body"], false);
 }
 
 #[tokio::test]

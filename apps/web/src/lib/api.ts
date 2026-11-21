@@ -51,7 +51,8 @@ export type Check = {
   checked_at: string;
 };
 
-export type HeaderPair = { name: string; value: string };
+/** A saved request header. Its value never leaves the server. */
+export type SavedHeader = { name: string; has_value: boolean };
 export type Assertion = { type: string; compare?: string; target?: string | number; key?: string };
 
 export type Monitor = {
@@ -63,8 +64,10 @@ export type Monitor = {
   check_type: "http" | "tcp" | "postgres" | "mysql" | "redis";
   url: string;
   method: string;
-  headers: HeaderPair[];
-  body: string;
+  headers: SavedHeader[];
+  has_body: boolean;
+  /** The saved headers and body do not open with OWLEE_APP_KEY. */
+  request_unreadable: boolean;
   timeout_ms: number;
   interval_seconds: number;
   degraded_after_ms: number | null;

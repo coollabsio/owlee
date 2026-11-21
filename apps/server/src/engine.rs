@@ -36,6 +36,9 @@ impl Outcome {
     }
 }
 
+pub const UNREADABLE_REQUEST: &str = "The saved request headers and body do not open with OWLEE_APP_KEY. \
+     Restore the key the server used before, or edit the monitor and enter them again.";
+
 /// Longest check error that is stored. An agent chooses this text.
 const MAX_ERROR_BYTES: usize = 1024;
 
@@ -75,7 +78,16 @@ pub async fn execute(state: &AppState, id: Id) -> Result<(), AppError> {
 
 /// Probes and judges a monitor from this server without recording anything.
 pub async fn trial(state: &AppState, monitor: &Monitor) -> Result<Outcome, AppError> {
-    let probe = checker::probe(&state.http, &Job::from(monitor)).await;
+    let Some(request) = monitor.request.open(&state.config.app_key, monitor.id) else {
+        tracing::warn!(monitor = %monitor.id, "monitor request does not open with OWLEE_APP_KEY");
+        return Ok(Outcome {
+            status: CheckStatus::Failure,
+            status_code: None,
+            latency_ms: 0,
+            error: Some(UNREADABLE_REQUEST.to_owned()),
+        });
+    };
+    let probe = checker::probe(&state.http, &Job::new(monitor, request)).await;
     if probe.transport_error.is_some() && !state.connectivity.online().await {
         return Err(AppError::Offline);
     }

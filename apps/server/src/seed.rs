@@ -1,8 +1,11 @@
 use owlee_domain::{IncidentImpact, IncidentStatus, JobType, MonitorState};
-use owlee_platform::{Config, EnvironmentMode, Id, TimestampMillis};
+use owlee_platform::{AppKey, Config, EnvironmentMode, Id, TimestampMillis};
 
 use crate::error::AppError;
-use crate::repo::{self, Channel, Incident, IncidentUpdate, Maintenance, Monitor, Page};
+use crate::repo::{
+    self, Channel, Incident, IncidentUpdate, Maintenance, Monitor, MonitorRequest, Page,
+    SealedRequest,
+};
 use crate::state::{self, AppState};
 
 pub const DEMO_EMAIL: &str = "test@example.com";
@@ -43,6 +46,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
 
     let origin = state.config.public_origin.trim_end_matches('/');
     let api = monitor(
+        &state.config.app_key,
         scope.api_project_id,
         "Coolify API",
         "Public API and health endpoint for the Coolify control plane.",
@@ -58,6 +62,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         now,
     );
     let database = monitor(
+        &state.config.app_key,
         scope.api_project_id,
         "PostgreSQL",
         "Primary database accept path. A TCP connect is enough to call it reachable.",
@@ -73,6 +78,7 @@ pub async fn seed(state: &AppState) -> Result<bool, AppError> {
         now,
     );
     let worker = monitor(
+        &state.config.app_key,
         scope.website_project_id,
         "Webhook worker",
         "Background worker that delivers outbound hooks.",
@@ -198,6 +204,7 @@ async fn demo_scope(
 }
 
 fn monitor(
+    key: &AppKey,
     project_id: Id,
     name: &str,
     description: &str,
@@ -212,16 +219,16 @@ fn monitor(
     consecutive_failures: i32,
     now: TimestampMillis,
 ) -> Monitor {
+    let id = Id::new();
     Monitor {
-        id: Id::new(),
+        id,
         project_id,
         name: name.to_owned(),
         description: description.to_owned(),
         job_type,
         url: url.to_owned(),
         method: method.to_owned(),
-        headers: Vec::new(),
-        body: String::new(),
+        request: SealedRequest::seal(key, id, &MonitorRequest::default()),
         timeout_ms,
         interval_seconds,
         degraded_after_ms,
