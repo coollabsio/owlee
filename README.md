@@ -251,6 +251,15 @@ pg_dump --format=custom --file=owlee.dump "$OWLEE_DATABASE_URL"
 pg_restore --clean --if-exists --no-owner --dbname="$OWLEE_DATABASE_URL" owlee.dump
 ```
 
+### SQL shell
+
+`owlee db` opens the configured database in an interactive shell: `sqlite3` for SQLite, `psql` for Postgres. The Docker image has both clients. The Postgres password goes to `psql` in `PGPASSWORD`, not on the command line. Changes that you make in the shell skip all of Owlee's checks. Make a backup first.
+
+```bash
+docker exec -it owlee /owlee db
+docker compose -f deploy/compose.yaml exec owlee /owlee db
+```
+
 ### Disk space
 
 Every hour, Owlee deletes monitor check results older than `OWLEE_CHECK_RETENTION_DAYS` (14, at least 1), and error and analytics rows older than their own retention settings. After that pass, SQLite returns the freed pages to the file system with `PRAGMA incremental_vacuum`, so the file shrinks. This works on a database file that Owlee 0.1.0 or later created. An older file keeps its size and reuses the free pages for new rows. On Postgres, autovacuum makes the space of deleted rows reusable.

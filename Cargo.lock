@@ -1529,6 +1529,7 @@ dependencies = [
  "owlee-errors",
  "owlee-insights",
  "owlee-platform",
+ "percent-encoding",
  "rand 0.8.8",
  "reqwest",
  "serde",

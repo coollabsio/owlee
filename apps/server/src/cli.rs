@@ -58,6 +58,13 @@ enum Command {
         /// File to write. Must not exist yet.
         path: PathBuf,
     },
+    /// Open an interactive SQL shell on the database: `psql` for Postgres, `sqlite3` for SQLite.
+    /// Changes made in the shell skip every Owlee check. Make a backup first.
+    Db {
+        /// SQLite database file. Ignored when a Postgres URL is configured.
+        #[arg(long)]
+        database: Option<PathBuf>,
+    },
     /// Exit successfully when /api/health/ready answers on the configured port.
     Healthcheck,
     /// One-time setup URL for the first owner account.
@@ -245,6 +252,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 human_size(bytes)
             );
         }
+        Command::Db { database } => {
+            let config = load(None, database)?;
+            database_shell(&config)?;
+        }
         Command::Healthcheck => {
             let config = Config::from_env()?;
             let url = format!("http://127.0.0.1:{}/api/health/ready", config.port);
@@ -293,6 +304,51 @@ async fn backup(config: &Config, target: &Path) -> Result<u64, Box<dyn std::erro
         .await?;
     database.pool().close().await;
     Ok(std::fs::metadata(target)?.len())
+}
+
+fn database_shell(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let mut shell = database_shell_command(config)?;
+    let program = shell.get_program().to_string_lossy().into_owned();
+    let failed =
+        |error: std::io::Error| format!("could not start {program}: {error}. Is it installed?");
+    // Replace this process, so Ctrl+C reaches only the shell (it cancels the query, not the session).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(failed(shell.exec()).into())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = shell.status().map_err(failed)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{program} exited with {status}").into())
+        }
+    }
+}
+
+/// The password goes in `PGPASSWORD`, not the arguments, so other users cannot read it from the process list.
+fn database_shell_command(
+    config: &Config,
+) -> Result<std::process::Command, Box<dyn std::error::Error>> {
+    let Some(database_url) = &config.database_url else {
+        let mut shell = std::process::Command::new("sqlite3");
+        shell.arg(&config.database_path);
+        return Ok(shell);
+    };
+    let mut url = reqwest::Url::parse(database_url)?;
+    let mut shell = std::process::Command::new("psql");
+    if let Some(password) = url.password() {
+        let password = percent_encoding::percent_decode_str(password)
+            .decode_utf8()?
+            .into_owned();
+        shell.env("PGPASSWORD", password);
+        url.set_password(None)
+            .map_err(|()| "invalid database URL")?;
+    }
+    shell.arg(url.as_str());
+    Ok(shell)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -448,6 +504,24 @@ fn load(listen: Option<SocketAddr>, database: Option<PathBuf>) -> Result<Config,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_shell_keeps_the_postgres_password_out_of_the_arguments() {
+        let config = Config {
+            database_url: Some("postgres://owlee:p%40ss@db:5432/owlee?sslmode=require".to_owned()),
+            ..Config::development()
+        };
+        let shell = database_shell_command(&config).unwrap();
+        assert_eq!(shell.get_program(), "psql");
+        let args: Vec<_> = shell.get_args().collect();
+        assert_eq!(args, ["postgres://owlee@db:5432/owlee?sslmode=require"]);
+        let envs: Vec<_> = shell.get_envs().collect();
+        assert_eq!(envs, [("PGPASSWORD".as_ref(), Some("p@ss".as_ref()))]);
+
+        let shell = database_shell_command(&Config::development()).unwrap();
+        assert_eq!(shell.get_program(), "sqlite3");
+        assert_eq!(shell.get_args().collect::<Vec<_>>(), ["data/owlee.sqlite"]);
+    }
 
     #[test]
     fn parses_setup_token_rotate() {

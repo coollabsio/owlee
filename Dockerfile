@@ -23,7 +23,7 @@ RUN cargo build --locked --release -p owlee-server
 
 FROM debian:bookworm-20261104-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates sqlite3 postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 65532 --user-group --create-home --home-dir /var/lib/owlee owlee \
     && mkdir -p /var/lib/owlee \

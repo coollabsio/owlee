@@ -33,6 +33,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "h
 mime_guess = "2"
 rand.workspace = true
 uuid.workspace = true
+percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
