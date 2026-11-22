@@ -7,6 +7,10 @@ updates:
     groups:
       cargo:
         update-types: [minor, patch]
+    ignore:
+      # Major versions need their own change and testing; do them by hand.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
 
   # Dependabot's bun support reads apps/web/bun.lock.
   - package-ecosystem: bun
@@ -16,11 +20,21 @@ updates:
     groups:
       web:
         update-types: [minor, patch]
+    ignore:
+      # Major versions need their own change and testing; do them by hand.
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    ignore:
+      # The CI toolchain follows rust-toolchain.toml. Bump both together.
+      - dependency-name: dtolnay/rust-toolchain
 
   - package-ecosystem: docker
     directory: /
