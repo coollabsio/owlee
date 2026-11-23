@@ -1047,3 +1047,40 @@ async fn a_link_hostname_redirects_only_after_its_txt_record_verifies() {
     assert!(!status.is_redirection(), "{status}");
     assert_eq!(location, None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_accepts_concurrent_pageviews() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = testing_config(dir.path().join("owlee.sqlite"));
+    config.ingest.analytics_rate_site_burst = 1_000;
+    config.ingest.analytics_rate_ip_burst = 1_000;
+    let state = boot(config).await.unwrap();
+    let app = router(state.clone());
+    let editor = editor_session(&state).await.unwrap();
+    let site = create_site(&app, &editor, "coolify.io").await;
+    let public_id = site["public_id"].as_str().unwrap().to_owned();
+
+    // A deferred transaction reads, then writes, so concurrent events failed with
+    // "database is locked" and answered 500.
+    let statuses = futures_util::future::join_all((0..64).map(|i| {
+        let app = app.clone();
+        let public_id = public_id.clone();
+        async move {
+            let agent = format!("{BROWSER} Visitor/{i}");
+            let body = json!({"site": public_id, "type": "pageview", "url": format!("https://coolify.io/{i}")});
+            call(&app, "POST", "/api/receive", Some(body), None, Some(&agent)).await.0
+        }
+    }))
+    .await;
+    assert!(
+        statuses.iter().all(|s| *s == StatusCode::ACCEPTED),
+        "{statuses:?}"
+    );
+
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM insight_events WHERE site_id = $1")
+        .bind(site["id"].as_str().unwrap())
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(stored, 64);
+}

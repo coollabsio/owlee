@@ -20,6 +20,7 @@ pub use config::{
 };
 pub use db::{
     Backend, Database, DatabaseConfig, DatabaseError, Migration, MigrationError, MigrationRunner,
+    OptionalF64,
 };
 pub use id::{Id, ParseIdError};
 pub use ipnet::IpNet;

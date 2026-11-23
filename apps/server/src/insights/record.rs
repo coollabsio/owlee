@@ -1,10 +1,12 @@
 //! Writes one analytics event and the daily aggregates it belongs to.
 use owlee_insights::{DataValue, Incoming, VISIT_IDLE, day, visit_id};
-use owlee_platform::{Database, Id};
+use owlee_platform::{Database, Id, OptionalF64};
 use sqlx::{Any, Transaction};
 
 pub async fn record(db: &Database, event: Incoming) -> Result<(), sqlx::Error> {
-    let mut tx = db.begin().await?;
+    // IMMEDIATE: `visit()` reads, then writes. A deferred SQLite transaction cannot upgrade to
+    // a write lock under concurrent ingest and fails with "database is locked".
+    let mut tx = db.begin_immediate().await?;
     insert(&mut tx, event).await?;
     tx.commit().await
 }
@@ -142,11 +144,11 @@ async fn insert(tx: &mut Transaction<'_, Any>, event: Incoming) -> Result<(), sq
     .bind(&event.screen)
     .bind(&event.language)
     .bind(&event.metadata)
-    .bind(event.vitals.lcp)
-    .bind(event.vitals.inp)
-    .bind(event.vitals.cls)
-    .bind(event.vitals.fcp)
-    .bind(event.vitals.ttfb)
+    .bind(OptionalF64(event.vitals.lcp))
+    .bind(OptionalF64(event.vitals.inp))
+    .bind(OptionalF64(event.vitals.cls))
+    .bind(OptionalF64(event.vitals.fcp))
+    .bind(OptionalF64(event.vitals.ttfb))
     .execute(&mut **tx)
     .await?;
     if let Some(site) = &event.site_id {
@@ -343,7 +345,7 @@ async fn write_data(
     .bind(timestamp)
     .bind(&item.key)
     .bind(&item.string_value)
-    .bind(item.number_value)
+    .bind(OptionalF64(item.number_value))
     .bind(item.data_type)
     .execute(&mut **tx)
     .await?;

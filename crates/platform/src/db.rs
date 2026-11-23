@@ -444,6 +444,56 @@ CREATE TABLE widgets (
         assert_round_trip(&database).await;
     }
 
+    /// One connection, so the second insert reuses the statement the NULL prepared.
+    async fn assert_optional_f64_after_null(database: &Database) {
+        let mut connection = database.pool().acquire().await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS optional_floats")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE optional_floats (v DOUBLE PRECISION)")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        for value in [None, Some(1.5), None, Some(0.25)] {
+            sqlx::query("INSERT INTO optional_floats (v) VALUES ($1)")
+                .bind(OptionalF64(value))
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+        let sum: f64 = sqlx::query_scalar("SELECT SUM(v) FROM optional_floats")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert!((sum - 1.75).abs() < f64::EPSILON);
+        sqlx::query("DROP TABLE optional_floats")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_binds_a_float_after_a_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = Database::connect(&DatabaseConfig::sqlite(dir.path().join("t.sqlite")))
+            .await
+            .unwrap();
+        assert_optional_f64_after_null(&database).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_binds_a_float_after_a_null_when_configured() {
+        let url = match std::env::var("OWLEE_TEST_POSTGRES_URL") {
+            Ok(url) if url.starts_with("postgres") => url,
+            _ => return,
+        };
+        let database = Database::connect(&DatabaseConfig::postgres(url))
+            .await
+            .unwrap();
+        assert_optional_f64_after_null(&database).await;
+    }
+
     async fn pragma(database: &Database, name: &str) -> i64 {
         sqlx::query(&format!("PRAGMA {name}"))
             .fetch_one(database.pool())
@@ -488,5 +538,32 @@ CREATE TABLE widgets (
             statements(sql),
             vec!["CREATE TABLE a (id TEXT)", "CREATE TABLE b (id TEXT)"]
         );
+    }
+}
+
+/// An optional `DOUBLE PRECISION` parameter. Bind this instead of `Option<f64>`.
+///
+/// sqlx 0.8.6 swaps the NULL kinds of `f32` and `f64` in `AnyArguments` (`sqlx-core/src/any/arguments.rs`),
+/// so `None::<f64>` reaches Postgres as a `float4` NULL. Postgres caches the statement with a `float4`
+/// parameter and then rejects the next real `f64` with "incorrect binary data format". `None::<f32>`
+/// takes the swapped path and arrives as a `float8` NULL. SQLite accepts both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OptionalF64(pub Option<f64>);
+
+impl sqlx::Type<Any> for OptionalF64 {
+    fn type_info() -> sqlx::any::AnyTypeInfo {
+        <f64 as sqlx::Type<Any>>::type_info()
+    }
+}
+
+impl<'q> sqlx::Encode<'q, Any> for OptionalF64 {
+    fn encode_by_ref(
+        &self,
+        buf: &mut <Any as sqlx::Database>::ArgumentBuffer<'q>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        match self.0 {
+            Some(value) => <f64 as sqlx::Encode<'q, Any>>::encode_by_ref(&value, buf),
+            None => <Option<f32> as sqlx::Encode<'q, Any>>::encode_by_ref(&None, buf),
+        }
     }
 }
