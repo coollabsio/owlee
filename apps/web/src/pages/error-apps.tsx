@@ -7,8 +7,8 @@ import { type Column, DataTable } from "@/components/data-table";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, GuideStep } from "@/components/setup-guide";
-import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge, useCopy } from "@/components/ui";
-import { api, type ErrorApp } from "@/lib/api";
+import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge, Switch, Textarea, useCopy } from "@/components/ui";
+import { api, ApiError, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformGuide, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
 import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
@@ -265,6 +265,7 @@ export function ErrorAppDetailPage() {
       <SetupGuide app={data} open={!receiving || showGuide} onToggle={receiving ? () => setShowGuide((value) => !value) : undefined} />
       <DsnCard dsn={data.dsn} />
       <AppQuota key={String(data.quotaOverride ?? "inherit")} app={data} />
+      <IngestProtection key={JSON.stringify([data.allowedDomains, data.inboundFilters, data.spikeProtection])} app={data} />
       <ConfirmDialog
         open={confirming}
         title="Delete app?"
@@ -429,6 +430,72 @@ function AppQuota({ app }: { app: ErrorApp }) {
         ) : null}
       </form> : null}
       {save.error ? <p className="field-error">{(save.error as Error).message}</p> : null}
+    </LayerCard>
+  );
+}
+
+function IngestProtection({ app }: { app: ErrorApp }) {
+  const client = useQueryClient();
+  const canEdit = useCanEdit();
+  const [domains, setDomains] = useState(app.allowedDomains.join("\n"));
+  const [filters, setFilters] = useState(app.inboundFilters);
+  const [spike, setSpike] = useState(app.spikeProtection);
+  const save = useMutation({
+    mutationFn: () =>
+      api<ErrorApp>(`/api/error-apps/${app.id}/protection`, {
+        method: "PUT",
+        body: JSON.stringify({ allowedDomains: domains.split("\n"), inboundFilters: filters, spikeProtection: spike }),
+      }),
+    onSuccess: (data) => client.setQueryData(["app", app.id], data),
+  });
+  const fields = save.error instanceof ApiError ? (save.error.fields ?? {}) : {};
+  const toggle = (id: string, on: boolean) => setFilters((current) => (on ? [...current, id] : current.filter((value) => value !== id)));
+  return (
+    <LayerCard title="Ingest protection" description="Keeps noise and floods from filling issues and spending the daily cap.">
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save.mutate();
+        }}
+      >
+        <Field
+          label="Allowed domains"
+          hint="One per line. A domain also allows its subdomains. Empty allows every origin. Requests without an Origin, such as from server SDKs, always pass."
+          error={fields.allowed_domains}
+        >
+          <Textarea rows={3} placeholder="example.com" value={domains} readOnly={!canEdit} onChange={(event) => setDomains(event.target.value)} />
+        </Field>
+        <div className="flex flex-col gap-3">
+          <span className="text-[0.8125rem] font-medium text-[var(--ui-fg)]">Inbound filters</span>
+          {app.filterOptions.map((option) => (
+            <div key={option.id} className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[0.8125rem] text-[var(--ui-fg)]">{option.label}</p>
+                <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">{option.description}</p>
+              </div>
+              <Switch aria-label={option.label} checked={filters.includes(option.id)} disabled={!canEdit} onCheckedChange={(on) => toggle(option.id, on)} />
+            </div>
+          ))}
+          {fields.inbound_filters ? <p className="field-error">{fields.inbound_filters}</p> : null}
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-[0.8125rem] text-[var(--ui-fg)]">Spike protection</p>
+            <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
+              {app.usedThisHour.toLocaleString()} of {app.spikeLimit.toLocaleString()} this hour. The hourly limit is the larger of 1/24 of the daily cap
+              and three times the average plus three standard deviations of the past week's hours.
+            </p>
+          </div>
+          <Switch aria-label="Spike protection" checked={spike} disabled={!canEdit} onCheckedChange={setSpike} />
+        </div>
+        {canEdit ? (
+          <div>
+            <Button variant="highlighted" type="submit" disabled={save.isPending}>{save.isPending ? <><Spinner />Saving…</> : "Save protection"}</Button>
+          </div>
+        ) : null}
+        {save.error && !fields.allowed_domains && !fields.inbound_filters ? <ErrorText error={save.error} /> : null}
+      </form>
     </LayerCard>
   );
 }

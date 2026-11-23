@@ -42,6 +42,8 @@ const DROP_REASONS: Record<DropReason, string> = {
   malformed: "the event was not valid",
   origin_not_allowed: "the page origin is not allowed",
   unverified_domain: "the domain is not verified",
+  filtered: "an inbound filter matched",
+  spike_protection: "spike protection limit for this hour",
   storage_failed: "the server could not store it",
 };
 

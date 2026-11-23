@@ -521,6 +521,8 @@ export type DropReason =
   | "malformed"
   | "origin_not_allowed"
   | "unverified_domain"
+  | "filtered"
+  | "spike_protection"
   | "storage_failed";
 
 /** Counts since the server started. */
@@ -626,7 +628,17 @@ export type ErrorApp = {
   eventCount: number;
   lastEventAt: string | null;
   intake: IntakeCounts;
+  /** Empty allows every origin. */
+  allowedDomains: string[];
+  inboundFilters: string[];
+  filterOptions: InboundFilterOption[];
+  spikeProtection: boolean;
+  /** The most events this app may store in the current UTC hour. */
+  spikeLimit: number;
+  usedThisHour: number;
 };
+
+export type InboundFilterOption = { id: string; label: string; description: string };
 
 export type Issue = {
   id: string;
