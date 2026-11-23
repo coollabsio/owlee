@@ -1,5 +1,5 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown } from "reicon-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Code, SkipNext, SkipPrev } from "reicon-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
@@ -161,11 +161,11 @@ export function IssueDetailPage() {
     document.getElementById(`event-${key}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   const toggle = (key: SectionKey) => () => setOpen((state) => ({ ...state, [key]: !state[key] }));
-  const jumps: { label: string; target?: string | null }[] = [
-    { label: "First", target: data.firstEventId },
-    { label: "Older", target: neighbors.data?.olderId },
-    { label: "Newer", target: neighbors.data?.newerId },
-    { label: "Latest", target: data.latestEventId },
+  const jumps: { label: string; icon: typeof ChevronLeft; target?: string | null }[] = [
+    { label: "First event", icon: SkipPrev, target: data.firstEventId },
+    { label: "Older event", icon: ChevronLeft, target: neighbors.data?.olderId },
+    { label: "Newer event", icon: ChevronRight, target: neighbors.data?.newerId },
+    { label: "Latest event", icon: SkipNext, target: data.latestEventId },
   ];
 
   return (
@@ -317,19 +317,21 @@ export function IssueDetailPage() {
                 title={event ? `Event ${event.eventId.slice(0, 8)}` : "Event"}
                 actions={
                   <>
-                    {jumps.map((jump) => (
-                      <Button
-                        key={jump.label}
-                        size="sm"
-                        disabled={!jump.target || jump.target === event?.eventId}
-                        onClick={() => jump.target && openEvent(jump.target)}
+                    {jumps.map(({ label, icon: Icon, target }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className="icon-button"
+                        aria-label={label}
+                        disabled={!target || target === event?.eventId}
+                        onClick={() => target && openEvent(target)}
                       >
-                        {jump.label}
-                      </Button>
+                        <Icon className="size-4" aria-hidden="true" />
+                      </button>
                     ))}
-                    <Button size="sm" disabled={!event} onClick={() => reveal("raw")}>
-                      JSON
-                    </Button>
+                    <button type="button" className="icon-button" aria-label="Raw JSON" disabled={!event} onClick={() => reveal("raw")}>
+                      <Code className="size-4" aria-hidden="true" />
+                    </button>
                   </>
                 }
               >

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { ChevronDown } from "reicon-react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
@@ -9,7 +10,7 @@ import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformGuide, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
-import { fullTime, intakeSummary, timeAgo } from "@/lib/utils";
+import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
 export function ErrorAppsPage() {
@@ -265,13 +266,7 @@ export function ErrorAppDetailPage() {
           </p>
         </LayerCard>
       )}
-      {receiving && !showGuide ? (
-        <div>
-          <Button onClick={() => setShowGuide(true)}>Show setup guide</Button>
-        </div>
-      ) : (
-        <SetupGuide app={data} onHide={receiving ? () => setShowGuide(false) : undefined} />
-      )}
+      <SetupGuide app={data} open={!receiving || showGuide} onToggle={receiving ? () => setShowGuide((value) => !value) : undefined} />
       <DsnCard dsn={data.dsn} />
       <AppQuota key={String(data.quotaOverride ?? "inherit")} app={data} />
       <ConfirmDialog
@@ -288,47 +283,64 @@ export function ErrorAppDetailPage() {
   );
 }
 
-function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
+/* While the app has no events the guide stays open; after that it collapses like the issue page sections. */
+function SetupGuide({ app, open, onToggle }: { app: ErrorApp; open: boolean; onToggle?: () => void }) {
   const [platform, setPlatform] = useState<PlatformId>(isPlatformId(app.platform) ? app.platform : "other");
   const guide = guideFor(platform);
   const { copied, copy } = useCopy();
+  const heading = (
+    <div className="min-w-0 py-0.5">
+      <h2>Set up the SDK</h2>
+      {open ? <p>{`Three steps for ${guide.label}. Full reference in the official docs.`}</p> : null}
+    </div>
+  );
   return (
-    <LayerCard
-      title="Set up the SDK"
-      description={`Three steps for ${guide.label}. Full reference in the official docs.`}
-      actions={
-        <>
-          <div className="w-44">
-            <Select
-              aria-label="Platform"
-              value={platform}
-              onChange={setPlatform}
-              options={platformIds.map((id) => ({ value: id, label: platformGuides[id].label }))}
-            />
+    <section className="layer-card">
+      <header className={open ? undefined : "!pb-1"}>
+        {onToggle ? (
+          <button type="button" className="flex items-start gap-1.5 text-left" onClick={onToggle} aria-expanded={open}>
+            <ChevronDown className={cn("mt-1.5 size-3.5 shrink-0 text-[var(--ui-fg-faint)] transition-transform", !open && "-rotate-90")} aria-hidden="true" />
+            {heading}
+          </button>
+        ) : (
+          heading
+        )}
+        {open ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="w-44">
+              <Select
+                aria-label="Platform"
+                value={platform}
+                onChange={setPlatform}
+                options={platformIds.map((id) => ({ value: id, label: platformGuides[id].label }))}
+              />
+            </div>
+            <Button onClick={() => void copy(agentPrompt(app, guide))}>{copied ? "Copied" : "Copy AI prompt"}</Button>
+            <a className="button" href={guide.docs} target="_blank" rel="noreferrer">
+              Docs
+            </a>
           </div>
-          <Button onClick={() => void copy(agentPrompt(app, guide))}>{copied ? "Copied" : "Copy AI prompt"}</Button>
-          <a className="button" href={guide.docs} target="_blank" rel="noreferrer">
-            Docs
-          </a>
-          {onHide ? <Button onClick={onHide}>Hide</Button> : null}
-        </>
-      }
-    >
-      <ol className="flex flex-col gap-6">
-        <GuideStep number={1} title={`Install ${guide.sdk}`}>
-          <CodeBlock {...guide.install} />
-        </GuideStep>
-        <GuideStep number={2} title="Configure it with your DSN">
-          {guide.configure(app.dsn).map((block) => (
-            <CodeBlock key={block.code} {...block} />
-          ))}
-        </GuideStep>
-        <GuideStep number={3} title="Send a test error">
-          {guide.test ? <CodeBlock {...guide.test} /> : null}
-          <CodeBlock file={guide.test ? "No SDK at hand? Send one with curl" : "Send one with curl"} code={curlTest(app)} />
-        </GuideStep>
-      </ol>
-    </LayerCard>
+        ) : null}
+      </header>
+      {open ? (
+        <div className="layer-card-body">
+          <ol className="flex flex-col gap-6">
+            <GuideStep number={1} title={`Install ${guide.sdk}`}>
+              <CodeBlock {...guide.install} />
+            </GuideStep>
+            <GuideStep number={2} title="Configure it with your DSN">
+              {guide.configure(app.dsn).map((block) => (
+                <CodeBlock key={block.code} {...block} />
+              ))}
+            </GuideStep>
+            <GuideStep number={3} title="Send a test error">
+              {guide.test ? <CodeBlock {...guide.test} /> : null}
+              <CodeBlock file={guide.test ? "No SDK at hand? Send one with curl" : "Send one with curl"} code={curlTest(app)} />
+            </GuideStep>
+          </ol>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
