@@ -28,6 +28,11 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
             .analytics_retention_days
             .saturating_mul(86_400);
     prune_auth(&state.db, now.timestamp_millis()).await?;
+    // The spike baseline reads 7 days. One more covers the hour in progress.
+    sqlx::query("DELETE FROM error_hourly_usage WHERE hour < $1")
+        .bind(now.timestamp() - 8 * 86_400)
+        .execute(state.db.pool())
+        .await?;
     // Loading this month's salt deletes last month's, even with no analytics traffic.
     state
         .insights_salt

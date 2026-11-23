@@ -25,6 +25,7 @@ pub struct App {
     /// Empty allows every origin.
     pub allowed_domains: Vec<String>,
     pub inbound_filters: Vec<InboundFilter>,
+    pub spike_protection: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +93,7 @@ fn now() -> String {
 }
 
 const APP_COLUMNS: &str = "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, \
-     a.daily_quota, a.allowed_domains, a.inbound_filters";
+     a.daily_quota, a.allowed_domains, a.inbound_filters, a.spike_protection";
 
 /// The apps of a workspace, optionally of one project in it.
 pub async fn list_apps(
@@ -227,6 +228,7 @@ pub async fn create_app(
         daily_quota: None,
         allowed_domains: Vec::new(),
         inbound_filters: vec![InboundFilter::BrowserExtensions, InboundFilter::WebCrawlers],
+        spike_protection: true,
     })
 }
 
@@ -630,7 +632,7 @@ pub async fn edge_event_ids(
 
 pub struct Ingested {
     pub id: String,
-    /// `DailyQuota` when nothing new was stored.
+    /// `SpikeProtection` or `DailyQuota` when nothing new was stored.
     pub refused: Option<DropReason>,
     pub retry_after_secs: u64,
     /// Set when this event opened the issue or reopened a resolved one.
@@ -701,12 +703,31 @@ pub async fn ingest_event(
         }
     }
     let event_id = event_id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    // Daily first, so a spent cap answers with the longer back-off. Either
+    // refusal rolls back, so a refused event spends neither counter.
     if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &app.id, quota).await? {
         tx.rollback().await?;
         return Ok(Ingested {
             id: String::new(),
             refused: Some(DropReason::DailyQuota),
             retry_after_secs: crate::quota::secs_until_utc_midnight(),
+            alert: None,
+        });
+    }
+    // Every app counts its hours, so turning spike protection on finds a baseline.
+    let hour = crate::quota::current_hour();
+    let hour_limit = if app.spike_protection {
+        let (sum, sum_sq) = crate::quota::hour_baseline(&mut *tx, &app.id, hour).await?;
+        crate::quota::spike_limit(sum, sum_sq, quota)
+    } else {
+        i64::MAX
+    };
+    if !crate::quota::reserve_hour(&mut *tx, &app.id, hour, hour_limit).await? {
+        tx.rollback().await?;
+        return Ok(Ingested {
+            id: String::new(),
+            refused: Some(DropReason::SpikeProtection),
+            retry_after_secs: crate::quota::secs_until_next_hour(),
             alert: None,
         });
     }
@@ -872,6 +893,7 @@ fn app_from_row(row: &sqlx::any::AnyRow) -> Result<App, AppError> {
             .map(str::to_owned)
             .collect(),
         inbound_filters: super::filter::parse_list(&row.try_get::<String, _>("inbound_filters")?),
+        spike_protection: row.try_get::<i64, _>("spike_protection")? != 0,
     })
 }
 
@@ -897,15 +919,17 @@ pub async fn set_protection(
     id: &str,
     allowed_domains: &[String],
     inbound_filters: &[InboundFilter],
+    spike_protection: bool,
 ) -> Result<App, AppError> {
     let app = get_app(db, workspace_id, id).await?;
     let sql = statement(
         db,
-        "UPDATE error_apps SET allowed_domains = ?, inbound_filters = ? WHERE id = ?",
+        "UPDATE error_apps SET allowed_domains = ?, inbound_filters = ?, spike_protection = ? WHERE id = ?",
     );
     sqlx::query(&sql)
         .bind(allowed_domains.join("\n"))
         .bind(super::filter::to_list(inbound_filters))
+        .bind(i64::from(spike_protection))
         .bind(&app.id)
         .execute(db.pool())
         .await?;

@@ -18,6 +18,7 @@ pub enum DropReason {
     OriginNotAllowed,
     UnverifiedDomain,
     Filtered,
+    SpikeProtection,
     StorageFailed,
 }
 

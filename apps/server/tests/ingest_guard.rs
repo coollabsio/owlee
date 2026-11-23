@@ -249,6 +249,7 @@ async fn exercise(config: Config) {
     protection_settings(config.clone()).await;
     allowed_domains(config.clone()).await;
     inbound_filters(config.clone()).await;
+    spike_protection(config.clone()).await;
     txt_verification(config.clone()).await;
     login_is_limited(config.clone()).await;
     wrong_guesses_do_not_block_the_right_password(config).await;
@@ -1070,6 +1071,8 @@ async fn protection_settings(config: Config) {
         view.body["inboundFilters"],
         json!(["browser_extensions", "web_crawlers"])
     );
+    assert_eq!(view.body["spikeProtection"], true);
+    assert_eq!(view.body["usedThisHour"], 0);
     assert_eq!(view.body["filterOptions"][3]["id"], "legacy_browsers");
 
     let saved = put_protection(
@@ -1078,7 +1081,8 @@ async fn protection_settings(config: Config) {
         &cookie,
         json!({
             "allowedDomains": ["https://Shop.Example.com/path", "shop.example.com", " ", "*"],
-            "inboundFilters": ["localhost", "localhost"]
+            "inboundFilters": ["localhost", "localhost"],
+            "spikeProtection": false
         }),
     )
     .await;
@@ -1088,12 +1092,13 @@ async fn protection_settings(config: Config) {
         json!(["shop.example.com", "*"])
     );
     assert_eq!(saved.body["inboundFilters"], json!(["localhost"]));
+    assert_eq!(saved.body["spikeProtection"], false);
 
     let unknown = put_protection(
         &app,
         &id,
         &cookie,
-        json!({"allowedDomains": [], "inboundFilters": ["nope"]}),
+        json!({"allowedDomains": [], "inboundFilters": ["nope"], "spikeProtection": true}),
     )
     .await;
     assert_eq!(
@@ -1107,7 +1112,7 @@ async fn protection_settings(config: Config) {
         &app,
         &id,
         &cookie,
-        json!({"allowedDomains": many, "inboundFilters": []}),
+        json!({"allowedDomains": many, "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(
@@ -1120,7 +1125,7 @@ async fn protection_settings(config: Config) {
         &app,
         &id,
         &cookie,
-        json!({"allowedDomains": ["shop example.com"], "inboundFilters": []}),
+        json!({"allowedDomains": ["shop example.com"], "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(
@@ -1142,7 +1147,7 @@ async fn protection_settings(config: Config) {
         &app,
         &id,
         &member,
-        json!({"allowedDomains": [], "inboundFilters": []}),
+        json!({"allowedDomains": [], "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
@@ -1156,7 +1161,7 @@ async fn protection_settings(config: Config) {
         &app,
         &id,
         &stranger,
-        json!({"allowedDomains": [], "inboundFilters": []}),
+        json!({"allowedDomains": [], "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.body);
@@ -1180,7 +1185,7 @@ async fn allowed_domains(config: Config) {
         &app,
         &id,
         &cookie,
-        json!({"allowedDomains": ["example.com"], "inboundFilters": []}),
+        json!({"allowedDomains": ["example.com"], "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
@@ -1244,7 +1249,7 @@ async fn inbound_filters(config: Config) {
         &app,
         &id,
         &cookie,
-        json!({"allowedDomains": [], "inboundFilters": []}),
+        json!({"allowedDomains": [], "inboundFilters": [], "spikeProtection": true}),
     )
     .await;
     assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
@@ -1254,6 +1259,71 @@ async fn inbound_filters(config: Config) {
     assert!(kept.body["id"].is_string(), "{}", kept.body);
     assert_eq!(stored_events(&state, &id).await, 1);
     assert_eq!(used_today(&state, &id).await, 1);
+}
+
+async fn spike_protection(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let capped = send(
+        &app,
+        "PUT",
+        &format!("/api/error-apps/{id}/quota"),
+        json!({"daily_quota": 48}).to_string().into_bytes(),
+        Some(&cookie),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(capped.status, StatusCode::OK, "{}", capped.body);
+    assert_eq!(capped.body["spikeLimit"], 2);
+    let body = || envelope(&event(&event_id(), "spike").to_string());
+
+    for _ in 0..2 {
+        let hit = post_event(&app, &id, &key, body()).await;
+        assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
+    }
+    let refused = post_event(&app, &id, &key, body()).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        refused.body
+    );
+    let limits = refused.rate_limits.unwrap_or_default();
+    assert!(
+        limits.ends_with(":error:project:spike_protection"),
+        "{limits}"
+    );
+    let retry: u64 = refused.retry_after.unwrap().parse().unwrap();
+    assert!((1..=3600).contains(&retry), "{retry}");
+    assert_eq!(used_today(&state, &id).await, 2);
+    assert_eq!(stored_events(&state, &id).await, 2);
+    let view = send(
+        &app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(view.body["usedThisHour"], 2);
+    assert_eq!(
+        view.body["intake"]["last_drop"]["reason"],
+        "spike_protection"
+    );
+
+    let off = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": [], "inboundFilters": [], "spikeProtection": false}),
+    )
+    .await;
+    assert_eq!(off.status, StatusCode::OK, "{}", off.body);
+    let allowed = post_event(&app, &id, &key, body()).await;
+    assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+    assert_eq!(used_today(&state, &id).await, 3);
 }
 
 async fn override_replaces_the_global_cap(config: Config) {

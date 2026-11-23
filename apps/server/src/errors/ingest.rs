@@ -285,11 +285,15 @@ async fn accept_event(
     .map_err(|error| error.to_string())?;
     if let Some(reason) = ingested.refused {
         state.error_intake.dropped(&app.id, reason);
+        let (scope, code) = match reason {
+            DropReason::SpikeProtection => ("project", "spike_protection"),
+            _ => ("organization", "quota_exceeded"),
+        };
         return Ok(Accepted::Limited(rate_limited(
             headers,
             ingested.retry_after_secs,
-            "organization",
-            "quota_exceeded",
+            scope,
+            code,
         )));
     }
     state.error_intake.stored(&app.id);

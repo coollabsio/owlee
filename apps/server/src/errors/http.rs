@@ -43,6 +43,9 @@ pub struct AppView {
     pub allowed_domains: Vec<String>,
     pub inbound_filters: Vec<&'static str>,
     pub filter_options: Vec<FilterInfo>,
+    pub spike_protection: bool,
+    pub spike_limit: i64,
+    pub used_this_hour: i64,
 }
 
 pub async fn list_apps(
@@ -108,6 +111,7 @@ pub async fn set_app_quota(
 pub struct ProtectionBody {
     pub allowed_domains: Vec<String>,
     pub inbound_filters: Vec<String>,
+    pub spike_protection: bool,
 }
 
 const MAX_ALLOWED_DOMAINS: usize = 50;
@@ -134,6 +138,7 @@ pub async fn set_app_protection(
         &id,
         &domains,
         &filters,
+        body.spike_protection,
     )
     .await?;
     Ok(Json(app_view(&state, app).await?))
@@ -182,6 +187,9 @@ async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
     let daily_quota = crate::quota::effective(global, app.daily_quota);
     let used_today = crate::quota::used(&state.db, crate::quota::ERROR, &app.id).await?;
     let activity = store::app_activity(&state.db, &app.id).await?;
+    let hour = crate::quota::current_hour();
+    let used_this_hour = crate::quota::hour_used(state.db.pool(), &app.id, hour).await?;
+    let (sum, sum_sq) = crate::quota::hour_baseline(state.db.pool(), &app.id, hour).await?;
     Ok(AppView {
         allowed_domains: app.allowed_domains,
         inbound_filters: app
@@ -190,6 +198,9 @@ async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
             .map(|filter| filter.id())
             .collect(),
         filter_options: InboundFilter::ALL.map(InboundFilter::info).into(),
+        spike_protection: app.spike_protection,
+        spike_limit: crate::quota::spike_limit(sum, sum_sq, daily_quota),
+        used_this_hour,
         dsn: store::build_dsn(&state.config.public_origin, &app.public_key, &app.id),
         quota_exceeded: used_today >= daily_quota,
         quota_override: app.daily_quota,

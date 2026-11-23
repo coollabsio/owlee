@@ -346,7 +346,13 @@ Issues still group on a fingerprint. `event_count` increases for every accepted 
 
 Each project may accept `OWLEE_ERROR_DAILY_QUOTA` events per UTC day (100,000) until the root user sets another number under Admin → Ingest quotas, or the project sets its own cap. One error a second all day is about 86,400, so normal use does not reach 100,000. The projects list and the dashboard show when today's counter has hit that cap, and when it resets (00:00 UTC).
 
-The daily cap panel of a project also shows how many events were stored and dropped since the server started, and the reason for the last drop (rate limit, daily cap, invalid event, or a storage error). Owlee counts only requests with a valid project key. The counts are kept in memory.
+The daily cap panel of a project also shows how many events were stored and dropped since the server started, and the reason for the last drop (rate limit, daily cap, origin not allowed, inbound filter, spike protection, invalid event, or a storage error). Owlee counts only requests with a valid project key. The counts are kept in memory.
+
+The **Ingest protection** panel of an app has three settings. Editors can change them.
+
+- **Allowed domains.** One host per line. A host also allows its subdomains, and `*` allows every origin. Empty allows every origin. The host comes from `Origin`, or from `Referer` when `Origin` is missing. A request with neither header passes, because server SDKs send neither. Any other host gets `403` before the app bucket is used. `localhost`, `127.0.0.1`, and `::1` pass when `OWLEE_INGEST_ALLOW_LOCALHOST` is on. The check stops other web pages, not scripts, because a script can send any `Origin`.
+- **Inbound filters.** A matching event answers `200` and is not stored. It does not count against the daily cap. **Browser extension errors** and **Web crawlers** are on for a new app. **Localhost** and **Legacy browsers** are off. The crawler and legacy browser filters read the `User-Agent` in the event's `request.headers`, which browser SDKs send.
+- **Spike protection.** On for a new app. It limits the events an app stores in one UTC hour to the larger of the daily cap / 24 and `3 * mean + 3 * sd` of the stored counts of the 168 hours before. An event over the limit answers `429` with `Retry-After` until the next hour and `X-Sentry-Rate-Limits: <secs>:error:project:spike_protection`. It does not count against the daily cap. Hourly counts older than 8 days are deleted.
 
 `examples/` has PHP, Node, browser, and Rust SDK programs. Set `SENTRY_DSN` to the project DSN.
 

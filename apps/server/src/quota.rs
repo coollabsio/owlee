@@ -90,6 +90,90 @@ where
     Ok(row.is_some())
 }
 
+/// Hours of history in the spike baseline.
+const BASELINE_HOURS: i64 = 168;
+
+/// The most events an app may store in one UTC hour, from the counts of the
+/// 168 hours before it: `max(ceil(cap / 24), ceil(3 * mean + 3 * sd))`.
+pub fn spike_limit(sum: i64, sum_sq: i64, daily_cap: i64) -> i64 {
+    let hours = BASELINE_HOURS as f64;
+    let mean = sum as f64 / hours;
+    let sd = (sum_sq as f64 / hours - mean * mean).max(0.0).sqrt();
+    let floor = (daily_cap.max(1) + 23) / 24;
+    floor.max((3.0 * mean + 3.0 * sd).ceil() as i64)
+}
+
+/// Unix second of the current UTC hour's start.
+pub fn current_hour() -> i64 {
+    let now = Utc::now().timestamp();
+    now - now.rem_euclid(3600)
+}
+
+pub fn secs_until_next_hour() -> u64 {
+    let now = Utc::now().timestamp();
+    u64::try_from(3600 - now.rem_euclid(3600)).unwrap_or(1)
+}
+
+pub async fn hour_used<'e, E>(executor: E, app_id: &str, hour: i64) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let row = sqlx::query("SELECT count FROM error_hourly_usage WHERE app_id = $1 AND hour = $2")
+        .bind(app_id)
+        .bind(hour)
+        .fetch_optional(executor)
+        .await?;
+    row.map(|row| row.try_get::<i64, _>("count"))
+        .transpose()
+        .map(|count| count.unwrap_or(0))
+}
+
+/// `sum(count)` and `sum(count * count)` over the baseline hours before `hour`.
+pub async fn hour_baseline<'e, E>(
+    executor: E,
+    app_id: &str,
+    hour: i64,
+) -> Result<(i64, i64), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let row = sqlx::query(
+        "SELECT CAST(COALESCE(SUM(count), 0) AS BIGINT) AS total, \
+                CAST(COALESCE(SUM(count * count), 0) AS BIGINT) AS squares \
+         FROM error_hourly_usage WHERE app_id = $1 AND hour >= $2 AND hour < $3",
+    )
+    .bind(app_id)
+    .bind(hour - BASELINE_HOURS * 3600)
+    .bind(hour)
+    .fetch_one(executor)
+    .await?;
+    Ok((row.try_get("total")?, row.try_get("squares")?))
+}
+
+/// The hourly twin of `reserve`. Returns false when the hour is at `limit`.
+pub async fn reserve_hour<'e, E>(
+    executor: E,
+    app_id: &str,
+    hour: i64,
+    limit: i64,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    let row = sqlx::query(
+        "INSERT INTO error_hourly_usage (app_id, hour, count) VALUES ($1, $2, 1) \
+         ON CONFLICT (app_id, hour) DO UPDATE SET count = error_hourly_usage.count + 1 \
+         WHERE error_hourly_usage.count < $3 \
+         RETURNING count",
+    )
+    .bind(app_id)
+    .bind(hour)
+    .bind(limit)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Apps and sites of the workspace, or of one project in it, that spent today's cap.
 pub async fn hits(
     db: &Database,
@@ -174,4 +258,27 @@ pub fn secs_until_utc_midnight() -> u64 {
         .unwrap_or(now.naive_utc());
     let seconds = (next - now.naive_utc()).num_seconds();
     u64::try_from(seconds.max(1)).unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spike_limit;
+
+    #[test]
+    fn spike_limit_uses_the_floor_for_quiet_apps() {
+        assert_eq!(spike_limit(0, 0, 48), 2);
+        assert_eq!(spike_limit(0, 0, 100_000), 4167);
+        assert_eq!(spike_limit(0, 0, 1), 1);
+        assert_eq!(spike_limit(168, 168, 24), 3);
+    }
+
+    #[test]
+    fn spike_limit_follows_a_busy_baseline() {
+        // 168 hours of 1000: mean 1000, sd 0.
+        assert_eq!(spike_limit(168_000, 168_000_000, 24_000), 3000);
+        // 84 hours of 2000 and 84 of 0: mean 1000, sd 1000.
+        assert_eq!(spike_limit(168_000, 336_000_000, 24_000), 6000);
+        // One hour of 168 in a quiet week: mean 1, sd sqrt(167).
+        assert_eq!(spike_limit(168, 168 * 168, 24), 42);
+    }
 }
