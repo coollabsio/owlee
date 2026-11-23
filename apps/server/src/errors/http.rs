@@ -6,11 +6,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::filter::{FilterInfo, InboundFilter};
-use super::store::{self, App, EventSummary, IssueRow};
+use super::store::{self, App, EventSummary, IssueRow, Visible};
 use crate::error::AppError;
 use crate::paging::PageParams;
 use crate::state::AppState;
 use crate::workspaces::{Member, ProjectFilter, require_project};
+
+/// The apps this request may see. Resolve it once per request.
+async fn visible(state: &AppState, member: &Member) -> Result<Visible, AppError> {
+    Visible::resolve(&state.db, member.workspace_id, member.limit.as_ref()).await
+}
+
+/// For routes that change an app by id: 404 when the token's limit hides it.
+async fn require_visible_app(state: &AppState, member: &Member, id: &str) -> Result<(), AppError> {
+    if member.limit.is_none() {
+        return Ok(());
+    }
+    let app = store::get_app(&state.db, member.workspace_id, id).await?;
+    visible(state, member).await?.require(&app.id)
+}
+
+/// For routes that change an issue by id or short id: 404 when the token's limit hides it.
+async fn require_visible_issue(
+    state: &AppState,
+    member: &Member,
+    id: &str,
+) -> Result<(), AppError> {
+    if member.limit.is_none() {
+        return Ok(());
+    }
+    let issue = store::get_issue(&state.db, member.workspace_id, id).await?;
+    visible(state, member).await?.require(&issue.app_id)
+}
 
 #[derive(Deserialize)]
 pub struct NewApp {
@@ -54,9 +81,10 @@ pub async fn list_apps(
     Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<Vec<AppView>>, AppError> {
     let project = filter.resolve(&state.db, member.workspace_id).await?;
+    let visible = visible(&state, &member).await?;
     let apps = store::list_apps(&state.db, member.workspace_id, project).await?;
     let mut views = Vec::with_capacity(apps.len());
-    for app in apps {
+    for app in apps.into_iter().filter(|app| visible.allows(&app.id)) {
         views.push(app_view(&state, app).await?);
     }
     Ok(Json(views))
@@ -69,6 +97,11 @@ pub async fn create_app(
 ) -> Result<Json<AppView>, AppError> {
     member.require_editor()?;
     require_project(&state.db, member.workspace_id, body.project_id).await?;
+    if let Some(limit) = &member.limit {
+        if !limit.projects.contains(&body.project_id) {
+            return Err(AppError::ResourceNotAllowed);
+        }
+    }
     let app = store::create_app(&state.db, body.project_id, &body.name, &body.platform).await?;
     Ok(Json(app_view(&state, app).await?))
 }
@@ -79,6 +112,7 @@ pub async fn get_app(
     Path(id): Path<String>,
 ) -> Result<Json<AppView>, AppError> {
     let app = store::get_app(&state.db, member.workspace_id, &id).await?;
+    visible(&state, &member).await?.require(&app.id)?;
     Ok(Json(app_view(&state, app).await?))
 }
 
@@ -102,6 +136,7 @@ pub async fn set_app_quota(
             ));
         }
     }
+    require_visible_app(&state, &member, &id).await?;
     let app = store::set_daily_quota(&state.db, member.workspace_id, &id, body.daily_quota).await?;
     Ok(Json(app_view(&state, app).await?))
 }
@@ -132,6 +167,7 @@ pub async fn set_app_protection(
             filters.push(filter);
         }
     }
+    require_visible_app(&state, &member, &id).await?;
     let app = store::set_protection(
         &state.db,
         member.workspace_id,
@@ -178,6 +214,7 @@ pub async fn delete_app(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     member.require_editor()?;
+    require_visible_app(&state, &member, &id).await?;
     store::delete_app(&state.db, member.workspace_id, &id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -302,13 +339,20 @@ pub async fn list_issues(
             ));
         }
     };
-    let environments =
-        store::list_environments(&state.db, member.workspace_id, &project_id, &filter.app_id)
-            .await?;
+    let visible = visible(&state, &member).await?;
+    let environments = store::list_environments(
+        &state.db,
+        member.workspace_id,
+        &visible,
+        &project_id,
+        &filter.app_id,
+    )
+    .await?;
     let page = store::list_issues(
         &state.db,
         &store::IssueQuery {
             workspace_id: member.workspace_id,
+            visible: &visible,
             project_id,
             app_id: filter.app_id,
             status,
@@ -336,6 +380,8 @@ pub async fn get_issue(
     Query(filter): Query<DetailFilter>,
 ) -> Result<Json<IssueDetail>, AppError> {
     let mut issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    let visible = visible(&state, &member).await?;
+    visible.require(&issue.app_id)?;
     let filter = filter.events();
     let analytics = store::issue_analytics(
         &state.db,
@@ -347,7 +393,8 @@ pub async fn get_issue(
     .await?;
     let (first_event_id, latest_event_id) = store::edge_event_ids(&state.db, &issue.id).await?;
     let environments =
-        store::list_environments(&state.db, member.workspace_id, "", &issue.app_id).await?;
+        store::list_environments(&state.db, member.workspace_id, &visible, "", &issue.app_id)
+            .await?;
     issue.period_event_count = analytics.period_events;
     issue.user_count = analytics.users;
     Ok(Json(IssueDetail {
@@ -397,6 +444,7 @@ pub async fn issue_events(
 ) -> Result<Json<EventPage>, AppError> {
     let paging = page.parse(EVENT_PAGE)?;
     let issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    visible(&state, &member).await?.require(&issue.app_id)?;
     let events = store::issue_events(&state.db, &issue.id, &filter.events(), &paging).await?;
     Ok(Json(EventPage {
         items: events.items,
@@ -420,6 +468,7 @@ pub async fn event_neighbors(
     Query(filter): Query<DetailFilter>,
 ) -> Result<Json<EventNeighbors>, AppError> {
     let issue = store::get_issue(&state.db, member.workspace_id, &id).await?;
+    visible(&state, &member).await?.require(&issue.app_id)?;
     let (older_id, newer_id) =
         store::event_neighbors(&state.db, &issue.id, &event_id, &filter.events()).await?;
     Ok(Json(EventNeighbors { older_id, newer_id }))
@@ -437,8 +486,15 @@ pub async fn bulk_update(
     Json(body): Json<BulkBody>,
 ) -> Result<Json<Value>, AppError> {
     member.require_editor()?;
-    let updated =
-        store::update_many_status(&state.db, member.workspace_id, &body.ids, &body.status).await?;
+    let visible = visible(&state, &member).await?;
+    let updated = store::update_many_status(
+        &state.db,
+        member.workspace_id,
+        &visible,
+        &body.ids,
+        &body.status,
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
@@ -449,6 +505,7 @@ pub async fn update_issue(
     Json(body): Json<StatusBody>,
 ) -> Result<Json<IssueRow>, AppError> {
     member.require_editor()?;
+    require_visible_issue(&state, &member, &id).await?;
     Ok(Json(
         store::update_issue_status(&state.db, member.workspace_id, &id, &body.status).await?,
     ))
@@ -459,7 +516,8 @@ pub async fn get_event(
     member: Member,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let payload = store::get_event(&state.db, member.workspace_id, &id).await?;
+    let visible = visible(&state, &member).await?;
+    let payload = store::get_event(&state.db, member.workspace_id, &visible, &id).await?;
     Ok(Json(normalized_payload(&payload)))
 }
 

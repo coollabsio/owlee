@@ -1,0 +1,859 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Owlee API",
+    "version": "1.0.0",
+    "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" },
+    "description": "The Owlee API for error tracking. Scripts, code generators, and AI tools call it with a personal API token.\n\n## Authentication\n\nSend an API token in the `Authorization` header: `Authorization: Bearer owl_...`. Create a token in **Settings > API & MCP**. Owlee shows a token once. A token belongs to one user in one workspace, and its workspace comes from the token. If the request has an `X-Owlee-Workspace` header that names another workspace, the result is 404. A token can never do more than its owner's current role allows. A missing, unknown, expired, or paused token gets 401.\n\n## Scopes\n\nA token has scopes of the form `<product>:<access>`. This version has `errors:read`, `errors:write`, and `errors:delete`. The request method gives the scope a route needs: `GET` and `HEAD` need `read`, `DELETE` needs `delete`, and the other methods need `write`. Each operation names its scope in `x-required-scope`. A token without that scope gets 403 with the code `missing_scope`. A member of the workspace (not an owner or admin) gets 403 `forbidden` on routes that change data.\n\n## Resource limits\n\nA token can be limited to some projects and error apps. A resource outside the limit is hidden: a list leaves it out, and a lookup by id returns 404, the same as a resource in another workspace. A limited token that creates an app outside its listed projects gets 403 `resource_not_allowed`.\n\n## Errors\n\nAn error response is a JSON problem document (RFC 9457 shape) with the fields `type` (a URI), `title`, `status` (the HTTP status), `code` (a stable machine-readable code such as `not_found`, `missing_scope`, `resource_not_allowed`, `validation_failed`, or `bad_request`), `detail` (a sentence for a person), and, on 422 only, `fields` (an object that maps each invalid field to a message). Branch on `code`, not on `title` or `detail`.\n\n## Paging\n\nList routes that page return `nextCursor`. Send it back as the `cursor` query parameter to get the next page. `nextCursor` is `null` on the last page. A cursor is opaque.\n\n## Versioning\n\nThis document is v1 of the API, at `/api/v1/openapi.json`. `/api/openapi.json` always serves the newest version. A new field or route raises the minor version of `info.version`. A removed or changed field or route makes a new major version with a new URL, and v1 stays while its routes exist.\n\n## MCP\n\nThe same token works with the remote MCP server at `/api/mcp` (Streamable HTTP, JSON responses). Its tools have the same names as the `operationId` of the matching operations here, such as `list_issues` and `update_issue_status`."
+  },
+  "servers": [{ "url": "/api" }],
+  "security": [{ "bearerAuth": [] }],
+  "tags": [
+    { "name": "Apps", "description": "Error tracking apps. An app has a DSN that a Sentry SDK sends events to." },
+    { "name": "Issues", "description": "Groups of events with the same fingerprint." },
+    { "name": "Events", "description": "Single error events." }
+  ],
+  "paths": {
+    "/error-apps": {
+      "get": {
+        "operationId": "list_error_apps",
+        "summary": "List error apps",
+        "description": "The error tracking apps in the workspace that the token can see, with issue and event counts.",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:read",
+        "parameters": [{ "$ref": "#/components/parameters/Project" }],
+        "responses": {
+          "200": {
+            "description": "The apps.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/App" } }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "operationId": "create_error_app",
+        "summary": "Create an error app",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/NewApp" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new app.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/App" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-apps/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "get": {
+        "operationId": "get_error_app",
+        "summary": "Get an error app",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:read",
+        "responses": {
+          "200": {
+            "description": "The app.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/App" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "delete_error_app",
+        "summary": "Delete an error app",
+        "description": "Deletes the app with its issues and events.",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:delete",
+        "responses": {
+          "200": {
+            "description": "The app is deleted.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Ok" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-apps/{id}/quota": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "put": {
+        "operationId": "set_error_app_quota",
+        "summary": "Set an app's daily event cap",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/QuotaBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The app with its new cap.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/App" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/error-apps/{id}/protection": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "put": {
+        "operationId": "set_error_app_protection",
+        "summary": "Set an app's ingest protection",
+        "description": "Replaces the allowed domains, the inbound filters, and the spike protection switch.",
+        "tags": ["Apps"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ProtectionBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The app with its new protection settings.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/App" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/error-issues": {
+      "get": {
+        "operationId": "list_issues",
+        "summary": "List issues",
+        "description": "Issues under the filters, at most `limit` per page (default and maximum 50).",
+        "tags": ["Issues"],
+        "x-required-scope": "errors:read",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only issues with this status. Default `all`.",
+            "schema": { "type": "string", "enum": ["unresolved", "resolved", "ignored", "all"] }
+          },
+          {
+            "name": "app_id",
+            "in": "query",
+            "description": "Only issues of this app.",
+            "schema": { "type": "string" }
+          },
+          { "$ref": "#/components/parameters/Project" },
+          { "$ref": "#/components/parameters/Search" },
+          { "$ref": "#/components/parameters/Environment" },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only issues seen in this period. Other values mean all time.",
+            "schema": { "type": "string", "enum": ["1h", "24h", "7d", "14d", "30d"] }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "The sort key. Default `last_seen`. `age` is the same as `first_seen`.",
+            "schema": {
+              "type": "string",
+              "enum": ["last_seen", "first_seen", "age", "events", "users", "title", "priority"]
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "The sort direction. The default is ascending for `first_seen` and `title`, and descending otherwise.",
+            "schema": { "type": "string", "enum": ["asc", "desc"] }
+          },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of issues.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/IssueFeed" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-issues/bulk": {
+      "post": {
+        "operationId": "bulk_update_issue_status",
+        "summary": "Set the status of many issues",
+        "description": "Ids the token cannot see are skipped.",
+        "tags": ["Issues"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/BulkBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The number of issues that changed.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/BulkResult" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/error-issues/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/IssueId" }],
+      "get": {
+        "operationId": "get_issue",
+        "summary": "Get an issue",
+        "description": "One issue with its latest event, histogram, and tags under the filters.",
+        "tags": ["Issues"],
+        "x-required-scope": "errors:read",
+        "parameters": [
+          { "$ref": "#/components/parameters/Range" },
+          { "$ref": "#/components/parameters/Environment" },
+          { "$ref": "#/components/parameters/Search" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The issue.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/IssueDetail" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "operationId": "update_issue_status",
+        "summary": "Set an issue's status",
+        "description": "Resolve, ignore, or reopen an issue. `unresolved` reopens it.",
+        "tags": ["Issues"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/StatusBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The issue with its new status.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Issue" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-issues/{id}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/IssueId" }],
+      "get": {
+        "operationId": "list_issue_events",
+        "summary": "List an issue's events",
+        "description": "The issue's events, newest first, at most `limit` per page (default and maximum 50).",
+        "tags": ["Events"],
+        "x-required-scope": "errors:read",
+        "parameters": [
+          { "$ref": "#/components/parameters/Range" },
+          { "$ref": "#/components/parameters/Environment" },
+          { "$ref": "#/components/parameters/Search" },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of events.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-issues/{id}/events/{event_id}/neighbors": {
+      "parameters": [
+        { "$ref": "#/components/parameters/IssueId" },
+        {
+          "name": "event_id",
+          "in": "path",
+          "required": true,
+          "description": "An event id of this issue.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "operationId": "get_event_neighbors",
+        "summary": "Get the events next to an event",
+        "description": "The older and newer event of the same issue under the filters.",
+        "tags": ["Events"],
+        "x-required-scope": "errors:read",
+        "parameters": [
+          { "$ref": "#/components/parameters/Range" },
+          { "$ref": "#/components/parameters/Environment" },
+          { "$ref": "#/components/parameters/Search" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The neighbor ids.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EventNeighbors" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-events/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "The event id.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "operationId": "get_event",
+        "summary": "Get an event",
+        "description": "One event with its stack trace, breadcrumbs, tags, and context.",
+        "tags": ["Events"],
+        "x-required-scope": "errors:read",
+        "responses": {
+          "200": {
+            "description": "The event.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Event" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "owl_ followed by 43 base64url characters",
+        "description": "A personal API token from Settings > API & MCP."
+      }
+    },
+    "parameters": {
+      "AppId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The app id.",
+        "schema": { "type": "string" }
+      },
+      "IssueId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "The issue id, or a short id such as `APP-12`.",
+        "schema": { "type": "string" }
+      },
+      "Project": {
+        "name": "project",
+        "in": "query",
+        "description": "Only resources of this project. An unknown id is 404.",
+        "schema": { "type": "string", "format": "uuid" }
+      },
+      "Search": {
+        "name": "q",
+        "in": "query",
+        "description": "Search text.",
+        "schema": { "type": "string" }
+      },
+      "Environment": {
+        "name": "environment",
+        "in": "query",
+        "description": "Only events from this environment, such as `production`.",
+        "schema": { "type": "string" }
+      },
+      "Range": {
+        "name": "range",
+        "in": "query",
+        "description": "The period for counts, the histogram, and events. Default `14d`.",
+        "schema": { "type": "string", "enum": ["1h", "24h", "7d", "14d", "30d"] }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "`nextCursor` from the previous page.",
+        "schema": { "type": "string" }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "description": "The page size, from 1 to 50. Default 50.",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request is not valid, such as an unknown status or a bad cursor. The code is `bad_request`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "Unauthorized": {
+        "description": "The token is missing, unknown, expired, or paused. The code is `unauthorized`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "Forbidden": {
+        "description": "The token lacks the scope (`missing_scope`), the owner's role cannot change data (`forbidden`), or the resource is outside the token's limit on create (`resource_not_allowed`).",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "NotFound": {
+        "description": "The resource does not exist, is in another workspace, or is outside the token's resource limit. The code is `not_found` or `workspace_not_found`.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "ValidationFailed": {
+        "description": "A field is not valid. The code is `validation_failed`, and `fields` names each field.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "required": ["type", "title", "status", "code", "detail"],
+        "properties": {
+          "type": { "type": "string", "format": "uri", "examples": ["https://owlee.io/problems/not-found"] },
+          "title": { "type": "string" },
+          "status": { "type": "integer" },
+          "code": { "type": "string", "examples": ["not_found", "missing_scope", "validation_failed"] },
+          "detail": { "type": "string" },
+          "fields": {
+            "type": "object",
+            "description": "On 422 only. Maps each invalid field to a message.",
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      },
+      "Ok": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": { "ok": { "const": true } }
+      },
+      "NewApp": {
+        "type": "object",
+        "required": ["name", "project_id"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "platform": { "type": "string", "description": "The SDK platform, such as `javascript` or `php`. Default empty." },
+          "project_id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "QuotaBody": {
+        "type": "object",
+        "required": ["daily_quota"],
+        "properties": {
+          "daily_quota": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100000000,
+            "description": "The app's daily event cap. `null` inherits the instance cap."
+          }
+        }
+      },
+      "ProtectionBody": {
+        "type": "object",
+        "required": ["allowedDomains", "inboundFilters", "spikeProtection"],
+        "properties": {
+          "allowedDomains": {
+            "type": "array",
+            "maxItems": 50,
+            "description": "Hosts that may send browser events, or `*`. A URL is cut to its host. Empty allows all.",
+            "items": { "type": "string" }
+          },
+          "inboundFilters": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/InboundFilterId" }
+          },
+          "spikeProtection": { "type": "boolean" }
+        }
+      },
+      "InboundFilterId": {
+        "type": "string",
+        "enum": ["browser_extensions", "web_crawlers", "localhost", "legacy_browsers"]
+      },
+      "FilterInfo": {
+        "type": "object",
+        "required": ["id", "label", "description"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/InboundFilterId" },
+          "label": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "DropReason": {
+        "type": "string",
+        "enum": [
+          "client_rate_limit",
+          "source_rate_limit",
+          "daily_quota",
+          "malformed",
+          "origin_not_allowed",
+          "unverified_domain",
+          "filtered",
+          "spike_protection",
+          "storage_failed"
+        ]
+      },
+      "IntakeCounts": {
+        "type": "object",
+        "description": "Events stored and dropped since the server started.",
+        "required": ["stored", "dropped", "last_drop"],
+        "properties": {
+          "stored": { "type": "integer", "minimum": 0 },
+          "dropped": { "type": "integer", "minimum": 0 },
+          "last_drop": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["at", "reason"],
+                "properties": {
+                  "at": { "type": "string", "format": "date-time" },
+                  "reason": { "$ref": "#/components/schemas/DropReason" }
+                }
+              },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "App": {
+        "type": "object",
+        "required": [
+          "id", "projectId", "name", "slug", "platform", "publicKey", "dsn", "createdAt",
+          "dailyQuota", "quotaOverride", "usedToday", "quotaExceeded", "resetsAt",
+          "issueCount", "eventCount", "lastEventAt", "intake", "allowedDomains",
+          "inboundFilters", "filterOptions", "spikeProtection", "spikeLimit", "usedThisHour"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "slug": { "type": "string" },
+          "platform": { "type": "string" },
+          "publicKey": { "type": "string" },
+          "dsn": { "type": "string", "description": "The DSN to configure in a Sentry SDK." },
+          "createdAt": { "type": "string" },
+          "dailyQuota": { "type": "integer", "description": "The cap in effect: the app's own cap or the instance cap." },
+          "quotaOverride": { "type": ["integer", "null"], "description": "The app's own cap, or `null` when it inherits." },
+          "usedToday": { "type": "integer" },
+          "quotaExceeded": { "type": "boolean" },
+          "resetsAt": { "type": "string", "format": "date-time" },
+          "issueCount": { "type": "integer" },
+          "eventCount": { "type": "integer" },
+          "lastEventAt": { "type": ["string", "null"] },
+          "intake": { "$ref": "#/components/schemas/IntakeCounts" },
+          "allowedDomains": { "type": "array", "items": { "type": "string" } },
+          "inboundFilters": { "type": "array", "items": { "$ref": "#/components/schemas/InboundFilterId" } },
+          "filterOptions": { "type": "array", "items": { "$ref": "#/components/schemas/FilterInfo" } },
+          "spikeProtection": { "type": "boolean" },
+          "spikeLimit": { "type": "integer", "description": "The hourly event limit that spike protection applies now." },
+          "usedThisHour": { "type": "integer" }
+        }
+      },
+      "IssueStatus": {
+        "type": "string",
+        "enum": ["unresolved", "resolved", "ignored"]
+      },
+      "Issue": {
+        "type": "object",
+        "required": [
+          "id", "appId", "appName", "appSlug", "title", "culprit", "status", "level",
+          "platform", "environment", "release", "firstSeen", "lastSeen", "eventCount",
+          "shortId", "unhandled", "priority", "userCount", "periodEventCount", "trend24h", "trend14d"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "appId": { "type": "string" },
+          "appName": { "type": "string" },
+          "appSlug": { "type": "string" },
+          "title": { "type": "string" },
+          "culprit": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/IssueStatus" },
+          "level": { "type": "string", "examples": ["fatal", "error", "warning", "info", "debug"] },
+          "platform": { "type": ["string", "null"] },
+          "environment": { "type": ["string", "null"] },
+          "release": { "type": ["string", "null"] },
+          "firstSeen": { "type": "string" },
+          "lastSeen": { "type": "string" },
+          "eventCount": { "type": "integer" },
+          "shortId": { "type": "string", "examples": ["CHECKOUT-12"] },
+          "unhandled": { "type": "boolean" },
+          "priority": { "type": "string", "enum": ["high", "medium", "low"] },
+          "userCount": { "type": "integer" },
+          "periodEventCount": { "type": "integer" },
+          "trend24h": { "type": "array", "description": "Events per hour over the last 24 hours.", "items": { "type": "integer" } },
+          "trend14d": { "type": "array", "description": "Events per day over the last 14 days.", "items": { "type": "integer" } }
+        }
+      },
+      "IssueCounts": {
+        "type": "object",
+        "description": "Issues per status under the same filters, ignoring the status filter.",
+        "required": ["unresolved", "resolved", "ignored"],
+        "properties": {
+          "unresolved": { "type": "integer" },
+          "resolved": { "type": "integer" },
+          "ignored": { "type": "integer" }
+        }
+      },
+      "IssueFeed": {
+        "type": "object",
+        "required": ["issues", "environments", "counts", "nextCursor"],
+        "properties": {
+          "issues": { "type": "array", "items": { "$ref": "#/components/schemas/Issue" } },
+          "environments": { "type": "array", "items": { "type": "string" } },
+          "counts": { "$ref": "#/components/schemas/IssueCounts" },
+          "nextCursor": { "type": ["string", "null"] }
+        }
+      },
+      "TagGroup": {
+        "type": "object",
+        "required": ["key", "values"],
+        "properties": {
+          "key": { "type": "string" },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["value", "count"],
+              "properties": {
+                "value": { "type": "string" },
+                "count": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "IssueDetail": {
+        "description": "An issue with the fields of `Issue` and more.",
+        "allOf": [
+          { "$ref": "#/components/schemas/Issue" },
+          {
+            "type": "object",
+            "required": ["latest", "firstEventId", "latestEventId", "environments", "histogram", "tags"],
+            "properties": {
+              "latest": {
+                "description": "The latest event under the filters.",
+                "oneOf": [{ "$ref": "#/components/schemas/Event" }, { "type": "null" }]
+              },
+              "firstEventId": { "type": ["string", "null"] },
+              "latestEventId": { "type": ["string", "null"] },
+              "environments": {
+                "type": "array",
+                "description": "Every environment of the issue's app.",
+                "items": { "type": "string" }
+              },
+              "histogram": { "type": "array", "description": "Events per bucket over `range`.", "items": { "type": "integer" } },
+              "tags": { "type": "array", "items": { "$ref": "#/components/schemas/TagGroup" } }
+            }
+          }
+        ]
+      },
+      "StatusBody": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "$ref": "#/components/schemas/IssueStatus" } }
+      },
+      "BulkBody": {
+        "type": "object",
+        "required": ["ids", "status"],
+        "properties": {
+          "ids": { "type": "array", "description": "Issue ids or short ids.", "items": { "type": "string" } },
+          "status": { "$ref": "#/components/schemas/IssueStatus" }
+        }
+      },
+      "BulkResult": {
+        "type": "object",
+        "required": ["updated"],
+        "properties": { "updated": { "type": "integer", "minimum": 0 } }
+      },
+      "EventSummary": {
+        "type": "object",
+        "required": ["id", "timestamp", "level", "title", "environment", "release", "user"],
+        "properties": {
+          "id": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "level": { "type": "string" },
+          "title": { "type": "string" },
+          "environment": { "type": ["string", "null"] },
+          "release": { "type": ["string", "null"] },
+          "user": { "type": ["string", "null"], "description": "The event user's email, username, id, or IP address." }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/EventSummary" } },
+          "nextCursor": { "type": ["string", "null"] }
+        }
+      },
+      "EventNeighbors": {
+        "type": "object",
+        "required": ["olderId", "newerId"],
+        "properties": {
+          "olderId": { "type": ["string", "null"] },
+          "newerId": { "type": ["string", "null"] }
+        }
+      },
+      "Frame": {
+        "type": "object",
+        "required": [
+          "filename", "absPath", "function", "module", "lineno", "colno",
+          "contextLine", "preContext", "postContext", "inApp"
+        ],
+        "properties": {
+          "filename": { "type": ["string", "null"] },
+          "absPath": { "type": ["string", "null"] },
+          "function": { "type": ["string", "null"] },
+          "module": { "type": ["string", "null"] },
+          "lineno": { "type": ["integer", "null"], "minimum": 0 },
+          "colno": { "type": ["integer", "null"], "minimum": 0 },
+          "contextLine": { "type": ["string", "null"] },
+          "preContext": { "type": "array", "items": { "type": "string" } },
+          "postContext": { "type": "array", "items": { "type": "string" } },
+          "inApp": { "type": "boolean" }
+        }
+      },
+      "Exception": {
+        "type": "object",
+        "required": ["type", "value", "mechanism", "handled", "frames"],
+        "properties": {
+          "type": { "type": ["string", "null"] },
+          "value": { "type": ["string", "null"] },
+          "mechanism": { "type": ["string", "null"] },
+          "handled": { "type": ["boolean", "null"] },
+          "frames": { "type": "array", "items": { "$ref": "#/components/schemas/Frame" } }
+        }
+      },
+      "Breadcrumb": {
+        "type": "object",
+        "required": ["timestamp", "type", "category", "level", "message", "data"],
+        "properties": {
+          "timestamp": { "type": ["string", "null"] },
+          "type": { "type": ["string", "null"] },
+          "category": { "type": ["string", "null"] },
+          "level": { "type": ["string", "null"] },
+          "message": { "type": ["string", "null"] },
+          "data": {}
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "An event in Owlee's normalized form. `raw` is the payload the SDK sent.",
+        "required": [
+          "eventId", "timestamp", "level", "title", "message", "culprit", "platform",
+          "environment", "release", "serverName", "transaction", "logger", "fingerprint",
+          "sdk", "exceptions", "breadcrumbs", "tags", "contexts", "user", "request", "extra", "raw"
+        ],
+        "properties": {
+          "eventId": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "level": { "type": "string" },
+          "title": { "type": "string" },
+          "message": { "type": ["string", "null"] },
+          "culprit": { "type": ["string", "null"] },
+          "platform": { "type": ["string", "null"] },
+          "environment": { "type": ["string", "null"] },
+          "release": { "type": ["string", "null"] },
+          "serverName": { "type": ["string", "null"] },
+          "transaction": { "type": ["string", "null"] },
+          "logger": { "type": ["string", "null"] },
+          "fingerprint": { "type": "string" },
+          "sdk": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["name", "version"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "version": { "type": "string" }
+                }
+              },
+              { "type": "null" }
+            ]
+          },
+          "exceptions": { "type": "array", "items": { "$ref": "#/components/schemas/Exception" } },
+          "breadcrumbs": { "type": "array", "items": { "$ref": "#/components/schemas/Breadcrumb" } },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key", "value"],
+              "properties": {
+                "key": { "type": "string" },
+                "value": { "type": "string" }
+              }
+            }
+          },
+          "contexts": { "description": "SDK contexts such as `os` and `browser`, as sent." },
+          "user": { "description": "The event user, as sent." },
+          "request": { "description": "The HTTP request, as sent." },
+          "extra": { "description": "Extra data, as sent." },
+          "raw": { "description": "The stored payload." }
+        }
+      }
+    }
+  }
+}

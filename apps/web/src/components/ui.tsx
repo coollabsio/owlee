@@ -59,6 +59,50 @@ export function Switch({
   );
 }
 
+/** `included` tints an option that the selected one implies, such as Read when Delete is selected. */
+export type SegmentedOption<T extends string> = { value: T; label: string; disabled?: boolean; title?: string; included?: boolean };
+
+/** A single choice among a few options, as one row of joined buttons. */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  "aria-label": ariaLabel,
+}: {
+  value: T;
+  options: SegmentedOption<T>[];
+  onChange: (value: T) => void;
+  "aria-label": string;
+}) {
+  return (
+    <span role="group" aria-label={ariaLabel} className="inline-flex shrink-0 rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-0.5">
+      {options.map((option) => {
+        const selected = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={selected}
+            disabled={option.disabled}
+            title={option.title}
+            className={cn(
+              "h-6 rounded px-2.5 text-[0.75rem] font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+              selected
+                ? "bg-[var(--ui-accent)] text-[var(--ui-accent-fg)]"
+                : option.included
+                  ? "bg-[color-mix(in_oklab,var(--ui-accent)_22%,transparent)] text-[var(--ui-fg)]"
+                  : "text-[var(--ui-fg-dim)] enabled:hover:bg-[var(--ui-hover)] enabled:hover:text-[var(--ui-fg)]",
+            )}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </span>
+  );
+}
+
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cn("input", props.className)} />;
 }
@@ -221,7 +265,7 @@ export function Field({
   error,
   children,
 }: {
-  label: string;
+  label: ReactNode;
   hint?: string;
   error?: string;
   children: ReactNode;
@@ -444,6 +488,7 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = "Delete",
+  confirmDisabled,
   pending,
   error,
   onConfirm,
@@ -454,6 +499,7 @@ export function ConfirmDialog({
   title: string;
   description?: string;
   confirmLabel?: string;
+  confirmDisabled?: boolean;
   pending?: boolean;
   error?: unknown;
   onConfirm: () => void;
@@ -469,7 +515,7 @@ export function ConfirmDialog({
       footer={
         <>
           <Button type="button" data-autofocus onClick={onClose}>Cancel</Button>
-          <Button type="button" variant="danger" onClick={onConfirm} disabled={pending}>
+          <Button type="button" variant="danger" onClick={onConfirm} disabled={pending || confirmDisabled}>
             {pending ? <Spinner /> : null}
             {confirmLabel}
           </Button>

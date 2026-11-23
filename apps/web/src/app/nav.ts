@@ -15,6 +15,7 @@ import {
   Folder,
   Gauge,
   InfoCircle,
+  Key,
   Lock,
   People,
   Profile,
@@ -133,6 +134,10 @@ export const settings: Product = {
     {
       label: "Data",
       links: [{ to: "/settings/privacy", label: "Privacy requests", icon: Data, requires: "editor" }],
+    },
+    {
+      label: "Developers",
+      links: [{ to: "/settings/api", label: "API & MCP", icon: Key }],
     },
     {
       label: "Advanced",

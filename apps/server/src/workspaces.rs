@@ -14,6 +14,7 @@ use owlee_platform::{Backend, Database, Id, TimestampMillis};
 use serde::{Deserialize, Serialize};
 use sqlx::{Any, Row, Transaction};
 
+use crate::api_tokens::{Access, ApiProduct, ResourceLimit, Scope};
 use crate::error::AppError;
 use crate::repo::{User, millis, parse_id};
 use crate::routes::require_user;
@@ -53,9 +54,10 @@ impl Role {
     }
 }
 
-/// The session user inside the workspace named by the `X-Owlee-Workspace` header.
+/// The session user inside the workspace named by the `X-Owlee-Workspace` header,
+/// or the owner of an `Authorization: Bearer owl_…` token, which wins over the cookie.
 ///
-/// 401 without a session. 404 `workspace_not_found` when the header is missing
+/// 401 without a session or a valid token. 404 `workspace_not_found` when the header is missing
 /// or malformed, or the user is not a member, so an outsider cannot tell
 /// whether a workspace exists. Every query a handler runs after this must
 /// filter by `workspace_id`, and a record from another workspace is 404.
@@ -63,6 +65,8 @@ pub struct Member {
     pub user: User,
     pub workspace_id: Id,
     pub role: Role,
+    /// `None` for a cookie session and for a token without a resource limit.
+    pub limit: Option<ResourceLimit>,
 }
 
 impl Member {
@@ -96,6 +100,9 @@ impl FromRequestParts<AppState> for Member {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
+        if let Some(token) = crate::api_tokens::bearer(&parts.headers) {
+            return Self::from_token(parts, state, token).await;
+        }
         let jar = CookieJar::from_headers(&parts.headers);
         let user = require_user(state, &jar).await?;
         let workspace_id = parts
@@ -115,6 +122,39 @@ impl FromRequestParts<AppState> for Member {
             user,
             workspace_id,
             role: Role::from_row(&row)?,
+            limit: None,
+        })
+    }
+}
+
+impl Member {
+    /// The token names the workspace. A workspace header must name the same
+    /// one. The route's product and the request method give the scope it needs.
+    async fn from_token(parts: &Parts, state: &AppState, token: &str) -> Result<Self, AppError> {
+        let owner = crate::api_tokens::authenticate(state, token, TimestampMillis::now()).await?;
+        let product = parts
+            .extensions
+            .get::<ApiProduct>()
+            .copied()
+            .ok_or(AppError::TokenNotAllowed)?;
+        if let Some(header) = parts.headers.get(WORKSPACE_HEADER) {
+            let named = header
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<Id>().ok());
+            if named != Some(owner.workspace_id) {
+                return Err(AppError::WorkspaceNotFound);
+            }
+        }
+        let needed = Scope::new(product, Access::for_method(&parts.method));
+        if !owner.scopes.contains(&needed) {
+            return Err(AppError::MissingScope(needed));
+        }
+        Ok(Self {
+            user: owner.user,
+            workspace_id: owner.workspace_id,
+            role: owner.role,
+            limit: owner.limit,
         })
     }
 }

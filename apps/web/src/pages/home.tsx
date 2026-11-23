@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode } from "react";
 import { Link } from "react-router";
+import { Key } from "reicon-react";
 import { products } from "@/app/nav";
 import { Sparkline } from "@/components/error-charts";
 import { type Column, DataTable } from "@/components/data-table";
@@ -72,6 +73,27 @@ function SetupCard({ id }: { id: ProductId }) {
   );
 }
 
+function AiToolsCard() {
+  return (
+    <LayerCard>
+      <div className="flex flex-col gap-3 p-1 sm:flex-row sm:items-center sm:gap-4">
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] text-[var(--ui-fg)]">
+              <Key className="size-4" aria-hidden="true" />
+            </span>
+            <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">Use Owlee from your AI tools</h2>
+          </div>
+          <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">
+            Create an API token to read and triage errors from scripts, or connect Claude Code and Cursor to the Owlee MCP server.
+          </p>
+        </div>
+        <Link className="button button-highlighted shrink-0 self-start sm:self-center" to="/settings/api">Create an API token</Link>
+      </div>
+    </LayerCard>
+  );
+}
+
 export function HomePage() {
   const scope = useListScope();
   const home = useQuery({
@@ -111,6 +133,7 @@ export function HomePage() {
           <SetupCard id="errors" />
           <SetupCard id="analytics" />
         </div>
+        <AiToolsCard />
       </div>
     );
   }

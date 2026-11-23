@@ -109,11 +109,16 @@ pub fn router(state: AppState) -> Router {
         .route("/public/{slug}", get(public_page))
         .route("/public/{slug}/incidents", get(public_page_incidents))
         .merge(crate::insights::api_routes())
-        .merge(crate::errors::api_routes())
+        .merge(crate::errors::privacy_routes())
+        .merge(crate::api_tokens::routes())
+        .route_layer(middleware::from_fn(crate::api_tokens::deny_tokens))
+        .merge(crate::api_tokens::product_routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), same_origin));
-    // Bearer-token agents and public ingest are called from other origins on purpose.
+    // Bearer-token agents, MCP, the OpenAPI document, and public ingest are called from other origins on purpose.
     // The ingest routes below read raw bodies with their own caps.
     let api = cookie_api
+        .route("/mcp", post(crate::mcp::handle))
+        .merge(crate::openapi::routes())
         .route("/agent/checks", post(agent_checks))
         .route("/agent/heartbeat", post(agent_heartbeat))
         .route("/agent/results", post(agent_result))
@@ -142,6 +147,11 @@ async fn same_origin(State(state): State<AppState>, request: Request, next: Next
         *request.method(),
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     ) {
+        return next.run(request).await;
+    }
+    // A token request never reads the cookie. `Member` prefers the token, and
+    // `deny_tokens` guards the other routes. Browsers cannot add the header cross-site.
+    if crate::api_tokens::bearer(request.headers()).is_some() {
         return next.run(request).await;
     }
     let headers = request.headers();

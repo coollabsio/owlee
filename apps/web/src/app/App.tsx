@@ -13,6 +13,7 @@ import {
   SetupPage,
 } from "@/pages/auth";
 import { AgentsPage } from "@/pages/agents";
+import { ApiTokensPage } from "@/pages/api-tokens";
 import { AnalyticsPage, VisitorPage } from "@/pages/analytics";
 import { DashboardPage } from "@/pages/dashboard";
 import { HomePage } from "@/pages/home";
@@ -124,6 +125,7 @@ export function App() {
           <Route path="settings/projects" element={<WorkspaceProjectsPage />} />
           <Route path="settings/members" element={<WorkspaceMembersPage />} />
           <Route path="settings/privacy" element={<WorkspacePrivacyPage />} />
+          <Route path="settings/api" element={<ApiTokensPage />} />
           <Route path="settings/danger-zone" element={<WorkspaceDangerZonePage />} />
           <Route path="admin" element={<AdminGeneralPage />} />
           <Route path="admin/users" element={<AdminUsersPage />} />

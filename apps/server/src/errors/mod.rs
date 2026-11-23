@@ -39,10 +39,14 @@ pub fn api_routes() -> Router<AppState> {
             get(http::event_neighbors),
         )
         .route("/error-events/{id}", get(http::get_event))
-        .route(
-            "/privacy/errors",
-            get(http::export_user_events).delete(http::delete_user_events),
-        )
+}
+
+/// Cookie only, unlike `api_routes`, so a token cannot export or erase a person's events.
+pub fn privacy_routes() -> Router<AppState> {
+    Router::new().route(
+        "/privacy/errors",
+        get(http::export_user_events).delete(http::delete_user_events),
+    )
 }
 
 /// Sentry SDK paths. They take a DSN key, not the session cookie.

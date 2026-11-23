@@ -5,6 +5,7 @@
 
 mod accounts;
 mod agent;
+mod api_tokens;
 mod browser;
 mod checker;
 mod cli;
@@ -19,8 +20,10 @@ mod instance_settings;
 mod intake;
 mod invitations;
 mod limit;
+mod mcp;
 mod migrations;
 mod notify;
+mod openapi;
 mod outbound;
 mod ownership;
 mod paging;

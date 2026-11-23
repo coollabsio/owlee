@@ -7,6 +7,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::filter::InboundFilter;
+use crate::api_tokens::ResourceLimit;
 use crate::error::AppError;
 use crate::intake::DropReason;
 use crate::paging::{Cursor, Key, Paged, Paging};
@@ -90,6 +91,75 @@ fn statement(db: &Database, sql: &str) -> String {
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// The error apps one request may see: all apps of the workspace, or only the
+/// apps a token's resource limit reaches.
+pub enum Visible {
+    All,
+    Apps(Vec<String>),
+}
+
+impl Visible {
+    /// No query for `None`, so cookie sessions pay nothing.
+    pub async fn resolve(
+        db: &Database,
+        workspace_id: Id,
+        limit: Option<&ResourceLimit>,
+    ) -> Result<Self, AppError> {
+        let Some(limit) = limit else {
+            return Ok(Self::All);
+        };
+        let rows = sqlx::query(&statement(
+            db,
+            "SELECT a.id, a.project_id FROM error_apps a JOIN projects pr ON pr.id = a.project_id
+             WHERE pr.workspace_id = ?",
+        ))
+        .bind(workspace_id.to_string())
+        .fetch_all(db.pool())
+        .await?;
+        let mut apps = Vec::new();
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let project: String = row.try_get("project_id")?;
+            if limit.error_apps.contains(&id)
+                || limit.projects.iter().any(|p| p.to_string() == project)
+            {
+                apps.push(id);
+            }
+        }
+        Ok(Self::Apps(apps))
+    }
+
+    pub fn allows(&self, app_id: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Apps(apps) => apps.iter().any(|id| id == app_id),
+        }
+    }
+
+    /// A hidden app is 404, the same as an app of another workspace.
+    pub fn require(&self, app_id: &str) -> Result<(), AppError> {
+        if self.allows(app_id) {
+            Ok(())
+        } else {
+            Err(AppError::NotFound)
+        }
+    }
+
+    /// Binds for [`visible_filter`]: a flag, then the ids as `,1,2,`.
+    /// App ids are digits, so `,` and the `LIKE` wildcards never occur in them.
+    fn binds(&self) -> [String; 2] {
+        match self {
+            Self::All => [String::new(), String::new()],
+            Self::Apps(apps) => ["1".to_owned(), format!(",{},", apps.join(","))],
+        }
+    }
+}
+
+/// Keeps rows whose `column` is a visible app. Bind [`Visible::binds`].
+fn visible_filter(column: &str) -> String {
+    format!("(? = '' OR ? LIKE ('%,' || {column} || ',%'))")
 }
 
 const APP_COLUMNS: &str = "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, \
@@ -245,8 +315,9 @@ pub async fn delete_app(db: &Database, workspace_id: Id, id: &str) -> Result<(),
     Ok(())
 }
 
-pub struct IssueQuery {
+pub struct IssueQuery<'a> {
     pub workspace_id: Id,
+    pub visible: &'a Visible,
     /// Empty means every project of the workspace.
     pub project_id: String,
     /// Empty means every app.
@@ -292,6 +363,10 @@ const ISSUE_SOURCE: &str = "issues i
          JOIN projects pr ON pr.id = a.project_id";
 
 /// Every feed filter except status. `issue_filter_binds` returns its binds in order.
+fn issue_filters() -> String {
+    format!("{ISSUE_FILTERS} AND {}", visible_filter("i.app_id"))
+}
+
 const ISSUE_FILTERS: &str = "pr.workspace_id = ?
            AND (? = '' OR a.project_id = ?)
            AND (? = '' OR i.app_id = ?)
@@ -299,7 +374,7 @@ const ISSUE_FILTERS: &str = "pr.workspace_id = ?
            AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.environment = ?))
            AND (? = '' OR EXISTS (SELECT 1 FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?))";
 
-fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 13] {
+fn issue_filter_binds(query: &IssueQuery<'_>, since: &str) -> [String; 15] {
     let like = like_pattern(&query.search);
     let search_flag = if query.search.trim().is_empty() {
         ""
@@ -307,6 +382,7 @@ fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 13] {
         "1"
     };
     let since_flag = if since.is_empty() { "" } else { "1" };
+    let [visible_flag, visible_apps] = query.visible.binds();
     [
         query.workspace_id.to_string(),
         query.project_id.clone(),
@@ -321,6 +397,8 @@ fn issue_filter_binds(query: &IssueQuery, since: &str) -> [String; 13] {
         query.environment.clone(),
         since_flag.to_owned(),
         since.to_owned(),
+        visible_flag,
+        visible_apps,
     ]
 }
 
@@ -401,12 +479,13 @@ enum Bound<'a> {
 
 pub async fn list_issues(
     db: &Database,
-    query: &IssueQuery,
+    query: &IssueQuery<'_>,
     paging: &Paging,
 ) -> Result<IssuePage, AppError> {
     let since = since_bound(&query.since);
     let since_flag = if since.is_empty() { "" } else { "1" };
     let filters = issue_filter_binds(query, &since);
+    let issue_filters = issue_filters();
     let sort = IssueSort::parse(&query.sort);
     let after = match sort {
         IssueSort::LastSeen | IssueSort::FirstSeen | IssueSort::Title => {
@@ -440,7 +519,7 @@ pub async fn list_issues(
                 CAST(CASE i.level WHEN 'fatal' THEN 2 WHEN 'error' THEN 1 ELSE 0 END AS BIGINT) AS priority_rank
          FROM {ISSUE_SOURCE}
          WHERE (? = '' OR i.status = ?)
-           AND {ISSUE_FILTERS}) t
+           AND {issue_filters}) t
          WHERE {keyset}
          ORDER BY {column} {direction}, t.id {direction}
          LIMIT ?"
@@ -482,7 +561,7 @@ pub async fn list_issues(
         &format!(
             "SELECT i.status, CAST(COUNT(*) AS BIGINT) AS total
          FROM {ISSUE_SOURCE}
-         WHERE {ISSUE_FILTERS}
+         WHERE {issue_filters}
          GROUP BY i.status"
         ),
     );
@@ -511,19 +590,25 @@ pub async fn list_issues(
 pub async fn list_environments(
     db: &Database,
     workspace_id: Id,
+    visible: &Visible,
     project_id: &str,
     app_id: &str,
 ) -> Result<Vec<String>, AppError> {
+    let [visible_flag, visible_apps] = visible.binds();
     let sql = statement(
         db,
-        "SELECT DISTINCT e.environment FROM events e
+        &format!(
+            "SELECT DISTINCT e.environment FROM events e
          JOIN error_apps a ON a.id = e.app_id
          JOIN projects pr ON pr.id = a.project_id
          WHERE e.environment IS NOT NULL AND e.environment != ''
            AND pr.workspace_id = ?
            AND (? = '' OR a.project_id = ?)
            AND (? = '' OR e.app_id = ?)
+           AND {}
          ORDER BY e.environment",
+            visible_filter("e.app_id")
+        ),
     );
     let rows = sqlx::query(&sql)
         .bind(workspace_id.to_string())
@@ -531,6 +616,8 @@ pub async fn list_environments(
         .bind(project_id)
         .bind(app_id)
         .bind(app_id)
+        .bind(visible_flag)
+        .bind(visible_apps)
         .fetch_all(db.pool())
         .await?;
     Ok(rows
@@ -595,14 +682,25 @@ fn issue_status(status: &str) -> Result<&str, AppError> {
     }
 }
 
-pub async fn get_event(db: &Database, workspace_id: Id, id: &str) -> Result<String, AppError> {
+pub async fn get_event(
+    db: &Database,
+    workspace_id: Id,
+    visible: &Visible,
+    id: &str,
+) -> Result<String, AppError> {
+    let [visible_flag, visible_apps] = visible.binds();
     let sql = statement(
         db,
-        &format!("SELECT payload FROM events WHERE id = ? AND {IN_WORKSPACE}"),
+        &format!(
+            "SELECT payload FROM events WHERE id = ? AND {IN_WORKSPACE} AND {}",
+            visible_filter("app_id")
+        ),
     );
     let row = sqlx::query(&sql)
         .bind(id)
         .bind(workspace_id.to_string())
+        .bind(visible_flag)
+        .bind(visible_apps)
         .fetch_optional(db.pool())
         .await?;
     let Some(row) = row else {
@@ -1042,17 +1140,22 @@ pub fn build_dsn(origin: &str, public_key: &str, app_id: &str) -> String {
     format!("{scheme}://{public_key}@{rest}/{app_id}")
 }
 
-/// Ids outside the workspace match nothing and are not counted.
+/// Ids outside the workspace or the visible apps match nothing and are not counted.
 pub async fn update_many_status(
     db: &Database,
     workspace_id: Id,
+    visible: &Visible,
     ids: &[String],
     status: &str,
 ) -> Result<usize, AppError> {
     let status = issue_status(status)?;
+    let [visible_flag, visible_apps] = visible.binds();
     let sql = statement(
         db,
-        &format!("UPDATE issues SET status = ? WHERE (id = ? OR short_id = ?) AND {IN_WORKSPACE}"),
+        &format!(
+            "UPDATE issues SET status = ? WHERE (id = ? OR short_id = ?) AND {IN_WORKSPACE} AND {}",
+            visible_filter("app_id")
+        ),
     );
     let mut updated = 0;
     for id in ids {
@@ -1061,6 +1164,8 @@ pub async fn update_many_status(
             .bind(id)
             .bind(id)
             .bind(workspace_id.to_string())
+            .bind(&visible_flag)
+            .bind(&visible_apps)
             .execute(db.pool())
             .await?;
         updated += result.rows_affected() as usize;

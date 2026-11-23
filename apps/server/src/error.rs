@@ -18,6 +18,11 @@ pub enum AppError {
         received: Option<String>,
     },
     NotFound,
+    /// An API token on a route outside `api_tokens::product_routes`.
+    TokenNotAllowed,
+    MissingScope(crate::api_tokens::Scope),
+    /// A token with a resource limit creating something outside it.
+    ResourceNotAllowed,
     /// No workspace header, or the user is not a member of that workspace.
     WorkspaceNotFound,
     Busy,
@@ -60,6 +65,9 @@ impl std::fmt::Display for AppError {
             Self::Forbidden(detail) => write!(formatter, "forbidden: {detail}"),
             Self::CrossOrigin { .. } => formatter.write_str("forbidden: cross-origin request"),
             Self::NotFound => formatter.write_str("not found"),
+            Self::TokenNotAllowed => formatter.write_str("forbidden: token not allowed"),
+            Self::MissingScope(scope) => write!(formatter, "forbidden: needs {}", scope.as_str()),
+            Self::ResourceNotAllowed => formatter.write_str("forbidden: resource not allowed"),
             Self::WorkspaceNotFound => formatter.write_str("workspace not found"),
             Self::Busy => formatter.write_str("check already running"),
             Self::Offline => formatter.write_str("status host has no network"),
@@ -125,6 +133,30 @@ impl IntoResponse for AppError {
                 }
             }
             Self::NotFound => Problem::not_found(),
+            Self::TokenNotAllowed => Problem {
+                type_uri: "https://owlee.io/problems/token-not-allowed".to_owned(),
+                title: "Token not allowed".to_owned(),
+                status: 403,
+                code: "token_not_allowed".to_owned(),
+                detail: "API tokens cannot use this route. Sign in to Owlee to use it.".to_owned(),
+                fields: None,
+            },
+            Self::MissingScope(scope) => Problem {
+                type_uri: "https://owlee.io/problems/missing-scope".to_owned(),
+                title: "Missing scope".to_owned(),
+                status: 403,
+                code: "missing_scope".to_owned(),
+                detail: format!("This token needs the {} scope.", scope.as_str()),
+                fields: None,
+            },
+            Self::ResourceNotAllowed => Problem {
+                type_uri: "https://owlee.io/problems/resource-not-allowed".to_owned(),
+                title: "Resource not allowed".to_owned(),
+                status: 403,
+                code: "resource_not_allowed".to_owned(),
+                detail: "This token cannot use this project.".to_owned(),
+                fields: None,
+            },
             Self::WorkspaceNotFound => Problem {
                 type_uri: "https://owlee.io/problems/workspace-not-found".to_owned(),
                 title: "Workspace not found".to_owned(),

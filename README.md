@@ -114,7 +114,7 @@ owlee user enable --email ada@example.com
 
 `owlee user set-password` also works on the root account, so a lost root password can be reset without mail.
 
-Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, and the agent routes are not checked. The `403` names the origin it received and the one it expected. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
+Requests that change data with the session cookie must come from `OWLEE_PUBLIC_ORIGIN`. A `POST`, `PUT`, `PATCH`, or `DELETE` with another `Origin`, or with no `Origin` and `Sec-Fetch-Site: cross-site`, gets `403`. Open the dashboard at exactly that origin (`127.0.0.1` and `localhost` are different origins). Error ingest, `POST /api/receive`, the agent routes, and requests with an `Authorization: Bearer owl_...` API token are not checked. `/api/mcp` does its own `Origin` check. The `403` names the origin it received and the one it expected. When `OWLEE_PUBLIC_ORIGIN` is `https://`, the session cookie is `__Host-owlee_session`, otherwise `owlee_session`. It lasts at most 90 days.
 
 In production, `owlee serve` does not start without `OWLEE_PUBLIC_ORIGIN`. Any command refuses a value that is not a bare `http://` or `https://` origin, such as one with a path. A loopback host or plain `http://` starts with a warning, for a test machine or a LAN install.
 
@@ -147,7 +147,7 @@ Frontend dev proxies `/api` to the Rust process. Production does not proxy: the 
 cargo test --workspace
 ```
 
-Domain tests cover assertions, the failure threshold, uptime math (maintenance is excluded), slugs, and incident resolution. Server tests create the owner with a setup token, run an HTTP check against a local server, open an incident after a failure, publish a status page, skip a check during maintenance, deliver a signed webhook, skip checks when the host is offline, and sync agent checks. Other server tests cover setup tokens, registration and SMTP settings, read-only members, email links for registration and password reset, sessions, the origin check, error ingest, and analytics with short links.
+Domain tests cover assertions, the failure threshold, uptime math (maintenance is excluded), slugs, and incident resolution. Server tests create the owner with a setup token, run an HTTP check against a local server, open an incident after a failure, publish a status page, skip a check during maintenance, deliver a signed webhook, skip checks when the host is offline, and sync agent checks. Other server tests cover setup tokens, registration and SMTP settings, read-only members, email links for registration and password reset, sessions, the origin check, error ingest, API tokens and their scopes, the MCP endpoint, and analytics with short links.
 
 Postgres tests run only when these are set:
 
@@ -156,7 +156,7 @@ export OWLEE_TEST_POSTGRES_URL=postgres://status:status@127.0.0.1:5432/status_pl
 export OWLEE_APP_POSTGRES_URL=postgres://status:status@127.0.0.1:5432/status_app
 ```
 
-`OWLEE_TEST_POSTGRES_URL` runs the migration runner test in `crates/platform`. `OWLEE_APP_POSTGRES_URL` starts the server on Postgres in the `flow`, `errors`, and `insights` tests. Use two empty databases. The platform test resets its own schema.
+`OWLEE_TEST_POSTGRES_URL` runs the migration runner test in `crates/platform`. `OWLEE_APP_POSTGRES_URL` starts the server on Postgres in the `flow`, `errors`, `insights`, and `api_tokens` tests. Use two empty databases. The platform test resets its own schema.
 
 ## Docker
 
@@ -329,6 +329,47 @@ When the agent starts, it sends its list of checks to the server, without secret
 The server records each result with the agent name as the region, and opens or resolves incidents as it does for its own checks. In the dashboard you can pause, resume, and delete agent monitors, and add them to status pages, but you cannot edit them or run them. The agent sends a heartbeat every 15 seconds. It shows as offline when the server has not heard from it for 30 seconds. A restart of the agent or one missed heartbeat sends no alert. When the server has not heard from the agent for 2 minutes, each active monitor of the agent that is not in a maintenance window goes down, and Owlee opens an incident that names the agent and notifies your channels. Nothing checks these monitors during that time, so their real state is unknown. A monitor that was already down keeps its incident. When the agent reports again, the incident is resolved and the monitor is pending until its next result. The 2 minutes start again when the server restarts, because agents cannot report while the server is down. You can rename an agent in its details. Old checks keep the old name as their region. The agent uses `OWLEE_CONNECTIVITY_TARGETS` in the same way as the server: when its own host has no network, it does not send failed checks.
 
 You cannot delete an agent while it has monitors.
+
+## API tokens and MCP
+
+An API token lets a script or an AI tool (Claude Code, Cursor) read and triage errors as you. Create one in **Settings > API & MCP**. The token is shown once. Owlee keeps only its hash and the first 12 characters, which the list shows. A token belongs to you in one workspace. It can expire after 7, 30, 90, or 365 days, or never. Revoke it in the same list. Rotate gives a token a new secret and keeps its name, scopes, limits, and expiry, and the old secret stops working at once. Pause turns a token off with `401` until you resume it, and its expiry keeps running.
+
+| Scope | Allows |
+|---|---|
+| `errors:read` | `GET` on the error apps, issues, and events |
+| `errors:write` | changing them, for example an issue status |
+| `errors:delete` | `DELETE`, for example an error app |
+
+A workspace member can create read tokens only. A token never does more than your current role allows. When you leave the workspace or your account is disabled, your tokens stop working. A token works only on the error routes above. Every other route, including `/api/privacy/errors` and `/api/api-tokens`, answers `403` with the code `token_not_allowed`, so a token cannot create other tokens. A missing scope answers `403 missing_scope`. An unknown, revoked, paused, or expired token answers `401`.
+
+By default a token reaches every project and error app in its workspace. You can limit it to a list of projects and error apps instead. A listed project includes all of its apps, also apps created later. A listed app includes only that app. The token does not see anything outside the limit. Lists leave it out, and a request for it by id answers `404`. A limited token can create an error app only in a listed project. Otherwise the answer is `403 resource_not_allowed`.
+
+Send the token as a bearer token. The token sets the workspace, so `X-Owlee-Workspace` is optional. If you send it, it must name the same workspace, or the answer is `404`:
+
+```bash
+curl -H "Authorization: Bearer $OWLEE_TOKEN" "https://owlee.example.com/api/error-issues?status=unresolved"
+```
+
+The token API has an OpenAPI 3.1 document at `<origin>/api/v1/openapi.json`. Anyone can read it without a token, and its `servers` entry is this instance's `OWLEE_PUBLIC_ORIGIN` plus `/api`. `/api/openapi.json` serves the newest version. The source is [`apps/server/openapi/v1.json`](apps/server/openapi/v1.json). Each operation names the scope it needs in `x-required-scope`, and its `operationId` is the MCP tool name where a tool exists. The `v1` in the URL is the API version. A new field or route raises the minor number of `info.version` (`1.0.0` to `1.1.0`). A removed or changed field or route makes a `v2` document at a new URL, and `v1` stays while its routes exist. A server test calls every operation in the document with a token and checks the status and the response body against its schema.
+
+The MCP endpoint is `<origin>/api/mcp` (Streamable HTTP, JSON responses, no sessions). It takes the same bearer token and not the cookie. A request with an `Origin` other than `OWLEE_PUBLIC_ORIGIN` gets `403`. The tools are `list_error_apps`, `list_issues`, `get_issue`, `list_issue_events`, `get_event`, and `update_issue_status`, and a client sees only the tools that its token's scopes allow. Claude Code:
+
+```bash
+claude mcp add --transport http owlee https://owlee.example.com/api/mcp --header "Authorization: Bearer owl_..."
+```
+
+Cursor, in `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "owlee": {
+      "url": "https://owlee.example.com/api/mcp",
+      "headers": { "Authorization": "Bearer ${env:OWLEE_TOKEN}" }
+    }
+  }
+}
+```
 
 ## Errors
 

@@ -286,6 +286,51 @@ export const listSessions = () => api<AuthSession[]>("/api/auth/sessions");
 
 export const revokeSession = (id: string) => api<void>(`/api/auth/sessions/${id}`, { method: "DELETE" });
 
+export type ScopeProduct = "errors";
+export type ScopeAccess = "read" | "write" | "delete";
+export type ApiScope = `${ScopeProduct}:${ScopeAccess}`;
+
+export const SCOPE_ACCESSES: ScopeAccess[] = ["read", "write", "delete"];
+
+/** One access row in the token form for each product that tokens can reach. */
+export const API_PRODUCTS: { product: ScopeProduct; label: string; hint: string }[] = [
+  {
+    product: "errors",
+    label: "Errors",
+    hint: "Read lists apps, issues, and events. Write also changes issue status and edits apps. Delete also deletes apps.",
+  },
+];
+
+/** `null` is every resource, including future ones. A listed project covers all of its apps. */
+export type TokenResources = { projects: string[]; error_apps: string[] } | null;
+
+export type ApiToken = {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: ApiScope[];
+  resources: TokenResources;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  paused_at: string | null;
+};
+
+export type CreatedApiToken = ApiToken & { token: string };
+
+export type TokenExpiry = 7 | 30 | 90 | 365 | null;
+
+export const listApiTokens = () => api<ApiToken[]>("/api/api-tokens");
+
+export const createApiToken = (input: { name: string; scopes: ApiScope[]; expires_in_days: TokenExpiry; resources: TokenResources }) =>
+  post<CreatedApiToken>("/api/api-tokens", input);
+
+export const revokeApiToken = (id: string) => api<void>(`/api/api-tokens/${id}`, { method: "DELETE" });
+
+export const rotateApiToken = (id: string) => api<CreatedApiToken>(`/api/api-tokens/${id}/rotate`, { method: "POST" });
+
+export const setApiTokenPaused = (id: string, paused: boolean) => api<ApiToken>(`/api/api-tokens/${id}/${paused ? "pause" : "resume"}`, { method: "POST" });
+
 export type PrivacyExport = {
   user: string;
   events: { id: string; appId: string; appName: string; timestamp: string; title: string; payload: unknown }[];
