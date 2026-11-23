@@ -5,6 +5,7 @@
 
 mod accounts;
 mod agent;
+mod browser;
 mod checker;
 mod cli;
 mod connectivity;

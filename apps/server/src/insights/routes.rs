@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -8,7 +6,6 @@ use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::http::{Method, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use http_body_util::BodyExt;
-use isbot::Bots;
 use owlee_insights::{
     Bounds, EventPayload, Incoming, LINK_SECTIONS, SITE_SECTIONS, clean_color, clean_destination,
     clean_host, clean_link_slug, clean_name, clean_public_slug, clean_vitals, clip, flatten,
@@ -22,6 +19,7 @@ use sqlx::Row;
 
 use super::geo;
 use super::record;
+use crate::browser::{is_bot, origin_allowed};
 use crate::error::AppError;
 use crate::intake::DropReason;
 use crate::peer::Client;
@@ -256,7 +254,7 @@ async fn accept_event(
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if ua.is_empty() || bots().is_bot(ua) {
+    if ua.is_empty() || is_bot(ua) {
         return Ok(StatusCode::ACCEPTED);
     }
     let global = quota::analytics_quota(&state.db).await?;
@@ -444,7 +442,7 @@ async fn resolve_slug(
         .unwrap_or("");
     if method != Method::HEAD
         && !ua.is_empty()
-        && !bots().is_bot(ua)
+        && !is_bot(ua)
         && state
             .insights_limits
             .link_clicks
@@ -2070,54 +2068,9 @@ async fn allowed_hosts(
     Ok(hosts)
 }
 
-fn origin_allowed(
-    origin: Option<&str>,
-    referer: Option<&str>,
-    allowed: &[String],
-    allow_localhost: bool,
-) -> bool {
-    let Some(host) = origin
-        .and_then(host_of)
-        .or_else(|| referer.and_then(host_of))
-    else {
-        return false;
-    };
-    if allow_localhost && is_local_host(&host) {
-        return true;
-    }
-    allowed
-        .iter()
-        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
-}
-
-fn host_of(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let rest = value
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(value);
-    let hostport = rest.split(['/', '?', '#']).next()?;
-    if let Some(host) = hostport.strip_prefix('[') {
-        return Some(host.split(']').next()?.to_ascii_lowercase());
-    }
-    clean_host(hostport).ok()
-}
-
-fn is_local_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
 fn origin_host(origin: &str) -> Option<String> {
     let rest = origin.split_once("://")?.1;
     clean_host(rest.split('/').next()?).ok()
-}
-
-fn bots() -> &'static Bots {
-    static BOTS: OnceLock<Bots> = OnceLock::new();
-    BOTS.get_or_init(Bots::default)
 }
 
 fn with_cors(mut response: Response<Body>) -> Response<Body> {
