@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, SkeletonRows, SortHeader, Spinner, StatusBadge, Switch, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Spinner, StatusBadge, Switch } from "@/components/ui";
 import { ApiError, api, type Channel, type Delivery, type Monitor } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { useListScope } from "@/lib/workspace";
@@ -39,15 +40,81 @@ function NotificationChannels() {
   });
 
   const all = query.data ?? [];
-  const { rows: channels, sort, toggle } = useSort(
-    all.filter((channel) => !providerFilter || channel.provider === providerFilter),
+  const channels = all.filter((channel) => !providerFilter || channel.provider === providerFilter);
+  const columns: Column<Channel>[] = [
     {
-      name: (channel) => channel.name,
-      scope: (channel) => channel.monitor_ids.length,
-      delivery: (channel) => (channel.deliveries[0] ? Date.parse(channel.deliveries[0].created_at) : null),
-      status: (channel) => (channel.enabled ? "Enabled" : "Off"),
+      key: "name",
+      header: "Channel",
+      sort: (channel) => channel.name,
+      cellClassName: "max-w-[20rem]",
+      cell: (channel) => (
+        <>
+          <div className="font-medium text-[var(--ui-fg)]">{channel.name}</div>
+          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">
+            <FilterValue active={providerFilter === channel.provider} label={providerLabel[channel.provider]} onToggle={() => setProviderFilter(providerFilter === channel.provider ? null : channel.provider)}>
+              {providerLabel[channel.provider]}
+            </FilterValue>{" "}
+            · {channel.config.unreadable ? "Settings unreadable, edit to re-enter" : channel.config.to || channel.config.url_preview}
+          </div>
+        </>
+      ),
     },
-  );
+    {
+      key: "scope",
+      header: "Scope",
+      className: "hidden md:table-cell",
+      cellClassName: "whitespace-nowrap",
+      sort: (channel) => channel.monitor_ids.length,
+      cell: (channel) => (
+        <>
+          {channel.monitor_ids.length === 0 ? "All monitors" : `${channel.monitor_ids.length} monitors`}
+          {channel.error_issues ? <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">and error issues</div> : null}
+        </>
+      ),
+    },
+    {
+      key: "delivery",
+      header: "Last delivery",
+      className: "hidden xl:table-cell",
+      cellClassName: "max-w-[16rem]",
+      sort: (channel) => (channel.deliveries[0] ? Date.parse(channel.deliveries[0].created_at) : null),
+      cell: (channel) => {
+        const last = channel.deliveries[0];
+        if (!last) return "-";
+        return (
+          <>
+            <div className="truncate">{deliveryStatus(last)} · {last.event}</div>
+            <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">
+              {formatTime(last.created_at)}
+              {last.attempts > 1 ? ` · ${last.attempts} attempts` : ""}
+              {last.error ? ` · ${last.error}` : ""}
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: "status",
+      header: "Status",
+      sort: (channel) => (channel.enabled ? "Enabled" : "Off"),
+      cell: (channel) => <StatusBadge tone={channel.enabled ? "success" : "neutral"}>{channel.enabled ? "Enabled" : "Off"}</StatusBadge>,
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      className: "text-right",
+      cell: (channel) => (
+        <RowActions
+          label={channel.name}
+          actions={[
+            { label: "Edit", onSelect: () => setEditing(channel) },
+            { label: "Send test", onSelect: () => test.mutate(channel.id), disabled: test.isPending },
+            { label: "Delete", danger: true, onSelect: () => setDeleting(channel) },
+          ]}
+        />
+      ),
+    },
+  ];
 
   return (
     <div className="flex flex-col gap-6">
@@ -69,69 +136,7 @@ function NotificationChannels() {
         ) : !query.isLoading && channels.length === 0 ? (
           <CardText title="No matching channels" body="Remove the type filter to see every channel." />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <SortHeader column="name" sort={sort} onSort={toggle}>Channel</SortHeader>
-                  <SortHeader column="scope" sort={sort} onSort={toggle} className="hidden md:table-cell">Scope</SortHeader>
-                  <SortHeader column="delivery" sort={sort} onSort={toggle} className="hidden xl:table-cell">Last delivery</SortHeader>
-                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {query.isLoading ? <SkeletonRows columns={[undefined, "hidden md:table-cell", "hidden xl:table-cell", undefined, "text-right"]} /> : null}
-                {channels.map((channel) => {
-                  const last = channel.deliveries[0];
-                  return (
-                    <tr key={channel.id}>
-                      <td className="max-w-[20rem]">
-                        <div className="font-medium text-[var(--ui-fg)]">{channel.name}</div>
-                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">
-                          <FilterValue active={providerFilter === channel.provider} label={providerLabel[channel.provider]} onToggle={() => setProviderFilter(providerFilter === channel.provider ? null : channel.provider)}>
-                            {providerLabel[channel.provider]}
-                          </FilterValue>{" "}
-                          · {channel.config.unreadable ? "Settings unreadable, edit to re-enter" : channel.config.to || channel.config.url_preview}
-                        </div>
-                      </td>
-                      <td className="hidden whitespace-nowrap md:table-cell">
-                        {channel.monitor_ids.length === 0 ? "All monitors" : `${channel.monitor_ids.length} monitors`}
-                        {channel.error_issues ? <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">and error issues</div> : null}
-                      </td>
-                      <td className="hidden max-w-[16rem] xl:table-cell">
-                        {last ? (
-                          <>
-                            <div className="truncate">{deliveryStatus(last)} · {last.event}</div>
-                            <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">
-                              {formatTime(last.created_at)}
-                              {last.attempts > 1 ? ` · ${last.attempts} attempts` : ""}
-                              {last.error ? ` · ${last.error}` : ""}
-                            </div>
-                          </>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td>
-                        <StatusBadge tone={channel.enabled ? "success" : "neutral"}>{channel.enabled ? "Enabled" : "Off"}</StatusBadge>
-                      </td>
-                      <td className="text-right">
-                        <RowActions
-                          label={channel.name}
-                          actions={[
-                            { label: "Edit", onSelect: () => setEditing(channel) },
-                            { label: "Send test", onSelect: () => test.mutate(channel.id), disabled: test.isPending },
-                            { label: "Delete", danger: true, onSelect: () => setDeleting(channel) },
-                          ]}
-                        />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable columns={columns} rows={channels} rowKey={(channel) => channel.id} loading={query.isLoading} />
         )}
       </LayerCard>
       <Dialog open={open} title="New channel" description="Alerts fire when a monitor changes state, and for new or regressed error issues." onClose={() => setOpen(false)}>

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Skeleton, Spinner, StatusBadge, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -21,12 +22,40 @@ export function PagesPage() {
       (page.title.toLowerCase().includes(needle) || page.slug.toLowerCase().includes(needle)) &&
       (publishedFilter === null || page.published === publishedFilter),
   );
-  const { rows: pages, sort, toggle } = useSort(filtered, {
-    title: (page) => page.title,
-    slug: (page) => page.slug,
-    components: (page) => page.components.length,
-    status: (page) => (page.published ? "Published" : "Draft"),
-  });
+  const columns: Column<StatusPage>[] = [
+    {
+      key: "title",
+      header: "Title",
+      sort: (page) => page.title,
+      cell: (page) => <><Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link><ProjectTag id={page.project_id} /></>,
+    },
+    { key: "slug", header: "Slug", className: "hidden sm:table-cell", cellClassName: "font-mono text-[0.75rem]", sort: (page) => page.slug, cell: (page) => `/${page.slug}` },
+    { key: "components", header: "Components", className: "hidden md:table-cell", sort: (page) => page.components.length, cell: (page) => page.components.length },
+    {
+      key: "status",
+      header: "Status",
+      sort: (page) => (page.published ? "Published" : "Draft"),
+      cell: (page) => (
+        <FilterValue active={publishedFilter === page.published} label={page.published ? "Published" : "Draft"} onToggle={() => setPublishedFilter(publishedFilter === page.published ? null : page.published)}>
+          <StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge>
+        </FilterValue>
+      ),
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      className: "text-right",
+      cell: (page) => (
+        <RowActions
+          label={page.title}
+          actions={[
+            ...(canEdit ? [{ label: "Edit", onSelect: () => navigate(`/pages/${page.id}`) }] : []),
+            ...(page.published ? [{ label: "View", onSelect: () => navigate(`/status/${page.slug}`) }] : []),
+          ]}
+        />
+      ),
+    },
+  ];
   const filters = publishedFilter === null ? [] : [{ key: "status", label: `Status: ${publishedFilter ? "Published" : "Draft"}`, onRemove: () => setPublishedFilter(null) }];
   return (
     <div className="flex flex-col gap-6">
@@ -47,48 +76,10 @@ export function PagesPage() {
             <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search pages" />
             <FilterChips filters={filters} onClear={() => setPublishedFilter(null)} />
           </div>
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <SortHeader column="title" sort={sort} onSort={toggle}>Title</SortHeader>
-                  <SortHeader column="slug" sort={sort} onSort={toggle} className="hidden sm:table-cell">Slug</SortHeader>
-                  <SortHeader column="components" sort={sort} onSort={toggle} className="hidden md:table-cell">Components</SortHeader>
-                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {query.isLoading ? <SkeletonRows columns={[undefined, "hidden sm:table-cell", "hidden md:table-cell", undefined, "text-right"]} /> : null}
-                {pages.map((page) => (
-                  <tr key={page.id}>
-                    <td><Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link><ProjectTag id={page.project_id} /></td>
-                    <td className="hidden font-mono text-[0.75rem] sm:table-cell">/{page.slug}</td>
-                    <td className="hidden md:table-cell">{page.components.length}</td>
-                    <td>
-                      <FilterValue active={publishedFilter === page.published} label={page.published ? "Published" : "Draft"} onToggle={() => setPublishedFilter(publishedFilter === page.published ? null : page.published)}>
-                        <StatusBadge tone={page.published ? "success" : "neutral"}>{page.published ? "Published" : "Draft"}</StatusBadge>
-                      </FilterValue>
-                    </td>
-                    <td className="text-right">
-                      <RowActions
-                        label={page.title}
-                        actions={[
-                          ...(canEdit ? [{ label: "Edit", onSelect: () => navigate(`/pages/${page.id}`) }] : []),
-                          ...(page.published ? [{ label: "View", onSelect: () => navigate(`/status/${page.slug}`) }] : []),
-                        ]}
-                      />
-                    </td>
-                  </tr>
-                ))}
-                {!query.isLoading && pages.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No pages match your search or filters.</td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+          <DataTable columns={columns} rows={filtered} rowKey={(page) => page.id} loading={query.isLoading} />
+          {!query.isLoading && filtered.length === 0 ? (
+            <p className="flex h-12 items-center justify-center px-4 text-[0.8125rem] text-[var(--ui-fg-faint)]">No pages match your search or filters.</p>
+          ) : null}
         </LayerCard>
       )}
       <Dialog open={canEdit && open} title="New status page" description="Pick the monitors to show. You can add a description and homepage after." onClose={() => setOpen(false)}>

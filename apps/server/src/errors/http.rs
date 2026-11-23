@@ -149,6 +149,8 @@ pub struct IssueFilter {
     pub since: String,
     #[serde(default)]
     pub sort: String,
+    #[serde(default)]
+    pub order: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -228,6 +230,7 @@ pub async fn list_issues(
             environment: filter.environment,
             since: filter.since,
             sort: filter.sort,
+            order: filter.order,
         },
         &paging,
     )

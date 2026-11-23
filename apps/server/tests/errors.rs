@@ -626,17 +626,25 @@ async fn feed_pages_reach_every_issue(app: &Router, state: &AppState, cookie: &T
     quiet.sort_by(|left, right| right.cmp(left));
     assert_eq!(by_events[0], busy);
     assert_eq!(by_events[1..], quiet[..], "ties run by id, newest id first");
-    for sort in ["last_seen", "age", "users"] {
-        let mut walked = walk(
-            app,
-            cookie,
-            &format!("/api/error-issues?app_id={id}&sort={sort}&limit=37"),
-            "issues",
-        )
-        .await;
-        walked.sort();
-        assert_eq!(walked, all, "sort={sort}");
+    for sort in ["last_seen", "age", "users", "title", "priority"] {
+        for order in ["", "asc", "desc"] {
+            let mut walked = walk(
+                app,
+                cookie,
+                &format!("/api/error-issues?app_id={id}&sort={sort}&order={order}&limit=37"),
+                "issues",
+            )
+            .await;
+            walked.sort();
+            assert_eq!(walked, all, "sort={sort} order={order}");
+        }
     }
+    let ascending = walk(app, cookie, &format!("{feed_uri}&order=asc"), "issues").await;
+    assert_eq!(
+        ascending.last(),
+        Some(&busy),
+        "order=asc flips the events sort"
+    );
 
     let (status, _, _) = call(
         app,

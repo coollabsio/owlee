@@ -3,9 +3,10 @@ import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
 import { LatencyChart, UptimeBars } from "@/components/charts";
-import { Button, Collapsible, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, nextSort, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, type SortState, sortRows, Spinner, StatusBadge, Switch, Textarea } from "@/components/ui";
+import { type Column, DataTable, nextSort, type SortState, sortRows } from "@/components/data-table";
+import { Button, Collapsible, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge, Switch, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
-import { ApiError, type Agent, api, type Assertion, type CheckOutcome, type Monitor, type MonitorDetail } from "@/lib/api";
+import { ApiError, type Agent, api, type Assertion, type CheckOutcome, type Monitor, type Check, type MonitorDetail } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { hostOf, inferType, type JobType, normalizeTarget } from "@/lib/monitor-target";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
@@ -112,10 +113,6 @@ function payload(draft: Draft) {
   };
 }
 
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
-}
-
 type ShownState = Monitor["state"] | "paused";
 type Tone = "neutral" | "success" | "warning" | "error";
 
@@ -134,40 +131,6 @@ function Ago({ at }: { at: string | null }) {
 
 function epoch(value: string | null) {
   return value ? Date.parse(value) : null;
-}
-
-function MonitorRow({ monitor, subtitle }: { monitor: Monitor; subtitle: string }) {
-  const to = `/monitors/${monitor.id}`;
-  const state = shownState(monitor);
-  return (
-    <tr className="clickable-row">
-      <td className="cell-link">
-        <Link className="row-link" to={to}>{monitor.name}</Link>
-        <ProjectTag id={monitor.project_id} />
-        {rowCover(to)}
-        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{subtitle}</div>
-      </td>
-      <td className="cell-link">
-        {rowCover(to)}
-        <StatusBadge tone={stateTone[state]}>{stateLabel[state]}</StatusBadge>
-      </td>
-      <td className="cell-link hidden md:table-cell">
-        {rowCover(to)}
-        {percent(monitor.uptime_24h)}
-      </td>
-      <td className="cell-link hidden sm:table-cell">
-        {rowCover(to)}
-        <div className="flex items-center gap-3">
-          <UptimeBars bars={monitor.bars} className="hidden h-5 w-32 lg:flex" />
-          <span className="tabular-nums">{percent(monitor.uptime_30d)}</span>
-        </div>
-      </td>
-      <td className="cell-link whitespace-nowrap">
-        {rowCover(to)}
-        <Ago at={monitor.last_checked_at} />
-      </td>
-    </tr>
-  );
 }
 
 const tabs = [
@@ -232,17 +195,41 @@ export function MonitorsPage() {
     .filter((monitor) => !needle || monitor.name.toLowerCase().includes(needle) || monitor.url.toLowerCase().includes(needle))
     .sort((a, b) => Number(b.active) - Number(a.active));
   const counts = Object.fromEntries(tabs.map((tab) => [tab.id, tab.id === "all" ? matching.length : matching.filter((monitor) => shownState(monitor) === tab.id).length])) as Record<Tab, number>;
-  const rows = sortRows(
-    view.state === "all" ? matching : matching.filter((monitor) => shownState(monitor) === view.state),
+  const rows = view.state === "all" ? matching : matching.filter((monitor) => shownState(monitor) === view.state);
+  const columns: Column<Monitor, SortKey>[] = [
     {
-      name: (monitor) => monitor.name,
-      state: (monitor) => stateRank[shownState(monitor)],
-      today: (monitor) => monitor.uptime_24h,
-      month: (monitor) => monitor.uptime_30d,
-      checked: (monitor) => epoch(monitor.last_checked_at),
+      key: "name",
+      header: "Name",
+      sort: (monitor) => monitor.name,
+      cell: (monitor) => (
+        <>
+          <Link className="row-link" to={`/monitors/${monitor.id}`}>{monitor.name}</Link>
+          <ProjectTag id={monitor.project_id} />
+          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{label(monitor)}</div>
+        </>
+      ),
     },
-    view.sort,
-  );
+    {
+      key: "state",
+      header: "State",
+      sort: (monitor) => stateRank[shownState(monitor)],
+      cell: (monitor) => <StatusBadge tone={stateTone[shownState(monitor)]}>{stateLabel[shownState(monitor)]}</StatusBadge>,
+    },
+    { key: "today", header: "Today", className: "hidden md:table-cell", sort: (monitor) => monitor.uptime_24h, cell: (monitor) => percent(monitor.uptime_24h) },
+    {
+      key: "month",
+      header: "30 days",
+      className: "hidden sm:table-cell",
+      sort: (monitor) => monitor.uptime_30d,
+      cell: (monitor) => (
+        <div className="flex items-center gap-3">
+          <UptimeBars bars={monitor.bars} className="hidden h-5 w-32 lg:flex" />
+          <span className="tabular-nums">{percent(monitor.uptime_30d)}</span>
+        </div>
+      ),
+    },
+    { key: "checked", header: "Last check", sort: (monitor) => epoch(monitor.last_checked_at), cellClassName: "whitespace-nowrap", cell: (monitor) => <Ago at={monitor.last_checked_at} /> },
+  ];
   const toggle = (key: SortKey) => setView({ sort: nextSort(view.sort, key) ?? defaultSort });
   return (
     <div className="flex flex-col gap-6">
@@ -287,26 +274,15 @@ export function MonitorsPage() {
           {!query.isLoading && rows.length === 0 ? (
             <CardText title="No matching monitors" body={view.state === "all" ? "Try a different name or URL." : `No ${tabs.find((tab) => tab.id === view.state)?.label.toLowerCase()} monitors${needle ? " match the search" : ""}.`} />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="cool-table">
-                <thead>
-                  <tr>
-                    <SortHeader column="name" sort={view.sort} onSort={toggle}>Name</SortHeader>
-                    <SortHeader column="state" sort={view.sort} onSort={toggle}>State</SortHeader>
-                    <SortHeader column="today" sort={view.sort} onSort={toggle} className="hidden md:table-cell">Today</SortHeader>
-                    <SortHeader column="month" sort={view.sort} onSort={toggle} className="hidden sm:table-cell">30 days</SortHeader>
-                    <SortHeader column="checked" sort={view.sort} onSort={toggle}>Last check</SortHeader>
-                  </tr>
-                </thead>
-                <tbody>
-                  {query.isLoading ? (
-                    <SkeletonRows columns={[undefined, undefined, "hidden md:table-cell", "hidden sm:table-cell", undefined]} />
-                  ) : (
-                    rows.map((monitor) => <MonitorRow key={monitor.id} monitor={monitor} subtitle={label(monitor)} />)
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              columns={columns}
+              rows={rows}
+              rowKey={(monitor) => monitor.id}
+              rowLink={(monitor) => `/monitors/${monitor.id}`}
+              loading={query.isLoading}
+              sort={view.sort}
+              onSort={toggle}
+            />
           )}
         </LayerCard>
       )}
@@ -324,6 +300,7 @@ export function MonitorDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [checksPage, setChecksPage] = useState(0);
   const [failuresOnly, setFailuresOnly] = useState(false);
+  const [checksSort, setChecksSort] = useState<SortState<string>>(null);
   const query = useQuery({
     queryKey: ["monitor", id],
     queryFn: () => api<MonitorDetail>(`/api/monitors/${id}`),
@@ -357,7 +334,8 @@ export function MonitorDetailPage() {
     );
   }
   if (!monitor) return <p className="field-error">{(query.error as Error | null)?.message ?? "Monitor not found."}</p>;
-  const checks = (monitor.recent ?? []).filter((check) => !failuresOnly || isProblem(check.status));
+  // Sorts every check before paging, so a sort spans all pages.
+  const checks = sortRows((monitor.recent ?? []).filter((check) => !failuresOnly || isProblem(check.status)), checkColumns, checksSort);
   const pages = Math.ceil(checks.length / checksPerPage);
   const pageIndex = Math.min(checksPage, Math.max(0, pages - 1));
   const shown = checks.slice(pageIndex * checksPerPage, (pageIndex + 1) * checksPerPage);
@@ -429,32 +407,16 @@ export function MonitorDetailPage() {
             <CardText title="No checks yet" body={monitor.active ? "The first result appears here in a few seconds." : canEdit ? "Resume the monitor to run checks." : "An editor can resume the monitor to run checks."} />
           )
         ) : (
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <th>Result</th>
-                  <th>Status</th>
-                  <th>Latency</th>
-                  <th>Error</th>
-                  <th>From</th>
-                  <th>When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((check) => (
-                  <tr key={check.id}>
-                    <td><StatusBadge tone={checkTone[check.status] ?? "info"}>{stateLabel[check.status] ?? check.status}</StatusBadge></td>
-                    <td>{check.status_code ?? "-"}</td>
-                    <td className="whitespace-nowrap">{check.status === "failure" ? "-" : `${check.latency_ms} ms`}</td>
-                    <td>{check.error || "-"}</td>
-                    <td>{check.region === "local" ? "This server" : check.region}</td>
-                    <td className="whitespace-nowrap"><Ago at={check.checked_at} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={checkColumns}
+            rows={shown}
+            rowKey={(check) => check.id}
+            sort={checksSort}
+            onSort={(key) => {
+              setChecksSort((current) => nextSort(current, key));
+              setChecksPage(0);
+            }}
+          />
         )}
         {pages > 1 ? (
           <div className="flex items-center justify-between gap-3 border-t border-[var(--ui-divider)] px-4 py-2 text-[0.8125rem] text-[var(--ui-fg-faint)]">
@@ -484,6 +446,55 @@ export function MonitorDetailPage() {
 }
 
 const checksPerPage = 20;
+
+const checkColumns: Column<Check>[] = [
+  {
+    key: "result",
+    header: "Result",
+    sort: (check) => stateLabel[check.status] ?? check.status,
+    cell: (check) => <StatusBadge tone={checkTone[check.status] ?? "info"}>{stateLabel[check.status] ?? check.status}</StatusBadge>,
+  },
+  { key: "status", header: "Status", sort: (check) => check.status_code, cell: (check) => check.status_code ?? "-" },
+  {
+    key: "latency",
+    header: "Latency",
+    sort: (check) => (check.status === "failure" ? null : check.latency_ms),
+    cellClassName: "whitespace-nowrap",
+    cell: (check) => (check.status === "failure" ? "-" : `${check.latency_ms} ms`),
+  },
+  { key: "error", header: "Error", sort: (check) => check.error, cell: (check) => check.error || "-" },
+  { key: "from", header: "From", sort: regionLabel, cell: regionLabel },
+  { key: "when", header: "When", sort: (check) => epoch(check.checked_at), cellClassName: "whitespace-nowrap", cell: (check) => <Ago at={check.checked_at} /> },
+];
+
+function regionLabel(check: Check) {
+  return check.region === "local" ? "This server" : check.region;
+}
+
+type MonitorIncident = MonitorDetail["incidents"][number];
+
+const incidentColumns: Column<MonitorIncident>[] = [
+  {
+    key: "title",
+    header: "Incident",
+    sort: (incident) => incident.title,
+    cell: (incident) => <Link className="row-link" to={`/incidents/${incident.id}`}>{incident.title}</Link>,
+  },
+  {
+    key: "status",
+    header: "Status",
+    sort: (incident) => stateLabel[incident.status],
+    cell: (incident) => <StatusBadge tone={incidentTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>,
+  },
+  { key: "started", header: "Started", sort: (incident) => Date.parse(incident.started_at), cellClassName: "whitespace-nowrap", cell: (incident) => <Ago at={incident.started_at} /> },
+  {
+    key: "duration",
+    header: "Duration",
+    sort: (incident) => (incident.resolved_at ? Date.parse(incident.resolved_at) : Date.now()) - Date.parse(incident.started_at),
+    cellClassName: "whitespace-nowrap",
+    cell: (incident) => (incident.resolved_at ? span(incident.started_at, incident.resolved_at) : `${span(incident.started_at)} so far`),
+  },
+];
 
 const statePhrase: Record<ShownState, string> = { up: "Up", down: "Down", degraded: "Degraded", pending: "Pending", paused: "Paused" };
 
@@ -535,43 +546,7 @@ function IncidentsCard({ incidents }: { incidents: MonitorDetail["incidents"] })
       {incidents.length === 0 ? (
         <CardText title="No incidents" body="An incident opens when the checks fail enough times in a row." />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <th>Incident</th>
-                <th>Status</th>
-                <th>Started</th>
-                <th>Duration</th>
-              </tr>
-            </thead>
-            <tbody>
-              {incidents.map((incident) => {
-                const to = `/incidents/${incident.id}`;
-                return (
-                  <tr key={incident.id} className="clickable-row">
-                    <td className="cell-link">
-                      <Link className="row-link" to={to}>{incident.title}</Link>
-                      {rowCover(to)}
-                    </td>
-                    <td className="cell-link">
-                      {rowCover(to)}
-                      <StatusBadge tone={incidentTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
-                    </td>
-                    <td className="cell-link whitespace-nowrap">
-                      {rowCover(to)}
-                      <Ago at={incident.started_at} />
-                    </td>
-                    <td className="cell-link whitespace-nowrap">
-                      {rowCover(to)}
-                      {incident.resolved_at ? span(incident.started_at, incident.resolved_at) : `${span(incident.started_at)} so far`}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable columns={incidentColumns} rows={incidents} rowKey={(incident) => incident.id} rowLink={(incident) => `/incidents/${incident.id}`} />
       )}
     </LayerCard>
   );

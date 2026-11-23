@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Select, Spinner, StatusBadge, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, type Maintenance, type Monitor, type StatusPage } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -25,14 +26,56 @@ export function MaintenancePage() {
   });
 
   const all = query.data ?? [];
-  const { rows: windows, sort, toggle } = useSort(
-    all.filter((item) => activeFilter === null || item.active === activeFilter),
+  const windows = all.filter((item) => activeFilter === null || item.active === activeFilter);
+  const statusLabel = (item: Maintenance) => (item.active ? "In progress" : "Scheduled");
+  const columns: Column<Maintenance>[] = [
     {
-      title: (item) => item.title,
-      when: (item) => Date.parse(item.starts_at),
-      status: (item) => (item.active ? "In progress" : "Scheduled"),
+      key: "title",
+      header: "Window",
+      sort: (item) => item.title,
+      cellClassName: "max-w-[24rem]",
+      cell: (item) => (
+        <>
+          <div className="font-medium text-[var(--ui-fg)]">{item.title}<ProjectTag id={item.project_id} /></div>
+          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{item.message || "-"}</div>
+          <div className="text-[0.6875rem] text-[var(--ui-fg-faint)] md:hidden">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</div>
+        </>
+      ),
     },
-  );
+    {
+      key: "when",
+      header: "When",
+      className: "hidden md:table-cell",
+      cellClassName: "whitespace-nowrap",
+      sort: (item) => Date.parse(item.starts_at),
+      cell: (item) => <>{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</>,
+    },
+    {
+      key: "status",
+      header: "Status",
+      sort: statusLabel,
+      cell: (item) => (
+        <FilterValue active={activeFilter === item.active} label={statusLabel(item)} onToggle={() => setActiveFilter(activeFilter === item.active ? null : item.active)}>
+          <StatusBadge tone={item.active ? "info" : "neutral"}>{statusLabel(item)}</StatusBadge>
+        </FilterValue>
+      ),
+    },
+    ...(canEdit
+      ? [
+          {
+            key: "actions",
+            header: "Actions",
+            className: "text-right",
+            cell: (item: Maintenance) => (
+              <RowActions label={item.title} actions={[
+                  { label: "Edit", onSelect: () => setEditing(item) },
+                  { label: "Delete", danger: true, onSelect: () => setDeleting(item) },
+                ]} />
+            ),
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="flex flex-col gap-6">
@@ -53,44 +96,7 @@ export function MaintenancePage() {
         ) : !query.isLoading && windows.length === 0 ? (
           <CardText title="No matching windows" body="Remove the status filter to see every window." />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <SortHeader column="title" sort={sort} onSort={toggle}>Window</SortHeader>
-                  <SortHeader column="when" sort={sort} onSort={toggle} className="hidden md:table-cell">When</SortHeader>
-                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                  {canEdit ? <th className="text-right">Actions</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {query.isLoading ? <SkeletonRows columns={[undefined, "hidden md:table-cell", undefined, ...(canEdit ? ["text-right"] : [])]} /> : null}
-                {windows.map((item) => (
-                  <tr key={item.id}>
-                    <td className="max-w-[24rem]">
-                      <div className="font-medium text-[var(--ui-fg)]">{item.title}<ProjectTag id={item.project_id} /></div>
-                      <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{item.message || "-"}</div>
-                      <div className="text-[0.6875rem] text-[var(--ui-fg-faint)] md:hidden">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</div>
-                    </td>
-                    <td className="hidden whitespace-nowrap md:table-cell">{formatTime(item.starts_at)} - {formatTime(item.ends_at)}</td>
-                    <td>
-                      <FilterValue active={activeFilter === item.active} label={item.active ? "In progress" : "Scheduled"} onToggle={() => setActiveFilter(activeFilter === item.active ? null : item.active)}>
-                        <StatusBadge tone={item.active ? "info" : "neutral"}>{item.active ? "In progress" : "Scheduled"}</StatusBadge>
-                      </FilterValue>
-                    </td>
-                    {canEdit ? (
-                      <td className="text-right">
-                        <RowActions label={item.title} actions={[
-                            { label: "Edit", onSelect: () => setEditing(item) },
-                            { label: "Delete", danger: true, onSelect: () => setDeleting(item) },
-                          ]} />
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable columns={columns} rows={windows} rowKey={(item) => item.id} loading={query.isLoading} />
         )}
       </LayerCard>
       <Dialog open={canEdit && open} title="Schedule a window" description="Shown on the status page while it runs." onClose={() => setOpen(false)}>

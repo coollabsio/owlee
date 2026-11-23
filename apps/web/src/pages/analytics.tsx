@@ -3,7 +3,8 @@ import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
 import { CodeBlock, GuideStep, ZoneDownload } from "@/components/setup-guide";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge } from "@/components/ui";
 import { api, type InsightOverview, type InsightRow, type InsightSite } from "@/lib/api";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { useCanEdit } from "@/lib/me";
@@ -64,10 +65,6 @@ export function AnalyticsPage() {
   return <SiteList />;
 }
 
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
-}
-
 function CardEmpty({ title, body }: { title: string; body?: string }) {
   return (
     <div className="px-4 py-10 text-center">
@@ -83,12 +80,6 @@ function SiteList() {
   const sites = query.data ?? [];
   const canEdit = useCanEdit();
   const [open, setOpen] = useState(false);
-  const { rows, sort, toggle } = useSort(sites, {
-    name: (site) => site.name,
-    domain: (site) => site.domain,
-    visitors: (site) => site.visitors_24h,
-    pageviews: (site) => site.pageviews_24h,
-  });
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -105,44 +96,13 @@ function SiteList() {
           actions={canEdit ? <Button variant="primary" onClick={() => setOpen(true)}>New site</Button> : null}
           flush
         >
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                <SortHeader column="domain" sort={sort} onSort={toggle} className="hidden sm:table-cell">Domain</SortHeader>
-                <SortHeader column="visitors" sort={sort} onSort={toggle} className="text-right!">Visitors, 24h</SortHeader>
-                <SortHeader column="pageviews" sort={sort} onSort={toggle} className="text-right!">Pageviews, 24h</SortHeader>
-              </tr>
-            </thead>
-            <tbody>
-              {query.isLoading ? <SkeletonRows columns={[undefined, "hidden sm:table-cell", undefined, undefined]} /> : null}
-              {rows.map((site) => {
-                const to = `/analytics/${site.id}`;
-                return (
-                  <tr key={site.id} className="clickable-row">
-                    <td className="cell-link">
-                      <span className="inline-flex items-center gap-2">
-                        <Link className="row-link" to={to}>{site.name}</Link>
-                        <ProjectTag id={site.project_id} />
-                        {site.last_event_at == null ? <StatusBadge tone="info">Waiting for data</StatusBadge> : null}
-                      </span>
-                      {rowCover(to)}
-                    </td>
-                    <td className="cell-link hidden sm:table-cell">
-                      {rowCover(to)}
-                      <span className="inline-flex items-center gap-2">
-                        {site.domain}
-                        {site.verified ? null : <StatusBadge tone="warning">Unverified</StatusBadge>}
-                        {site.quota_exceeded ? <StatusBadge tone="error">Quota reached</StatusBadge> : null}
-                      </span>
-                    </td>
-                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{site.visitors_24h.toLocaleString()}</td>
-                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{site.pageviews_24h.toLocaleString()}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <DataTable
+            columns={siteColumns}
+            rows={sites}
+            rowKey={(site) => site.id}
+            rowLink={(site) => `/analytics/${site.id}`}
+            loading={query.isLoading}
+          />
         </LayerCard>
       )}
       <Dialog open={canEdit && open} title="New site" description="Paste the site's address. Only the hostname is kept." onClose={() => setOpen(false)}>
@@ -151,6 +111,36 @@ function SiteList() {
     </div>
   );
 }
+
+const siteColumns: Column<InsightSite>[] = [
+  {
+    key: "name",
+    header: "Name",
+    sort: (site) => site.name,
+    cell: (site) => (
+      <span className="inline-flex items-center gap-2">
+        <Link className="row-link" to={`/analytics/${site.id}`}>{site.name}</Link>
+        <ProjectTag id={site.project_id} />
+        {site.last_event_at == null ? <StatusBadge tone="info">Waiting for data</StatusBadge> : null}
+      </span>
+    ),
+  },
+  {
+    key: "domain",
+    header: "Domain",
+    className: "hidden sm:table-cell",
+    sort: (site) => site.domain,
+    cell: (site) => (
+      <span className="inline-flex items-center gap-2">
+        {site.domain}
+        {site.verified ? null : <StatusBadge tone="warning">Unverified</StatusBadge>}
+        {site.quota_exceeded ? <StatusBadge tone="error">Quota reached</StatusBadge> : null}
+      </span>
+    ),
+  },
+  { key: "visitors", header: "Visitors, 24h", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (site) => site.visitors_24h, cell: (site) => site.visitors_24h.toLocaleString() },
+  { key: "pageviews", header: "Pageviews, 24h", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (site) => site.pageviews_24h, cell: (site) => site.pageviews_24h.toLocaleString() },
+];
 
 function NewSiteForm() {
   const client = useQueryClient();
@@ -336,7 +326,7 @@ function OverviewPanel({ siteId, query }: { siteId: string; query: string }) {
 function RealtimePanel({ siteId }: { siteId: string }) {
   const realtime = useQuery({
     queryKey: ["site-realtime", siteId],
-    queryFn: () => api<{ current_visitors: number; activity: { timestamp: number; type: string; path: string | null; country: string | null; browser: string | null }[] }>(`/api/sites/${siteId}/realtime`),
+    queryFn: () => api<{ current_visitors: number; activity: RealtimeItem[] }>(`/api/sites/${siteId}/realtime`),
     refetchInterval: 10_000,
   });
   const activity = realtime.data?.activity ?? [];
@@ -348,31 +338,21 @@ function RealtimePanel({ siteId }: { siteId: string }) {
       </LayerCard>
       <LayerCard title="Activity" flush>
         {activity.length === 0 ? <CardEmpty title="No activity" body="New page views and events show up here." /> : (
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <th>Page</th>
-                <th>Type</th>
-                <th className="hidden sm:table-cell">Country</th>
-                <th className="hidden sm:table-cell">Browser</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activity.map((item, index) => (
-                <tr key={`${item.timestamp}-${index}`}>
-                  <td className="font-medium text-[var(--ui-fg)]">{item.path ?? item.type}</td>
-                  <td>{item.type}</td>
-                  <td className="hidden sm:table-cell">{item.country ?? "-"}</td>
-                  <td className="hidden sm:table-cell">{item.browser ?? "-"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <DataTable columns={realtimeColumns} rows={activity} rowKey={(item, index) => `${item.timestamp}-${index}`} />
         )}
       </LayerCard>
     </div>
   );
 }
+
+type RealtimeItem = { timestamp: number; type: string; path: string | null; country: string | null; browser: string | null };
+
+const realtimeColumns: Column<RealtimeItem>[] = [
+  { key: "page", header: "Page", cellClassName: "font-medium text-[var(--ui-fg)]", sort: (item) => item.path ?? item.type, cell: (item) => item.path ?? item.type },
+  { key: "type", header: "Type", sort: (item) => item.type, cell: (item) => item.type },
+  { key: "country", header: "Country", className: "hidden sm:table-cell", sort: (item) => item.country, cell: (item) => item.country ?? "-" },
+  { key: "browser", header: "Browser", className: "hidden sm:table-cell", sort: (item) => item.browser, cell: (item) => item.browser ?? "-" },
+];
 
 function VitalsCard({ siteId, query }: { siteId: string; query: string }) {
   const vitals = useQuery({
@@ -464,67 +444,45 @@ function BreakdownCard({
 function EventsPanel({ siteId, query }: { siteId: string; query: string }) {
   const events = useQuery({
     queryKey: ["site-events", siteId, query],
-    queryFn: () => api<{ total: number; rows: { name: string; count: number; visitors: number }[] }>(`/api/sites/${siteId}/events?${query}`),
+    queryFn: () => api<{ total: number; rows: EventRow[] }>(`/api/sites/${siteId}/events?${query}`),
   });
   const rows = events.data?.rows ?? [];
   return (
     <LayerCard title="Custom events" description={`${events.data?.total ?? 0} events in this range. Call owleeEvent(name, data) from the tracker.`} flush>
       {events.error ? <div className="px-4 pt-3"><ErrorText error={events.error} /></div> : null}
       {rows.length === 0 ? <CardEmpty title="No events yet" body="Events you send from the tracker show up here." /> : (
-        <table className="cool-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th className="text-right!">Count</th>
-              <th className="text-right!">Visitors</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.name}>
-                <td className="font-medium text-[var(--ui-fg)]">{row.name}</td>
-                <td className="text-right font-mono text-[0.75rem]">{row.count}</td>
-                <td className="text-right font-mono text-[0.75rem]">{row.visitors}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <DataTable columns={eventColumns} rows={rows} rowKey={(row) => row.name} />
       )}
     </LayerCard>
   );
 }
 
+type EventRow = { name: string; count: number; visitors: number };
+
+const eventColumns: Column<EventRow>[] = [
+  { key: "name", header: "Name", cellClassName: "font-medium text-[var(--ui-fg)]", sort: (row) => row.name, cell: (row) => row.name },
+  { key: "count", header: "Count", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (row) => row.count, cell: (row) => row.count },
+  { key: "visitors", header: "Visitors", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (row) => row.visitors, cell: (row) => row.visitors },
+];
+
+type VisitorRow = { id: string; views: number; events: number; last_seen: number };
+
 function VisitorsPanel({ siteId, query }: { siteId: string; query: string }) {
   const visitors = useQuery({
     queryKey: ["site-visitors", siteId, query],
-    queryFn: () => api<{ rows: { id: string; views: number; events: number; last_seen: number }[] }>(`/api/sites/${siteId}/visitors?${query}`),
+    queryFn: () => api<{ rows: VisitorRow[] }>(`/api/sites/${siteId}/visitors?${query}`),
   });
   const rows = visitors.data?.rows ?? [];
+  const columns: Column<VisitorRow>[] = [
+    { key: "visitor", header: "Visitor", sort: (row) => row.id, cell: (row) => <Link className="row-link font-mono text-[0.75rem]" to={`/analytics/${siteId}/visitors/${row.id}`}>{row.id}</Link> },
+    { key: "views", header: "Views", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (row) => row.views, cell: (row) => row.views },
+    { key: "events", header: "Events", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (row) => row.events, cell: (row) => row.events },
+  ];
   return (
     <LayerCard title="Visitors" description="Identity resets each month. The list shows the hash, not an address." flush>
       {visitors.error ? <div className="px-4 pt-3"><ErrorText error={visitors.error} /></div> : null}
       {rows.length === 0 ? <CardEmpty title="No visitors" body="Visitors in this range show up here." /> : (
-        <table className="cool-table">
-          <thead>
-            <tr>
-              <th>Visitor</th>
-              <th className="text-right!">Views</th>
-              <th className="text-right!">Events</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const to = `/analytics/${siteId}/visitors/${row.id}`;
-              return (
-                <tr key={row.id} className="clickable-row">
-                  <td className="cell-link"><Link className="row-link font-mono text-[0.75rem]" to={to}>{row.id}</Link>{rowCover(to)}</td>
-                  <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{row.views}</td>
-                  <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{row.events}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <DataTable columns={columns} rows={rows} rowKey={(row) => row.id} rowLink={(row) => `/analytics/${siteId}/visitors/${row.id}`} />
       )}
     </LayerCard>
   );
@@ -534,7 +492,7 @@ export function VisitorPage() {
   const { siteId, visitorId } = useParams();
   const detail = useQuery({
     queryKey: ["visitor", siteId, visitorId],
-    queryFn: () => api<{ visitor: { id: string; browser: string | null; os: string | null; country: string | null; device: string | null }; activity: { timestamp: number; type: string; path: string | null; title: string | null }[] }>(`/api/sites/${siteId}/visitors/${visitorId}`),
+    queryFn: () => api<{ visitor: { id: string; browser: string | null; os: string | null; country: string | null; device: string | null }; activity: VisitorActivity[] }>(`/api/sites/${siteId}/visitors/${visitorId}`),
     enabled: Boolean(siteId && visitorId),
   });
   const visitor = detail.data?.visitor;
@@ -565,29 +523,20 @@ export function VisitorPage() {
       </LayerCard>
       <LayerCard title="Activity" flush>
         {activity.length === 0 ? <CardEmpty title="No activity" /> : (
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <th>Page</th>
-                <th>Title</th>
-                <th className="text-right!">Type</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activity.map((item, index) => (
-                <tr key={`${item.timestamp}-${index}`}>
-                  <td className="font-medium text-[var(--ui-fg)]">{item.path ?? item.type}</td>
-                  <td>{item.title || "-"}</td>
-                  <td className="text-right">{item.type}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <DataTable columns={visitorActivityColumns} rows={activity} rowKey={(item, index) => `${item.timestamp}-${index}`} />
         )}
       </LayerCard>
     </div>
   );
 }
+
+type VisitorActivity = { timestamp: number; type: string; path: string | null; title: string | null };
+
+const visitorActivityColumns: Column<VisitorActivity>[] = [
+  { key: "page", header: "Page", cellClassName: "font-medium text-[var(--ui-fg)]", sort: (item) => item.path ?? item.type, cell: (item) => item.path ?? item.type },
+  { key: "title", header: "Title", sort: (item) => item.title, cell: (item) => item.title || "-" },
+  { key: "type", header: "Type", className: "text-right!", sort: (item) => item.type, cell: (item) => item.type },
+];
 
 function VerifyRecord({ site }: { site: InsightSite }) {
   const client = useQueryClient();

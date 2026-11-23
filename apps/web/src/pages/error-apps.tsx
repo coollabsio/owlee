@@ -3,10 +3,11 @@ import { useState } from "react";
 import { ChevronDown } from "reicon-react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Stat } from "@/components/charts";
+import { type Column, DataTable } from "@/components/data-table";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, GuideStep } from "@/components/setup-guide";
-import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
+import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge, useCopy } from "@/components/ui";
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformGuide, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
@@ -19,15 +20,58 @@ export function ErrorAppsPage() {
   const apps = useQuery({ queryKey: scope.key("apps"), queryFn: () => api<ErrorApp[]>(scope.path("/api/error-apps")) });
   const [open, setOpen] = useState(false);
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
-  const { rows, sort, toggle } = useSort(
-    (apps.data ?? []).filter((app) => !platformFilter || app.platform === platformFilter),
+  const rows = (apps.data ?? []).filter((app) => !platformFilter || app.platform === platformFilter);
+  const columns: Column<ErrorApp>[] = [
     {
-      name: (app) => app.name,
-      platform: (app) => guideFor(app.platform).label,
-      status: (app) => (app.lastEventAt ? Date.parse(app.lastEventAt) : null),
-      issues: (app) => app.issueCount,
+      key: "name",
+      header: "Name",
+      sort: (app) => app.name,
+      cell: (app) => (
+        <>
+          <Link className="row-link" to={`/errors/apps/${app.id}`}>
+            {app.name}
+          </Link>
+          <ProjectTag id={app.projectId} />
+          {app.quotaExceeded ? (
+            <StatusBadge tone="error">Daily quota reached ({app.usedToday}/{app.dailyQuota})</StatusBadge>
+          ) : null}
+        </>
+      ),
     },
-  );
+    {
+      key: "platform",
+      header: "Platform",
+      sort: (app) => guideFor(app.platform).label,
+      cell: (app) => (
+        <FilterValue
+          active={platformFilter === app.platform}
+          label={guideFor(app.platform).label}
+          onToggle={() => setPlatformFilter(platformFilter === app.platform ? null : app.platform)}
+        >
+          <Badge>{guideFor(app.platform).label}</Badge>
+        </FilterValue>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      sort: (app) => (app.lastEventAt ? Date.parse(app.lastEventAt) : null),
+      cellClassName: "whitespace-nowrap",
+      cell: (app) => (
+        <span title={app.lastEventAt ? fullTime(app.lastEventAt) : undefined}>
+          {app.lastEventAt ? <StatusBadge tone="success">Last event {timeAgo(app.lastEventAt)}</StatusBadge> : <StatusBadge>Waiting for events</StatusBadge>}
+        </span>
+      ),
+    },
+    {
+      key: "issues",
+      header: "Issues",
+      className: "text-right",
+      cellClassName: "tabular-nums",
+      sort: (app) => app.issueCount,
+      cell: (app) => app.issueCount.toLocaleString(),
+    },
+  ];
 
   return (
     <div className="flex flex-col gap-6">
@@ -61,57 +105,13 @@ export function ErrorAppsPage() {
           </div>
         ) : null}
         {apps.isLoading || (apps.data && apps.data.length > 0) ? (
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                  <SortHeader column="platform" sort={sort} onSort={toggle}>Platform</SortHeader>
-                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                  <SortHeader column="issues" sort={sort} onSort={toggle} className="text-right">Issues</SortHeader>
-                </tr>
-              </thead>
-              <tbody>
-                {apps.isLoading ? <SkeletonRows columns={[undefined, undefined, undefined, "text-right"]} /> : null}
-                {rows.map((app) => (
-                  <tr key={app.id} className="clickable-row">
-                    <td className="cell-link">
-                      <Link className="row-link" to={`/errors/apps/${app.id}`}>
-                        {app.name}
-                      </Link>
-                      <ProjectTag id={app.projectId} />
-                      {rowCover(`/errors/apps/${app.id}`)}
-                      {app.quotaExceeded ? (
-                        <StatusBadge tone="error">Daily quota reached ({app.usedToday}/{app.dailyQuota})</StatusBadge>
-                      ) : null}
-                    </td>
-                    <td className="cell-link">
-                      {rowCover(`/errors/apps/${app.id}`)}
-                      <FilterValue
-                        active={platformFilter === app.platform}
-                        label={guideFor(app.platform).label}
-                        onToggle={() => setPlatformFilter(platformFilter === app.platform ? null : app.platform)}
-                      >
-                        <Badge>{guideFor(app.platform).label}</Badge>
-                      </FilterValue>
-                    </td>
-                    <td className="cell-link whitespace-nowrap" title={app.lastEventAt ? fullTime(app.lastEventAt) : undefined}>
-                      {rowCover(`/errors/apps/${app.id}`)}
-                      {app.lastEventAt ? (
-                        <StatusBadge tone="success">Last event {timeAgo(app.lastEventAt)}</StatusBadge>
-                      ) : (
-                        <StatusBadge>Waiting for events</StatusBadge>
-                      )}
-                    </td>
-                    <td className="cell-link text-right tabular-nums">
-                      {rowCover(`/errors/apps/${app.id}`)}
-                      {app.issueCount.toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={columns}
+            rows={rows}
+            rowKey={(app) => app.id}
+            rowLink={(app) => `/errors/apps/${app.id}`}
+            loading={apps.isLoading}
+          />
         ) : null}
       </LayerCard>
       <Dialog open={canEdit && open} title="New app" description="Pick the platform you will install the SDK on. The setup guide follows it." onClose={() => setOpen(false)}>
@@ -166,10 +166,6 @@ function NewAppForm() {
       </div>
     </form>
   );
-}
-
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
 }
 
 export function ErrorAppDetailPage() {

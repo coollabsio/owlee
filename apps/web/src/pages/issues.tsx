@@ -1,10 +1,11 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, X } from "reicon-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { PriorityMark, Sparkline } from "@/components/error-charts";
 import { Badge } from "@/components/issue-badge";
-import { Button, Input, LayerCard, LoadMore, PageHeader, Select, SkeletonRows } from "@/components/ui";
+import { type Column, DataTable, type SortDirection } from "@/components/data-table";
+import { Button, Input, LayerCard, LoadMore, PageHeader, Select } from "@/components/ui";
 import { api, flattenPages, withCursor, type ErrorApp, type Issue, type IssueFeed } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
@@ -18,12 +19,10 @@ const statuses = [
   { id: "all", label: "All" },
 ] as const;
 const ranges = ["24h", "7d", "14d", "30d"] as const;
-const sorts = [
-  { id: "last_seen", label: "Last seen" },
-  { id: "age", label: "Age" },
-  { id: "events", label: "Events" },
-  { id: "users", label: "Users" },
-] as const;
+const sorts = ["last_seen", "age", "title", "events", "users", "priority"] as const;
+type IssueSortKey = (typeof sorts)[number];
+/** The direction the server uses when the URL names no order. */
+const defaultOrder = (sort: IssueSortKey): SortDirection => (sort === "age" || sort === "title" ? "asc" : "desc");
 
 type Status = (typeof statuses)[number]["id"];
 
@@ -34,10 +33,11 @@ type Filters = {
   environment: string;
   since: (typeof ranges)[number];
   q: string;
-  sort: (typeof sorts)[number]["id"];
+  sort: IssueSortKey;
+  order: "" | SortDirection;
 };
 
-const defaults: Filters = { status: "unresolved", app: "", environment: "", since: "14d", q: "", sort: "last_seen" };
+const defaults: Filters = { status: "unresolved", app: "", environment: "", since: "14d", q: "", sort: "last_seen", order: "" };
 
 function parseFilters(params: URLSearchParams): Filters {
   return {
@@ -46,7 +46,8 @@ function parseFilters(params: URLSearchParams): Filters {
     environment: params.get("environment") ?? defaults.environment,
     since: oneOf(params.get("since"), ranges, defaults.since),
     q: params.get("q") ?? defaults.q,
-    sort: oneOf(params.get("sort"), sorts.map((item) => item.id), defaults.sort),
+    sort: oneOf(params.get("sort"), sorts, defaults.sort),
+    order: oneOf(params.get("order"), ["asc", "desc"] as const, defaults.order),
   };
 }
 
@@ -60,6 +61,7 @@ function filterSearch(filters: Filters) {
 
 function feedSearch(filters: Filters) {
   const search = new URLSearchParams({ since: filters.since, sort: filters.sort });
+  if (filters.order) search.set("order", filters.order);
   if (filters.status !== "all") search.set("status", filters.status);
   if (filters.app) search.set("app_id", filters.app);
   if (filters.environment) search.set("environment", filters.environment);
@@ -103,6 +105,7 @@ export function IssuesPage() {
     queryFn: ({ pageParam }) => api<IssueFeed>(withCursor(scope.path(`/api/error-issues?${feedQuery}`), pageParam)),
     initialPageParam: "",
     getNextPageParam: (page) => page.nextCursor ?? undefined,
+    placeholderData: keepPreviousData,
     refetchInterval: 4000,
   });
   const firstPage = feed.data?.pages[0];
@@ -127,6 +130,13 @@ export function IssuesPage() {
   function select(ids: string[]) {
     setSelection({ query: feedQuery, ids });
   }
+  const sort = { key: filters.sort, direction: filters.order || defaultOrder(filters.sort) };
+  const columns = issueColumns({
+    trend,
+    setTrend,
+    showApp: !filters.app,
+    selection: canEdit ? { selected, allChecked, select, all: issues.map((issue) => issue.id) } : undefined,
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -221,14 +231,6 @@ export function IssuesPage() {
               options={ranges.map((item) => ({ value: item, label: `Last ${item}` }))}
             />
           </div>
-          <div className="w-32">
-            <Select
-              aria-label="Sort"
-              value={filters.sort}
-              onChange={(sort) => setFilters({ sort })}
-              options={sorts.map((item) => ({ value: item.id, label: item.label }))}
-            />
-          </div>
         </div>
         {feed.isError ? <p className="p-4 text-[0.8125rem] text-[var(--ui-error)]">{(feed.error as Error).message}</p> : null}
         {apps.data?.length === 0 ? (
@@ -262,72 +264,21 @@ export function IssuesPage() {
           </div>
         ) : null}
         {issues.length > 0 || feed.isLoading ? (
-          <div className="overflow-x-auto">
-            <table className="cool-table min-w-[60rem]">
-              <thead>
-                <tr>
-                  {canEdit ? (
-                    <th className="w-10 !pr-0">
-                      <input
-                        type="checkbox"
-                        className="align-middle"
-                        ref={(input) => {
-                          if (input) input.indeterminate = selected.length > 0 && !allChecked;
-                        }}
-                        checked={allChecked}
-                        onChange={() => select(allChecked ? [] : issues.map((issue) => issue.id))}
-                        aria-label="Select all issues"
-                      />
-                    </th>
-                  ) : null}
-                  <th>Issue</th>
-                  <th>Last seen</th>
-                  <th>Age</th>
-                  <th>
-                    <span className="inline-flex items-center gap-2">
-                      Trend
-                      <span className="inline-flex gap-px rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-px">
-                        {(["24h", "14d"] as const).map((item) => (
-                          <button
-                            key={item}
-                            type="button"
-                            className={cn(
-                              "rounded-[5px] px-1.5 py-0.5 text-[0.6875rem] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
-                              trend === item && "bg-[var(--ui-hover)] text-[var(--ui-fg)]",
-                            )}
-                            onClick={() => setTrend(item)}
-                          >
-                            {item}
-                          </button>
-                        ))}
-                      </span>
-                    </span>
-                  </th>
-                  <th>Events</th>
-                  <th>Users</th>
-                  <th>Priority</th>
-                </tr>
-              </thead>
-              <tbody>
-                {feed.isLoading ? <SkeletonRows columns={[...(canEdit ? ["w-10 !pr-0"] : []), undefined, undefined, undefined, undefined, undefined, undefined, undefined]} /> : null}
-                {issues.map((issue) => (
-                  <IssueRowView
-                    key={issue.id}
-                    issue={issue}
-                    trend={trend}
-                    showApp={!filters.app}
-                    checked={selected.includes(issue.id)}
-                    onCheck={
-                      canEdit ? (checked) => select(checked ? [...selected, issue.id] : selected.filter((id) => id !== issue.id)) : undefined
-                    }
-                    onOpen={() =>
-                      navigate(`/errors/${issue.shortId || issue.id}`, { state: { listSearch: viewQuery } satisfies IssueLocationState })
-                    }
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            className="min-w-[60rem]"
+            columns={columns}
+            rows={issues}
+            rowKey={(issue) => issue.id}
+            onRowClick={(issue) =>
+              navigate(`/errors/${issue.shortId || issue.id}`, { state: { listSearch: viewQuery } satisfies IssueLocationState })
+            }
+            loading={feed.isLoading}
+            sort={sort}
+            onSort={(key) => {
+              const next = oneOf(key, sorts, sort.key);
+              setFilters(next === sort.key ? { order: sort.direction === "asc" ? "desc" : "asc" } : { sort: next, order: "" });
+            }}
+          />
         ) : null}
         <LoadMore query={feed} label="Load more issues" />
       </LayerCard>
@@ -423,55 +374,115 @@ function ViewsMenu({ current, onApply }: { current: string; onApply: (query: str
   );
 }
 
-function IssueRowView({
-  issue,
+function issueColumns({
   trend,
+  setTrend,
   showApp,
-  checked,
-  onCheck,
-  onOpen,
+  selection,
 }: {
-  issue: Issue;
   trend: "24h" | "14d";
+  setTrend: (trend: "24h" | "14d") => void;
   showApp: boolean;
-  checked: boolean;
-  onCheck?: (checked: boolean) => void;
-  onOpen: () => void;
-}) {
-  const parts = splitTitle(issue.title);
-  const isNew = Date.now() - new Date(issue.firstSeen).getTime() < DAY_MS;
-  return (
-    <tr className="clickable-row" onClick={onOpen}>
-      {onCheck ? (
-        <td className="!pr-0" onClick={(event) => event.stopPropagation()}>
-          <input type="checkbox" className="align-middle" checked={checked} aria-label={`Select ${issue.shortId}`} onChange={(event) => onCheck(event.target.checked)} />
-        </td>
-      ) : null}
-      <td>
-        <div className="font-medium text-[var(--ui-fg)]">{parts.type}</div>
-        {parts.message ? <div className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-[0.75rem] text-[var(--ui-fg-faint)]">
-          <span className="font-mono text-[var(--ui-fg-dim)]">{issue.shortId}</span>
-          {showApp ? <Badge>{issue.appName}</Badge> : null}
-          {isNew ? <Badge tone="info">New</Badge> : null}
-          {issue.unhandled ? <Badge tone="fatal">Unhandled</Badge> : null}
-          <span>{issue.culprit || "No culprit"}</span>
-        </div>
-      </td>
-      <td className="whitespace-nowrap" title={fullTime(issue.lastSeen)}>
-        {timeAgo(issue.lastSeen)}
-      </td>
-      <td className="whitespace-nowrap" title={fullTime(issue.firstSeen)}>
-        {timeAgo(issue.firstSeen)}
-      </td>
-      <td>{trend === "24h" ? <Sparkline values={issue.trend24h} /> : <Sparkline values={issue.trend14d} />}</td>
-      <td className="tabular-nums">{issue.periodEventCount}</td>
-      <td className="tabular-nums">{issue.userCount}</td>
-      <td>
-        <PriorityMark priority={issue.priority} />
-      </td>
-    </tr>
-  );
+  selection?: { selected: string[]; allChecked: boolean; select: (ids: string[]) => void; all: string[] };
+}): Column<Issue, IssueSortKey | "check" | "trend">[] {
+  const check: Column<Issue, "check"> | null = selection
+    ? {
+        key: "check",
+        label: "Select",
+        className: "w-10 !pr-0",
+        stopRowClick: true,
+        header: (
+          <input
+            type="checkbox"
+            className="align-middle"
+            ref={(input) => {
+              if (input) input.indeterminate = selection.selected.length > 0 && !selection.allChecked;
+            }}
+            checked={selection.allChecked}
+            onChange={() => selection.select(selection.allChecked ? [] : selection.all)}
+            aria-label="Select all issues"
+          />
+        ),
+        cell: (issue) => (
+          <input
+            type="checkbox"
+            className="align-middle"
+            checked={selection.selected.includes(issue.id)}
+            aria-label={`Select ${issue.shortId}`}
+            onChange={(event) =>
+              selection.select(event.target.checked ? [...selection.selected, issue.id] : selection.selected.filter((id) => id !== issue.id))
+            }
+          />
+        ),
+      }
+    : null;
+  return [
+    ...(check ? [check] : []),
+    {
+      key: "title",
+      header: "Issue",
+      sort: true,
+      cell: (issue) => {
+        const parts = splitTitle(issue.title);
+        const isNew = Date.now() - new Date(issue.firstSeen).getTime() < DAY_MS;
+        return (
+          <>
+            <div className="font-medium text-[var(--ui-fg)]">{parts.type}</div>
+            {parts.message ? <div className="text-[0.8125rem] text-[var(--ui-fg-dim)]">{parts.message}</div> : null}
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[0.75rem] text-[var(--ui-fg-faint)]">
+              <span className="font-mono text-[var(--ui-fg-dim)]">{issue.shortId}</span>
+              {showApp ? <Badge>{issue.appName}</Badge> : null}
+              {isNew ? <Badge tone="info">New</Badge> : null}
+              {issue.unhandled ? <Badge tone="fatal">Unhandled</Badge> : null}
+              <span>{issue.culprit || "No culprit"}</span>
+            </div>
+          </>
+        );
+      },
+    },
+    {
+      key: "last_seen",
+      header: "Last seen",
+      sort: true,
+      cellClassName: "whitespace-nowrap",
+      cell: (issue) => <span title={fullTime(issue.lastSeen)}>{timeAgo(issue.lastSeen)}</span>,
+    },
+    {
+      key: "age",
+      header: "Age",
+      sort: true,
+      cellClassName: "whitespace-nowrap",
+      cell: (issue) => <span title={fullTime(issue.firstSeen)}>{timeAgo(issue.firstSeen)}</span>,
+    },
+    {
+      key: "trend",
+      label: "Trend",
+      header: (
+        <span className="inline-flex items-center gap-2">
+          Trend
+          <span className="inline-flex gap-px rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] p-px">
+            {(["24h", "14d"] as const).map((item) => (
+              <button
+                key={item}
+                type="button"
+                className={cn(
+                  "rounded-[5px] px-1.5 py-0.5 text-[0.6875rem] text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]",
+                  trend === item && "bg-[var(--ui-hover)] text-[var(--ui-fg)]",
+                )}
+                onClick={() => setTrend(item)}
+              >
+                {item}
+              </button>
+            ))}
+          </span>
+        </span>
+      ),
+      cell: (issue) => <Sparkline values={trend === "24h" ? issue.trend24h : issue.trend14d} />,
+    },
+    { key: "events", header: "Events", sort: true, cellClassName: "tabular-nums", cell: (issue) => issue.periodEventCount },
+    { key: "users", header: "Users", sort: true, cellClassName: "tabular-nums", cell: (issue) => issue.userCount },
+    { key: "priority", header: "Priority", sort: true, cell: (issue) => <PriorityMark priority={issue.priority} /> },
+  ];
 }
 
 function Token({ label, onRemove }: { label: string; onRemove: () => void }) {

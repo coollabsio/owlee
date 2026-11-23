@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
-import { Button, CopyButton, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, CopyButton, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, RowActions, Spinner, StatusBadge } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { type Agent, ApiError, api, createAgent, type CreatedAgent, deleteAgent, renameAgent, rotateAgentToken } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
@@ -29,12 +30,44 @@ export function AgentsPage() {
   const filtered = (query.data ?? []).filter(
     (agent) => agent.name.toLowerCase().includes(search.trim().toLowerCase()) && (onlineFilter === null || agent.online === onlineFilter),
   );
-  const { rows: agents, sort, toggle } = useSort(filtered, {
-    name: (agent) => agent.name,
-    status: (agent) => (agent.online ? "Online" : "Offline"),
-    monitors: (agent) => agent.monitor_count,
-    seen: (agent) => (agent.last_seen_at ? Date.parse(agent.last_seen_at) : null),
-  });
+  const agentColumns: Column<Agent>[] = [
+    {
+      key: "name",
+      header: "Name",
+      sort: (agent) => agent.name,
+      cellClassName: "font-medium text-[var(--ui-fg)]",
+      cell: (agent) => <>{agent.name}<ProjectTag id={agent.project_id} /></>,
+    },
+    {
+      key: "status",
+      header: "Status",
+      sort: (agent) => (agent.online ? "Online" : "Offline"),
+      cell: (agent) => (
+        <FilterValue active={onlineFilter === agent.online} label={agent.online ? "Online" : "Offline"} onToggle={() => setOnlineFilter(onlineFilter === agent.online ? null : agent.online)}>
+          <StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge>
+        </FilterValue>
+      ),
+    },
+    { key: "monitors", header: "Monitors", className: "hidden sm:table-cell", sort: (agent) => agent.monitor_count, cell: (agent) => agent.monitor_count },
+    {
+      key: "seen",
+      header: "Last seen",
+      className: "hidden md:table-cell",
+      sort: (agent) => (agent.last_seen_at ? Date.parse(agent.last_seen_at) : null),
+      cell: (agent) => timeAgo(agent.last_seen_at),
+    },
+  ];
+  const actionsColumn: Column<Agent> = {
+    key: "actions",
+    header: "Actions",
+    className: "text-right",
+    cell: (agent) => (
+      <RowActions label={agent.name} actions={[
+          { label: "Details", onSelect: () => setViewing(agent) },
+          { label: "Delete", danger: true, onSelect: () => setDeleting(agent) },
+        ]} />
+    ),
+  };
   const newAgent = <Button variant="primary" onClick={() => setOpen(true)}>New agent</Button>;
   function closeNew() {
     setOpen(false);
@@ -53,47 +86,10 @@ export function AgentsPage() {
             <Input className="max-w-64" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search agents" aria-label="Search agents" />
             <FilterChips filters={filters} onClear={() => setOnlineFilter(null)} />
           </div>
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <SortHeader column="name" sort={sort} onSort={toggle}>Name</SortHeader>
-                  <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                  <SortHeader column="monitors" sort={sort} onSort={toggle} className="hidden sm:table-cell">Monitors</SortHeader>
-                  <SortHeader column="seen" sort={sort} onSort={toggle} className="hidden md:table-cell">Last seen</SortHeader>
-                  {canEdit ? <th className="text-right">Actions</th> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {query.isLoading ? <SkeletonRows columns={[undefined, undefined, "hidden sm:table-cell", "hidden md:table-cell", ...(canEdit ? ["text-right"] : [])]} /> : null}
-                {agents.map((agent) => (
-                  <tr key={agent.id}>
-                    <td className="font-medium text-[var(--ui-fg)]">{agent.name}<ProjectTag id={agent.project_id} /></td>
-                    <td>
-                      <FilterValue active={onlineFilter === agent.online} label={agent.online ? "Online" : "Offline"} onToggle={() => setOnlineFilter(onlineFilter === agent.online ? null : agent.online)}>
-                        <StatusBadge tone={agent.online ? "success" : "neutral"}>{agent.online ? "Online" : "Offline"}</StatusBadge>
-                      </FilterValue>
-                    </td>
-                    <td className="hidden sm:table-cell">{agent.monitor_count}</td>
-                    <td className="hidden md:table-cell">{timeAgo(agent.last_seen_at)}</td>
-                    {canEdit ? (
-                      <td className="text-right">
-                        <RowActions label={agent.name} actions={[
-                            { label: "Details", onSelect: () => setViewing(agent) },
-                            { label: "Delete", danger: true, onSelect: () => setDeleting(agent) },
-                          ]} />
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-                {!query.isLoading && agents.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center text-[var(--ui-fg-faint)]">No agents match your search or filters.</td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+          <DataTable columns={canEdit ? [...agentColumns, actionsColumn] : agentColumns} rows={filtered} rowKey={(agent) => agent.id} loading={query.isLoading} />
+          {!query.isLoading && filtered.length === 0 ? (
+            <p className="flex h-12 items-center justify-center px-4 text-[0.8125rem] text-[var(--ui-fg-faint)]">No agents match your search or filters.</p>
+          ) : null}
         </LayerCard>
       )}
       <Dialog

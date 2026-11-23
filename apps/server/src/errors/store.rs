@@ -247,6 +247,8 @@ pub struct IssueQuery {
     pub environment: String,
     pub since: String,
     pub sort: String,
+    /// `asc` or `desc`. Empty means the sort's own direction.
+    pub order: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,6 +337,8 @@ enum IssueSort {
     FirstSeen,
     Events,
     Users,
+    Title,
+    Priority,
 }
 
 impl IssueSort {
@@ -343,6 +347,8 @@ impl IssueSort {
             "age" | "first_seen" => Self::FirstSeen,
             "events" => Self::Events,
             "users" => Self::Users,
+            "title" => Self::Title,
+            "priority" => Self::Priority,
             _ => Self::LastSeen,
         }
     }
@@ -353,11 +359,17 @@ impl IssueSort {
             Self::FirstSeen => "t.first_seen",
             Self::Events => "t.period_event_count",
             Self::Users => "t.user_count",
+            Self::Title => "t.title",
+            Self::Priority => "t.priority_rank",
         }
     }
 
-    fn ascending(self) -> bool {
-        matches!(self, Self::FirstSeen)
+    fn ascending(self, order: &str) -> bool {
+        match order {
+            "asc" => true,
+            "desc" => false,
+            _ => matches!(self, Self::FirstSeen | Self::Title),
+        }
     }
 
     fn cursor(self, issue: &IssueRow) -> Cursor {
@@ -366,6 +378,8 @@ impl IssueSort {
             Self::FirstSeen => Key::Text(issue.first_seen.clone()),
             Self::Events => Key::Int(issue.period_event_count),
             Self::Users => Key::Int(issue.user_count),
+            Self::Title => Key::Text(issue.title.clone()),
+            Self::Priority => Key::Int(priority_rank(&issue.level)),
         };
         Cursor::new(key, issue.id.clone())
     }
@@ -386,15 +400,15 @@ pub async fn list_issues(
     let filters = issue_filter_binds(query, &since);
     let sort = IssueSort::parse(&query.sort);
     let after = match sort {
-        IssueSort::LastSeen | IssueSort::FirstSeen => {
+        IssueSort::LastSeen | IssueSort::FirstSeen | IssueSort::Title => {
             paging.text_after()?.map(|(key, id)| (Bound::Text(key), id))
         }
-        IssueSort::Events | IssueSort::Users => {
+        IssueSort::Events | IssueSort::Users | IssueSort::Priority => {
             paging.int_after()?.map(|(key, id)| (Bound::Int(key), id))
         }
     };
     let column = sort.column();
-    let (direction, past) = if sort.ascending() {
+    let (direction, past) = if sort.ascending(&query.order) {
         ("ASC", ">")
     } else {
         ("DESC", "<")
@@ -413,7 +427,8 @@ pub async fn list_issues(
                      ELSE (SELECT COUNT(*) FROM events ev WHERE ev.issue_id = i.id AND ev.timestamp >= ?)
                 END AS BIGINT) AS period_event_count,
                 CAST((SELECT COUNT(DISTINCT ev.user_key) FROM events ev
-                      WHERE ev.issue_id = i.id AND ev.user_key != '' AND (? = '' OR ev.timestamp >= ?)) AS BIGINT) AS user_count
+                      WHERE ev.issue_id = i.id AND ev.user_key != '' AND (? = '' OR ev.timestamp >= ?)) AS BIGINT) AS user_count,
+                CAST(CASE i.level WHEN 'fatal' THEN 2 WHEN 'error' THEN 1 ELSE 0 END AS BIGINT) AS priority_rank
          FROM {ISSUE_SOURCE}
          WHERE (? = '' OR i.status = ?)
            AND {ISSUE_FILTERS}) t
@@ -1423,6 +1438,15 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|time| time.with_timezone(&Utc))
+}
+
+/// The order of `priority_for`, matching the `priority_rank` column of the issue feed.
+fn priority_rank(level: &str) -> i64 {
+    match level {
+        "fatal" => 2,
+        "error" => 1,
+        _ => 0,
+    }
 }
 
 fn priority_for(level: &str) -> String {

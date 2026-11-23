@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Link, useParams } from "react-router";
 import { BarList, DailyBars, Stat } from "@/components/charts";
-import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, Dialog, ErrorText, Field, Input, LayerCard, PageHeader, Select, Skeleton, Spinner, StatusBadge } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, ZoneDownload } from "@/components/setup-guide";
 import { api, type InsightDomain, type InsightLink, type InsightRow, type LinkOverview, type Meta } from "@/lib/api";
@@ -80,19 +81,24 @@ export function LinksPage() {
       await client.invalidateQueries({ queryKey: ["links"] });
     },
   });
-  const linkSort = useSort(links.data ?? [], {
-    slug: (link) => link.slug,
-    destination: (link) => link.destination,
-    domain: (link) => link.hostname,
-    clicks: (link) => link.total_clicks,
-  });
-  const domainSort = useSort(domains.data ?? [], {
-    hostname: (domain) => domain.hostname,
-    status: (domain) => domainStatus(domain).label,
-  });
-  const domainRows = domainSort.rows;
+  const domainRows = domains.data ?? [];
+  const linkRows = links.data ?? [];
   const verifying = domains.data?.find((domain) => domain.id === verifyId);
-  const linkRows = linkSort.rows;
+  const domainColumns: Column<InsightDomain>[] = [
+    { key: "hostname", header: "Hostname", sort: (domain) => domain.hostname, cellClassName: "font-medium text-[var(--ui-fg)]", cell: (domain) => domain.hostname },
+    {
+      key: "status",
+      header: "Status",
+      className: "text-right!",
+      sort: (domain) => domainStatus(domain).label,
+      cell: (domain) => (
+        <span className="inline-flex items-center gap-2">
+          {domain.verified || !canEdit ? null : <Button size="sm" onClick={() => setVerifyId(domain.id)}>Verify</Button>}
+          <StatusBadge tone={domainStatus(domain).tone}>{domainStatus(domain).label}</StatusBadge>
+        </span>
+      ),
+    },
+  ];
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
@@ -108,35 +114,7 @@ export function LinksPage() {
         {!links.isLoading && linkRows.length === 0 ? (
           <CardEmpty title="No short links" body="Create a link. Visitors who open /go/your-slug are redirected, and the click is stored." />
         ) : (
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <SortHeader column="slug" sort={linkSort.sort} onSort={linkSort.toggle}>Slug</SortHeader>
-                <SortHeader column="destination" sort={linkSort.sort} onSort={linkSort.toggle} className="hidden md:table-cell">Destination</SortHeader>
-                <SortHeader column="domain" sort={linkSort.sort} onSort={linkSort.toggle} className="hidden sm:table-cell">Domain</SortHeader>
-                <SortHeader column="clicks" sort={linkSort.sort} onSort={linkSort.toggle} className="text-right!">Clicks</SortHeader>
-              </tr>
-            </thead>
-            <tbody>
-              {links.isLoading ? <SkeletonRows columns={[undefined, "hidden md:table-cell", "hidden sm:table-cell", "text-right"]} /> : null}
-              {linkRows.map((link) => {
-                const to = `/links/${link.id}`;
-                return (
-                  <tr key={link.id} className="clickable-row">
-                    <td className="cell-link">
-                      <Link className="row-link" to={to}>/{link.slug}</Link>
-                      <ProjectTag id={link.project_id} />
-                      {rowCover(to)}
-                      <div className="font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">/go/{link.slug}</div>
-                    </td>
-                    <td className="cell-link hidden md:table-cell">{rowCover(to)}<div className="max-w-[24rem] truncate">{link.destination}</div></td>
-                    <td className="cell-link hidden sm:table-cell">{rowCover(to)}{link.hostname}</td>
-                    <td className="cell-link text-right font-mono text-[0.75rem]">{rowCover(to)}{link.total_clicks}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <DataTable columns={linkColumns} rows={linkRows} rowKey={(link) => link.id} rowLink={(link) => `/links/${link.id}`} loading={links.isLoading} />
         )}
       </LayerCard>
       <LayerCard
@@ -146,28 +124,7 @@ export function LinksPage() {
         flush
       >
         {!domains.isLoading && domainRows.length === 0 ? <CardEmpty title="No domains" body="Add a domain before you create a link." /> : (
-          <table className="cool-table">
-            <thead>
-              <tr>
-                <SortHeader column="hostname" sort={domainSort.sort} onSort={domainSort.toggle}>Hostname</SortHeader>
-                <SortHeader column="status" sort={domainSort.sort} onSort={domainSort.toggle} className="text-right!">Status</SortHeader>
-              </tr>
-            </thead>
-            <tbody>
-              {domains.isLoading ? <SkeletonRows columns={[undefined, "text-right"]} rows={2} /> : null}
-              {domainRows.map((domain) => (
-                <tr key={domain.id}>
-                  <td className="font-medium text-[var(--ui-fg)]">{domain.hostname}</td>
-                  <td className="text-right">
-                    <span className="inline-flex items-center gap-2">
-                      {domain.verified || !canEdit ? null : <Button size="sm" onClick={() => setVerifyId(domain.id)}>Verify</Button>}
-                      <StatusBadge tone={domainStatus(domain).tone}>{domainStatus(domain).label}</StatusBadge>
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <DataTable columns={domainColumns} rows={domainRows} rowKey={(domain) => domain.id} loading={domains.isLoading} />
         )}
       </LayerCard>
       <Dialog open={canEdit && openDomain} title="New domain" onClose={() => setOpenDomain(false)}>
@@ -254,9 +211,23 @@ export function LinkDetailPage() {
   );
 }
 
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
-}
+const linkColumns: Column<InsightLink>[] = [
+  {
+    key: "slug",
+    header: "Slug",
+    sort: (link) => link.slug,
+    cell: (link) => (
+      <>
+        <Link className="row-link" to={`/links/${link.id}`}>/{link.slug}</Link>
+        <ProjectTag id={link.project_id} />
+        <div className="font-mono text-[0.6875rem] text-[var(--ui-fg-faint)]">/go/{link.slug}</div>
+      </>
+    ),
+  },
+  { key: "destination", header: "Destination", className: "hidden md:table-cell", sort: (link) => link.destination, cell: (link) => <div className="max-w-[24rem] truncate">{link.destination}</div> },
+  { key: "domain", header: "Domain", className: "hidden sm:table-cell", sort: (link) => link.hostname, cell: (link) => link.hostname },
+  { key: "clicks", header: "Clicks", className: "text-right!", cellClassName: "font-mono text-[0.75rem]", sort: (link) => link.total_clicks, cell: (link) => link.total_clicks },
+];
 
 function CardEmpty({ title, body }: { title: string; body: string }) {
   return (

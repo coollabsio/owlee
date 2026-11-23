@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "react-router";
+import { type Column, DataTable } from "@/components/data-table";
 import { LayerCard } from "@/components/ui";
 import { api, type InsightRow, type PublicInsight } from "@/lib/api";
 
@@ -22,6 +23,10 @@ export function SharePage() {
   const data = overview.data;
   const metric = safeKind === "links" ? data?.clicks : data?.pageviews;
   const list = rows.data?.rows ?? [];
+  const columns: Column<InsightRow>[] = [
+    { key: "label", header: safeKind === "links" ? "Referrer" : "Page", cellClassName: "break-all text-[var(--ui-fg)]", sort: (row) => row.label, cell: (row) => row.label },
+    { key: "count", header: safeKind === "links" ? "Clicks" : "Views", className: "text-right", cellClassName: "tabular-nums", sort: (row) => row.count, cell: (row) => row.count },
+  ];
   return (
     <div className="min-h-svh bg-[var(--ui-canvas)] text-[var(--ui-fg)]">
       <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12 sm:py-16">
@@ -43,22 +48,7 @@ export function SharePage() {
           {list.length === 0 ? (
             <p className="px-4 py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No data for this period.</p>
           ) : (
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <th>{safeKind === "links" ? "Referrer" : "Page"}</th>
-                  <th><span className="block text-right">{safeKind === "links" ? "Clicks" : "Views"}</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                {list.map((row) => (
-                  <tr key={row.label}>
-                    <td className="break-all text-[var(--ui-fg)]">{row.label}</td>
-                    <td className="text-right tabular-nums">{row.count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <DataTable columns={columns} rows={list} rowKey={(row) => row.label} />
           )}
         </LayerCard>
         <footer className="pt-4 text-center text-[0.6875rem] text-[var(--ui-fg-faint)]">

@@ -6,8 +6,9 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { Histogram } from "@/components/error-charts";
 import { StackFrames } from "@/components/event-view";
 import { Badge } from "@/components/issue-badge";
+import { type Column, DataTable } from "@/components/data-table";
 import { Button, ErrorText, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
-import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
+import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, type EventSummary, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 
@@ -277,38 +278,16 @@ export function IssueDetailPage() {
               ) : events.length === 0 ? (
                 <p className="p-6 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No events match these filters.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="cool-table">
-                    <thead>
-                      <tr>
-                        <th>Event</th>
-                        <th>Time</th>
-                        <th>Environment</th>
-                        <th>Release</th>
-                        <th>User</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {events.map((row) => (
-                        <tr
-                          key={row.id}
-                          className="clickable-row"
-                          aria-selected={row.id === event?.eventId}
-                          onClick={() => openEvent(row.id)}
-                        >
-                          <td className="font-mono text-[0.75rem]">{row.id.slice(0, 8)}</td>
-                          <td className="whitespace-nowrap" title={fullTime(row.timestamp)}>
-                            {timeAgo(row.timestamp)}
-                          </td>
-                          <td>{row.environment || "-"}</td>
-                          <td className="break-all">{row.release || "-"}</td>
-                          <td className="break-all">{row.user || "-"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <>
+                  <DataTable
+                    columns={eventColumns}
+                    rows={events}
+                    rowKey={(row) => row.id}
+                    onRowClick={(row) => openEvent(row.id)}
+                    rowSelected={(row) => row.id === event?.eventId}
+                  />
                   <LoadMore query={eventList} label="Load older events" />
-                </div>
+                </>
               )}
             </LayerCard>
           ) : (
@@ -429,6 +408,20 @@ export function IssueDetailPage() {
     </div>
   );
 }
+
+const eventColumns: Column<EventSummary>[] = [
+  { key: "id", header: "Event", cellClassName: "font-mono text-[0.75rem]", cell: (row) => row.id.slice(0, 8) },
+  {
+    key: "time",
+    header: "Time",
+    sort: (row) => Date.parse(row.timestamp),
+    cellClassName: "whitespace-nowrap",
+    cell: (row) => <span title={fullTime(row.timestamp)}>{timeAgo(row.timestamp)}</span>,
+  },
+  { key: "environment", header: "Environment", sort: (row) => row.environment, cell: (row) => row.environment || "-" },
+  { key: "release", header: "Release", sort: (row) => row.release, cellClassName: "break-all", cell: (row) => row.release || "-" },
+  { key: "user", header: "User", sort: (row) => row.user, cellClassName: "break-all", cell: (row) => row.user || "-" },
+];
 
 function EventSections({
   event,

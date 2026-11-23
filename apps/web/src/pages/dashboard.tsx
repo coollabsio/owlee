@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { UptimeBars } from "@/components/charts";
-import { Empty, LayerCard, PageHeader, SkeletonRows, StatusBadge } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Empty, LayerCard, PageHeader, StatusBadge } from "@/components/ui";
 import { api, type Overview } from "@/lib/api";
 import { formatTime, percent, stateLabel, timeAgo } from "@/lib/utils";
 import { useListScope } from "@/lib/workspace";
@@ -62,55 +63,13 @@ export function DashboardPage() {
           actions={<Link className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to="/monitors">View all</Link>}
           flush
         >
-          <div className="overflow-x-auto">
-            <table className="cool-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>State</th>
-                  <th className="hidden lg:table-cell">History</th>
-                  <th className="hidden sm:table-cell">Today</th>
-                  <th className="hidden md:table-cell">Latency</th>
-                  <th>Last check</th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.isLoading ? <SkeletonRows columns={[undefined, undefined, "hidden lg:table-cell", "hidden sm:table-cell", "hidden md:table-cell", undefined]} /> : null}
-                {monitors.map((monitor) => {
-                  const to = `/monitors/${monitor.id}`;
-                  return (
-                    <tr key={monitor.id} className="clickable-row">
-                      <td className="cell-link max-w-[16rem]">
-                        <Link className="row-link" to={to}>{monitor.name}</Link>
-                        {rowCover(to)}
-                        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
-                      </td>
-                      <td className="cell-link">
-                        {rowCover(to)}
-                        <StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state]}</StatusBadge>
-                      </td>
-                      <td className="cell-link hidden w-[30%] lg:table-cell">
-                        {rowCover(to)}
-                        <UptimeBars bars={monitor.bars} className="h-6" />
-                      </td>
-                      <td className="cell-link hidden sm:table-cell">
-                        {rowCover(to)}
-                        {percent(monitor.uptime_24h)}
-                      </td>
-                      <td className="cell-link hidden md:table-cell">
-                        {rowCover(to)}
-                        {monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`}
-                      </td>
-                      <td className="cell-link whitespace-nowrap">
-                        {rowCover(to)}
-                        {timeAgo(monitor.last_checked_at)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={monitorColumns}
+            rows={monitors}
+            rowKey={(monitor) => monitor.id}
+            rowLink={(monitor) => `/monitors/${monitor.id}`}
+            loading={overview.isLoading}
+          />
         </LayerCard>
       )}
       <div className="grid items-start gap-6 lg:grid-cols-2">
@@ -118,42 +77,20 @@ export function DashboardPage() {
           {incidents.length === 0 ? (
             <CardText title="No open incidents" body="Incidents open here after repeated failures or when you report one." />
           ) : (
-            <table className="cool-table">
-              <tbody>
-                {incidents.map((incident) => {
-                  const to = `/incidents/${incident.id}`;
-                  return (
-                    <tr key={incident.id} className="clickable-row">
-                      <td className="cell-link">
-                        <Link className="row-link" to={to}>{incident.title}</Link>
-                        {rowCover(to)}
-                        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</div>
-                      </td>
-                      <td className="cell-link text-right">
-                        {rowCover(to)}
-                        <StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <DataTable
+              hideHeader
+              columns={incidentColumns}
+              rows={incidents}
+              rowKey={(incident) => incident.id}
+              rowLink={(incident) => `/incidents/${incident.id}`}
+            />
           )}
         </LayerCard>
         <LayerCard title="Activity" flush>
           {activity.length === 0 ? (
             <CardText title="No activity yet" body="Changes to monitors, incidents, and channels show up here." />
           ) : (
-            <table className="cool-table">
-              <tbody>
-                {activity.map((event) => (
-                  <tr key={event.id}>
-                    <td>{event.action.replaceAll(".", " ")}</td>
-                    <td className="whitespace-nowrap text-right text-[var(--ui-fg-faint)]">{timeAgo(event.occurred_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <DataTable hideHeader columns={activityColumns} rows={activity} rowKey={(event) => event.id} />
           )}
         </LayerCard>
       </div>
@@ -161,9 +98,63 @@ export function DashboardPage() {
   );
 }
 
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
-}
+type OverviewMonitor = Overview["monitors"][number];
+
+const monitorColumns: Column<OverviewMonitor>[] = [
+  {
+    key: "name",
+    header: "Name",
+    sort: (monitor) => monitor.name,
+    cellClassName: "max-w-[16rem]",
+    cell: (monitor) => (
+      <>
+        <Link className="row-link" to={`/monitors/${monitor.id}`}>{monitor.name}</Link>
+        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
+      </>
+    ),
+  },
+  {
+    key: "state",
+    header: "State",
+    sort: (monitor) => stateLabel[monitor.state],
+    cell: (monitor) => <StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state]}</StatusBadge>,
+  },
+  { key: "history", header: "History", className: "hidden lg:table-cell", cellClassName: "w-[30%]", cell: (monitor) => <UptimeBars bars={monitor.bars} className="h-6" /> },
+  { key: "today", header: "Today", className: "hidden sm:table-cell", sort: (monitor) => monitor.uptime_24h, cell: (monitor) => percent(monitor.uptime_24h) },
+  {
+    key: "latency",
+    header: "Latency",
+    className: "hidden md:table-cell",
+    sort: (monitor) => monitor.avg_latency_ms,
+    cell: (monitor) => (monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`),
+  },
+  {
+    key: "checked",
+    header: "Last check",
+    sort: (monitor) => monitor.last_checked_at,
+    cellClassName: "whitespace-nowrap",
+    cell: (monitor) => timeAgo(monitor.last_checked_at),
+  },
+];
+
+const incidentColumns: Column<Overview["incidents"][number]>[] = [
+  {
+    key: "title",
+    header: "Incident",
+    cell: (incident) => (
+      <>
+        <Link className="row-link" to={`/incidents/${incident.id}`}>{incident.title}</Link>
+        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{formatTime(incident.started_at)}</div>
+      </>
+    ),
+  },
+  { key: "status", header: "Status", cellClassName: "text-right", cell: (incident) => <StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status]}</StatusBadge> },
+];
+
+const activityColumns: Column<Overview["activity"][number]>[] = [
+  { key: "action", header: "Action", cell: (event) => event.action.replaceAll(".", " ") },
+  { key: "when", header: "When", cellClassName: "whitespace-nowrap text-right text-[var(--ui-fg-faint)]", cell: (event) => timeAgo(event.occurred_at) },
+];
 
 function CardText({ title, body }: { title: string; body?: string }) {
   return (

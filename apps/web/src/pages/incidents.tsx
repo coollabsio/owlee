@@ -2,7 +2,8 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Search4 as Search } from "reicon-react";
-import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, Textarea, useSort } from "@/components/ui";
+import { type Column, DataTable } from "@/components/data-table";
+import { Button, ConfirmDialog, Dialog, Empty, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, Spinner, StatusBadge, Textarea } from "@/components/ui";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { ApiError, api, flattenPages, withCursor, type Incident, type Monitor, type Paged, type StatusPage } from "@/lib/api";
 import { useDebounced } from "@/pages/issue-detail";
@@ -19,10 +20,6 @@ function impactTone(impact: string) {
 
 export function statusTone(status: string) {
   return status === "resolved" ? "success" : status === "investigating" ? "warning" : "info";
-}
-
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
 }
 
 function CardText({ title, body }: { title: string; body?: string }) {
@@ -57,13 +54,43 @@ export function IncidentsPage() {
   });
   const loaded = flattenPages(query.data?.pages.map((page) => page.items));
   const unfiltered = !needle && !impactFilter && !statusFilter;
-  const { rows, sort, toggle } = useSort(loaded, {
-    title: (incident) => incident.title,
-    impact: (incident) => impacts.findIndex((item) => item.value === incident.impact),
-    status: (incident) => statuses.findIndex((item) => item.value === incident.status),
-    source: (incident) => (incident.auto ? "Automatic" : "Manual"),
-    started: (incident) => Date.parse(incident.started_at),
-  });
+  const columns: Column<Incident>[] = [
+    {
+      key: "title",
+      header: "Incident",
+      sort: (incident) => incident.title,
+      cellClassName: "max-w-[28rem]",
+      cell: (incident) => (
+        <>
+          <Link className="row-link" to={`/incidents/${incident.id}`}>{incident.title}</Link>
+          <ProjectTag id={incident.project_id} />
+          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{incident.updates.at(-1)?.message || "-"}</div>
+        </>
+      ),
+    },
+    {
+      key: "impact",
+      header: "Impact",
+      sort: (incident) => impacts.findIndex((item) => item.value === incident.impact),
+      cell: (incident) => (
+        <FilterValue active={impactFilter === incident.impact} label={stateLabel[incident.impact]} onToggle={() => setImpactFilter(impactFilter === incident.impact ? null : incident.impact)}>
+          <StatusBadge tone={impactTone(incident.impact)}>{stateLabel[incident.impact]}</StatusBadge>
+        </FilterValue>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      sort: (incident) => statuses.findIndex((item) => item.value === incident.status),
+      cell: (incident) => (
+        <FilterValue active={statusFilter === incident.status} label={stateLabel[incident.status]} onToggle={() => setStatusFilter(statusFilter === incident.status ? null : incident.status)}>
+          <StatusBadge tone={statusTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
+        </FilterValue>
+      ),
+    },
+    { key: "source", header: "Source", className: "hidden md:table-cell", sort: (incident) => (incident.auto ? "Automatic" : "Manual"), cell: (incident) => (incident.auto ? "Automatic" : "Manual") },
+    { key: "started", header: "Started", sort: (incident) => Date.parse(incident.started_at), cellClassName: "whitespace-nowrap", cell: (incident) => formatTime(incident.started_at) },
+  ];
   const filters = [
     ...(impactFilter ? [{ key: "impact", label: `Impact: ${stateLabel[impactFilter]}`, onRemove: () => setImpactFilter(null) }] : []),
     ...(statusFilter ? [{ key: "status", label: `Status: ${stateLabel[statusFilter]}`, onRemove: () => setStatusFilter(null) }] : []),
@@ -96,58 +123,13 @@ export function IncidentsPage() {
               }}
             />
           </div>
-          {!query.isLoading && rows.length === 0 ? (
+          {!query.isLoading && loaded.length === 0 ? (
             <CardText title="No matching incidents" body="Try a different title, or remove a filter." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="cool-table">
-                <thead>
-                  <tr>
-                    <SortHeader column="title" sort={sort} onSort={toggle}>Incident</SortHeader>
-                    <SortHeader column="impact" sort={sort} onSort={toggle}>Impact</SortHeader>
-                    <SortHeader column="status" sort={sort} onSort={toggle}>Status</SortHeader>
-                    <SortHeader column="source" sort={sort} onSort={toggle} className="hidden md:table-cell">Source</SortHeader>
-                    <SortHeader column="started" sort={sort} onSort={toggle}>Started</SortHeader>
-                  </tr>
-                </thead>
-                <tbody>
-                  {query.isLoading ? <SkeletonRows columns={[undefined, undefined, undefined, "hidden md:table-cell", undefined]} /> : rows.map((incident) => {
-                    const to = `/incidents/${incident.id}`;
-                    return (
-                      <tr key={incident.id} className="clickable-row">
-                        <td className="cell-link max-w-[28rem]">
-                          <Link className="row-link" to={to}>{incident.title}</Link>
-                          <ProjectTag id={incident.project_id} />
-                          {rowCover(to)}
-                          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{incident.updates.at(-1)?.message || "-"}</div>
-                        </td>
-                        <td className="cell-link">
-                          {rowCover(to)}
-                          <FilterValue active={impactFilter === incident.impact} label={stateLabel[incident.impact]} onToggle={() => setImpactFilter(impactFilter === incident.impact ? null : incident.impact)}>
-                            <StatusBadge tone={impactTone(incident.impact)}>{stateLabel[incident.impact]}</StatusBadge>
-                          </FilterValue>
-                        </td>
-                        <td className="cell-link">
-                          {rowCover(to)}
-                          <FilterValue active={statusFilter === incident.status} label={stateLabel[incident.status]} onToggle={() => setStatusFilter(statusFilter === incident.status ? null : incident.status)}>
-                            <StatusBadge tone={statusTone(incident.status)}>{stateLabel[incident.status]}</StatusBadge>
-                          </FilterValue>
-                        </td>
-                        <td className="cell-link hidden md:table-cell">
-                          {rowCover(to)}
-                          {incident.auto ? "Automatic" : "Manual"}
-                        </td>
-                        <td className="cell-link whitespace-nowrap">
-                          {rowCover(to)}
-                          {formatTime(incident.started_at)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <>
+              <DataTable columns={columns} rows={loaded} rowKey={(incident) => incident.id} rowLink={(incident) => `/incidents/${incident.id}`} loading={query.isLoading} />
               <LoadMore query={query} label="Load older incidents" />
-            </div>
+            </>
           )}
         </LayerCard>
       )}

@@ -3,8 +3,9 @@ import { type ReactNode } from "react";
 import { Link } from "react-router";
 import { products } from "@/app/nav";
 import { Sparkline } from "@/components/error-charts";
+import { type Column, DataTable } from "@/components/data-table";
 import { ErrorText, LayerCard, PageHeader, Skeleton, StatusBadge } from "@/components/ui";
-import { api, type Dashboard, type DashboardIncident, type DashboardPageRow } from "@/lib/api";
+import { api, type Dashboard, type DashboardFailing, type DashboardIncident, type DashboardIssue, type DashboardPageRow, type DashboardSite } from "@/lib/api";
 import { duration, percent, stateLabel, timeAgo } from "@/lib/utils";
 import { useListScope } from "@/lib/workspace";
 
@@ -170,10 +171,6 @@ function viewAll(to: string, label = "View all") {
   return <Link className="text-[0.6875rem] font-medium text-[var(--ui-fg-faint)] hover:text-[var(--ui-fg)]" to={to}>{label}</Link>;
 }
 
-function rowCover(to: string) {
-  return <Link className="cell-link-anchor" to={to} tabIndex={-1} aria-hidden="true" />;
-}
-
 function Note({ children }: { children: ReactNode }) {
   return <p className="px-4 py-8 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">{children}</p>;
 }
@@ -241,37 +238,7 @@ function MonitorsCard({ data }: { data: Dashboard }) {
           {monitors.failing.length === 0 ? (
             <Note>Nothing is failing.</Note>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="cool-table">
-                <thead>
-                  <tr>
-                    <th>Failing</th>
-                    <th>State</th>
-                    <th>For</th>
-                    <th className="hidden sm:table-cell">Today</th>
-                    <th className="hidden md:table-cell">Latency</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {monitors.failing.map((monitor) => {
-                    const to = `/monitors/${monitor.id}`;
-                    return (
-                      <tr key={monitor.id} className="clickable-row">
-                        <td className="cell-link max-w-[16rem]">
-                          <Link className="row-link" to={to}>{monitor.name}</Link>
-                          {rowCover(to)}
-                          <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
-                        </td>
-                        <td className="cell-link">{rowCover(to)}<StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state] ?? monitor.state}</StatusBadge></td>
-                        <td className="cell-link whitespace-nowrap">{rowCover(to)}{duration(monitor.since)}</td>
-                        <td className="cell-link hidden sm:table-cell">{rowCover(to)}{percent(monitor.uptime_today)}</td>
-                        <td className="cell-link hidden md:table-cell">{rowCover(to)}{monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <DataTable columns={failingColumns} rows={monitors.failing} rowKey={(monitor) => monitor.id} rowLink={(monitor) => `/monitors/${monitor.id}`} />
           )}
         </>
       )}
@@ -279,35 +246,62 @@ function MonitorsCard({ data }: { data: Dashboard }) {
   );
 }
 
+const failingColumns: Column<DashboardFailing>[] = [
+  {
+    key: "name",
+    header: "Failing",
+    sort: (monitor) => monitor.name,
+    cellClassName: "max-w-[16rem]",
+    cell: (monitor) => (
+      <>
+        <Link className="row-link" to={`/monitors/${monitor.id}`}>{monitor.name}</Link>
+        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{monitor.url}</div>
+      </>
+    ),
+  },
+  {
+    key: "state",
+    header: "State",
+    sort: (monitor) => stateLabel[monitor.state] ?? monitor.state,
+    cell: (monitor) => <StatusBadge tone={tone(monitor.state)}>{stateLabel[monitor.state] ?? monitor.state}</StatusBadge>,
+  },
+  // Negated so ascending puts the shortest outage first, like the duration it shows.
+  { key: "for", header: "For", cellClassName: "whitespace-nowrap", sort: (monitor) => (monitor.since ? -Date.parse(monitor.since) : null), cell: (monitor) => duration(monitor.since) },
+  { key: "today", header: "Today", className: "hidden sm:table-cell", sort: (monitor) => monitor.uptime_today, cell: (monitor) => percent(monitor.uptime_today) },
+  {
+    key: "latency",
+    header: "Latency",
+    className: "hidden md:table-cell",
+    sort: (monitor) => monitor.avg_latency_ms,
+    cell: (monitor) => (monitor.avg_latency_ms == null ? "-" : `${monitor.avg_latency_ms} ms`),
+  },
+];
+
 function IncidentsCard({ incidents }: { incidents: Dashboard["incidents"] }) {
   return (
     <LayerCard title="Open incidents" description={incidents.open > 0 ? `${incidents.open} open` : undefined} actions={viewAll("/incidents")} flush>
       {incidents.items.length === 0 ? (
         <Note>No open incidents.</Note>
       ) : (
-        <table className="cool-table">
-          <tbody>
-            {incidents.items.map((incident) => <IncidentRow key={incident.id} incident={incident} />)}
-          </tbody>
-        </table>
+        <DataTable hideHeader columns={incidentColumns} rows={incidents.items} rowKey={(incident) => incident.id} rowLink={(incident) => `/incidents/${incident.id}`} />
       )}
     </LayerCard>
   );
 }
 
-function IncidentRow({ incident }: { incident: DashboardIncident }) {
-  const to = `/incidents/${incident.id}`;
-  return (
-    <tr className="clickable-row">
-      <td className="cell-link">
-        <Link className="row-link" to={to}>{incident.title}</Link>
-        {rowCover(to)}
+const incidentColumns: Column<DashboardIncident>[] = [
+  {
+    key: "title",
+    header: "Incident",
+    cell: (incident) => (
+      <>
+        <Link className="row-link" to={`/incidents/${incident.id}`}>{incident.title}</Link>
         <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{stateLabel[incident.impact] ?? incident.impact} · {duration(incident.started_at)}</div>
-      </td>
-      <td className="cell-link text-right">{rowCover(to)}<StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status] ?? incident.status}</StatusBadge></td>
-    </tr>
-  );
-}
+      </>
+    ),
+  },
+  { key: "status", header: "Status", cellClassName: "text-right", cell: (incident) => <StatusBadge tone={tone(incident.status)}>{stateLabel[incident.status] ?? incident.status}</StatusBadge> },
+];
 
 function PagesCard({ pages }: { pages: DashboardPageRow[] }) {
   return (
@@ -315,33 +309,35 @@ function PagesCard({ pages }: { pages: DashboardPageRow[] }) {
       {pages.length === 0 ? (
         <Note>No status pages. <Link className="auth-text-link" to="/pages">Create a page</Link></Note>
       ) : (
-        <table className="cool-table">
-          <tbody>
-            {pages.map((page) => {
-              const to = `/pages/${page.id}`;
-              return (
-                <tr key={page.id} className="clickable-row">
-                  <td className="cell-link">
-                    <Link className="row-link" to={to}>{page.title}</Link>
-                    {rowCover(to)}
-                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">/status/{page.slug}</div>
-                  </td>
-                  <td className="cell-link text-right">
-                    {rowCover(to)}
-                    <span className="inline-flex flex-wrap items-center justify-end gap-1">
-                      {!page.published ? <StatusBadge tone="neutral">Draft</StatusBadge> : null}
-                      <StatusBadge tone={tone(page.banner)}>{stateLabel[page.banner] ?? page.banner}</StatusBadge>
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <DataTable hideHeader columns={pageColumns} rows={pages} rowKey={(page) => page.id} rowLink={(page) => `/pages/${page.id}`} />
       )}
     </LayerCard>
   );
 }
+
+const pageColumns: Column<DashboardPageRow>[] = [
+  {
+    key: "title",
+    header: "Page",
+    cell: (page) => (
+      <>
+        <Link className="row-link" to={`/pages/${page.id}`}>{page.title}</Link>
+        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">/status/{page.slug}</div>
+      </>
+    ),
+  },
+  {
+    key: "banner",
+    header: "Status",
+    cellClassName: "text-right",
+    cell: (page) => (
+      <span className="inline-flex flex-wrap items-center justify-end gap-1">
+        {!page.published ? <StatusBadge tone="neutral">Draft</StatusBadge> : null}
+        <StatusBadge tone={tone(page.banner)}>{stateLabel[page.banner] ?? page.banner}</StatusBadge>
+      </span>
+    ),
+  },
+];
 
 function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
   const events = errors.events_24h.reduce((sum, value) => sum + value, 0);
@@ -360,31 +356,36 @@ function ErrorsCard({ errors }: { errors: Dashboard["errors"] }) {
       {errors.issues.length === 0 ? (
         <Note>No unresolved issues.</Note>
       ) : (
-        <table className="cool-table">
-          <tbody>
-            {errors.issues.map((issue) => {
-              const to = `/errors/${issue.short_id || issue.id}`;
-              return (
-                <tr key={issue.id} className="clickable-row">
-                  <td className="cell-link max-w-[18rem]">
-                    <Link className="row-link" to={to}>{issue.title}</Link>
-                    {rowCover(to)}
-                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
-                  </td>
-                  <td className="cell-link whitespace-nowrap text-right">
-                    {rowCover(to)}
-                    <div className="font-mono text-[0.75rem]">{issue.event_count.toLocaleString()}</div>
-                    <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <DataTable hideHeader columns={issueColumns} rows={errors.issues} rowKey={(issue) => issue.id} rowLink={(issue) => `/errors/${issue.short_id || issue.id}`} />
       )}
     </LayerCard>
   );
 }
+
+const issueColumns: Column<DashboardIssue>[] = [
+  {
+    key: "title",
+    header: "Issue",
+    cellClassName: "max-w-[18rem]",
+    cell: (issue) => (
+      <>
+        <Link className="row-link" to={`/errors/${issue.short_id || issue.id}`}>{issue.title}</Link>
+        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{issue.short_id ? `${issue.short_id} · ` : ""}{issue.app_name}</div>
+      </>
+    ),
+  },
+  {
+    key: "events",
+    header: "Events",
+    cellClassName: "whitespace-nowrap text-right",
+    cell: (issue) => (
+      <>
+        <div className="font-mono text-[0.75rem]">{issue.event_count.toLocaleString()}</div>
+        <div className="text-[0.6875rem] text-[var(--ui-fg-faint)]">{timeAgo(issue.last_seen)}</div>
+      </>
+    ),
+  },
+];
 
 function TrafficCard({ analytics }: { analytics: Dashboard["analytics"] }) {
   return (
@@ -397,32 +398,24 @@ function TrafficCard({ analytics }: { analytics: Dashboard["analytics"] }) {
       {analytics.top_sites.length === 0 ? (
         <Note>No sites yet. <Link className="auth-text-link" to="/analytics">Add a site</Link></Note>
       ) : (
-        <table className="cool-table">
-          <thead>
-            <tr>
-              <th>Site</th>
-              <th className="text-right">Visitors</th>
-              <th className="text-right">Views</th>
-            </tr>
-          </thead>
-          <tbody>
-            {analytics.top_sites.map((site) => {
-              const to = `/analytics/${site.id}`;
-              return (
-                <tr key={site.id} className="clickable-row">
-                  <td className="cell-link">
-                    <Link className="row-link" to={to}>{site.name}</Link>
-                    {rowCover(to)}
-                    <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{site.domain}</div>
-                  </td>
-                  <td className="cell-link text-right font-mono">{rowCover(to)}{site.visitors.toLocaleString()}</td>
-                  <td className="cell-link text-right font-mono">{rowCover(to)}{site.pageviews.toLocaleString()}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <DataTable columns={siteColumns} rows={analytics.top_sites} rowKey={(site) => site.id} rowLink={(site) => `/analytics/${site.id}`} />
       )}
     </LayerCard>
   );
 }
+
+const siteColumns: Column<DashboardSite>[] = [
+  {
+    key: "name",
+    header: "Site",
+    sort: (site) => site.name,
+    cell: (site) => (
+      <>
+        <Link className="row-link" to={`/analytics/${site.id}`}>{site.name}</Link>
+        <div className="truncate text-[0.6875rem] text-[var(--ui-fg-faint)]">{site.domain}</div>
+      </>
+    ),
+  },
+  { key: "visitors", header: "Visitors", className: "text-right", cellClassName: "font-mono", sort: (site) => site.visitors, cell: (site) => site.visitors.toLocaleString() },
+  { key: "pageviews", header: "Views", className: "text-right", cellClassName: "font-mono", sort: (site) => site.pageviews, cell: (site) => site.pageviews.toLocaleString() },
+];
