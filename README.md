@@ -24,11 +24,12 @@ Owlee is a self-hosted uptime monitor, status page, incident desk, error tracker
 
 ## Planned
 
-These features are not built yet. The idea comes from [DataCat](https://github.com/replit/datacat). The design is in [docs/specs/2026-11-19-observability-design.md](docs/specs/2026-11-19-observability-design.md).
+These features are not built yet. The idea for metrics, logs, and traces comes from [DataCat](https://github.com/replit/datacat). Their design is in [docs/specs/2026-11-19-observability-design.md](docs/specs/2026-11-19-observability-design.md).
 
 - Metrics. Receive OpenTelemetry (OTLP/HTTP) metrics, show charts, and alert when a value crosses a line.
 - Logs. Receive OTLP logs, search and filter them, show a live tail, and link a log line to its trace and error.
 - Traces. Receive OTLP traces, show a service list and a span waterfall, and link a trace to its error issue.
+- Session replay. An error app receives replays from the Sentry browser SDK, plays them back, and links them to error events. Replays are off for each app until an editor turns them on. The design is in [docs/specs/2026-11-23-session-replay-design.md](docs/specs/2026-11-23-session-replay-design.md).
 
 ## Run it
 
