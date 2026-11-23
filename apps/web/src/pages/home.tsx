@@ -52,8 +52,8 @@ function SetupCard({ id }: { id: ProductId }) {
   const card = setup[id];
   const Icon = products.find((product) => product.id === id)!.icon;
   return (
-    <LayerCard>
-      <div className="flex flex-col gap-3 p-1">
+    <LayerCard className="[&>.layer-card-body]:flex-1">
+      <div className="flex h-full flex-col gap-3 p-1">
         <div className="flex items-center gap-2.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-[var(--ui-control-border)] bg-[var(--ui-control-bg)] text-[var(--ui-fg)]">
             <Icon className="size-4" aria-hidden="true" />
@@ -61,7 +61,7 @@ function SetupCard({ id }: { id: ProductId }) {
           <h2 className="text-[0.875rem] font-medium text-[var(--ui-fg)]">{card.title}</h2>
         </div>
         <p className="text-[0.8125rem] text-[var(--ui-fg-faint)]">{card.text}</p>
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-auto flex flex-wrap gap-2">
           {card.actions.map((action) => (
             <Link key={action.to} className="button button-highlighted" to={action.to}>{action.label}</Link>
           ))}
@@ -105,7 +105,7 @@ export function HomePage() {
     return (
       <div className="flex flex-col gap-6">
         <PageHeader title="Get started" description="Owlee does three things. Set up the ones you need." />
-        <div className="grid items-start gap-6 lg:grid-cols-3">
+        <div className="grid gap-6 lg:grid-cols-3">
           <SetupCard id="status" />
           <SetupCard id="errors" />
           <SetupCard id="analytics" />
