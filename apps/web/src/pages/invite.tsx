@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Button, ErrorText, Field, Input, Spinner } from "@/components/ui";
-import { ApiError, api, type InvitationLookup, signOut, type User } from "@/lib/api";
+import { ApiError, api, type InvitationLookup, type Meta, signOut, type User } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { switchWorkspace } from "@/lib/workspace";
 import { AuthShell } from "@/pages/auth";
@@ -15,6 +15,7 @@ export function InvitePage() {
   const navigate = useNavigate();
   const here = `/invite/${token}`;
   const me = useMe();
+  const meta = useQuery({ queryKey: ["meta"], queryFn: () => api<Meta>("/api/meta") });
   const invite = useQuery({
     queryKey: ["invitation", token],
     queryFn: () => api<InvitationLookup>(`/api/invitations/${encodeURIComponent(token)}`),
@@ -77,14 +78,20 @@ export function InvitePage() {
       ) : signedOut && can_register ? (
         <InviteSignUpForm token={token} workspaceName={workspace_name} />
       ) : signedOut && !account_exists ? (
-        <div className="space-y-4">
+        meta.data?.signup_open ? (
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--ui-fg-faint)]">
+              {email} has no account yet. Register with that address, then open this link again.
+            </p>
+            <Link className="button button-highlighted w-full" to="/register">
+              Register
+            </Link>
+          </div>
+        ) : (
           <p className="text-sm text-[var(--ui-fg-faint)]">
-            {email} has no account yet. Create one with Register, or ask an installation admin to create it, then open this link again.
+            {email} has no account yet, and registration is closed. Ask an installation admin to create an account for {email}, or to send you a new invite. Then open the link again.
           </p>
-          <Link className="button button-highlighted w-full" to="/register">
-            Register
-          </Link>
-        </div>
+        )
       ) : signedOut ? (
         <Link className="button button-highlighted w-full" to="/login" state={{ from: here }}>
           Sign in to accept
