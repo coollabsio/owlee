@@ -5,10 +5,10 @@ import { Stat } from "@/components/charts";
 import { Badge } from "@/components/issue-badge";
 import { ProjectField, ProjectTag } from "@/components/project";
 import { CodeBlock, GuideStep } from "@/components/setup-guide";
-import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useSort } from "@/components/ui";
+import { Button, CopyInput, ConfirmDialog, Dialog, ErrorText, Field, FilterChips, FilterValue, Input, LayerCard, PageHeader, Select, Skeleton, SkeletonRows, SortHeader, Spinner, StatusBadge, useCopy, useSort } from "@/components/ui";
 import { api, type ErrorApp } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
-import { guideFor, isPlatformId, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
+import { type GuideCode, guideFor, isPlatformId, type PlatformGuide, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
 import { fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
 
@@ -291,6 +291,7 @@ export function ErrorAppDetailPage() {
 function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
   const [platform, setPlatform] = useState<PlatformId>(isPlatformId(app.platform) ? app.platform : "other");
   const guide = guideFor(platform);
+  const { copied, copy } = useCopy();
   return (
     <LayerCard
       title="Set up the SDK"
@@ -305,6 +306,7 @@ function SetupGuide({ app, onHide }: { app: ErrorApp; onHide?: () => void }) {
               options={platformIds.map((id) => ({ value: id, label: platformGuides[id].label }))}
             />
           </div>
+          <Button onClick={() => void copy(agentPrompt(app, guide))}>{copied ? "Copied" : "Copy AI prompt"}</Button>
           <a className="button" href={guide.docs} target="_blank" rel="noreferrer">
             Docs
           </a>
@@ -339,6 +341,19 @@ function DsnCard({ dsn }: { dsn: string }) {
       <CopyInput value={dsn} label="Copy DSN" className="text-[0.8125rem]" />
     </LayerCard>
   );
+}
+
+/** A prompt for an AI coding agent that sets up the SDK in the user's codebase. */
+function agentPrompt(app: ErrorApp, guide: PlatformGuide) {
+  const block = ({ file, code }: GuideCode) => `${file ? `${file}:\n` : ""}\`\`\`\n${code}\n\`\`\``;
+  return [
+    `Set up error tracking in this ${guide.label} project. Owlee is a Sentry-compatible server, so use the official Sentry SDK (${guide.sdk}) and point it at the DSN below.`,
+    `DSN: ${app.dsn}`,
+    `1. Install ${guide.sdk}:\n${block(guide.install)}`,
+    `2. Configure it with the DSN. Follow the conventions of this codebase (for example, read the DSN from an environment variable or config file if the project does that):\n${guide.configure(app.dsn).map(block).join("\n\n")}`,
+    `3. Tell me how to send a test error, so I can confirm that events arrive in Owlee:\n${block(guide.test ?? { file: "With curl", code: curlTest(app) })}`,
+    `Do not change unrelated code. Official reference: ${guide.docs}`,
+  ].join("\n\n");
 }
 
 function curlTest(app: ErrorApp) {
