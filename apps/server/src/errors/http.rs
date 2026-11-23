@@ -5,6 +5,7 @@ use owlee_platform::Id;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::filter::{FilterInfo, InboundFilter};
 use super::store::{self, App, EventSummary, IssueRow};
 use crate::error::AppError;
 use crate::paging::PageParams;
@@ -39,6 +40,9 @@ pub struct AppView {
     pub event_count: i64,
     pub last_event_at: Option<String>,
     pub intake: crate::intake::IntakeCounts,
+    pub allowed_domains: Vec<String>,
+    pub inbound_filters: Vec<&'static str>,
+    pub filter_options: Vec<FilterInfo>,
 }
 
 pub async fn list_apps(
@@ -99,6 +103,70 @@ pub async fn set_app_quota(
     Ok(Json(app_view(&state, app).await?))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtectionBody {
+    pub allowed_domains: Vec<String>,
+    pub inbound_filters: Vec<String>,
+}
+
+const MAX_ALLOWED_DOMAINS: usize = 50;
+
+pub async fn set_app_protection(
+    State(state): State<AppState>,
+    member: Member,
+    Path(id): Path<String>,
+    Json(body): Json<ProtectionBody>,
+) -> Result<Json<AppView>, AppError> {
+    member.require_editor()?;
+    let domains = parse_domains(&body.allowed_domains)?;
+    let mut filters = Vec::new();
+    for raw in &body.inbound_filters {
+        let filter = InboundFilter::from_id(raw)
+            .ok_or_else(|| AppError::field("inbound_filters", "Unknown inbound filter."))?;
+        if !filters.contains(&filter) {
+            filters.push(filter);
+        }
+    }
+    let app = store::set_protection(
+        &state.db,
+        member.workspace_id,
+        &id,
+        &domains,
+        &filters,
+    )
+    .await?;
+    Ok(Json(app_view(&state, app).await?))
+}
+
+/// URLs are cut to their host, so a pasted `https://shop.example.com/path` is stored as `shop.example.com`.
+fn parse_domains(raw: &[String]) -> Result<Vec<String>, AppError> {
+    let mut domains: Vec<String> = Vec::new();
+    for entry in raw
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+    {
+        let host = if entry == "*" {
+            Ok("*".to_owned())
+        } else {
+            let bare = entry.split_once("://").map_or(entry, |(_, rest)| rest);
+            owlee_insights::clean_host(bare.split(['/', '?', '#']).next().unwrap_or(""))
+        };
+        let host = host.map_err(|message| AppError::field("allowed_domains", message))?;
+        if !domains.contains(&host) {
+            domains.push(host);
+        }
+    }
+    if domains.len() > MAX_ALLOWED_DOMAINS {
+        return Err(AppError::field(
+            "allowed_domains",
+            "Use at most 50 allowed domains.",
+        ));
+    }
+    Ok(domains)
+}
+
 pub async fn delete_app(
     State(state): State<AppState>,
     member: Member,
@@ -115,6 +183,13 @@ async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
     let used_today = crate::quota::used(&state.db, crate::quota::ERROR, &app.id).await?;
     let activity = store::app_activity(&state.db, &app.id).await?;
     Ok(AppView {
+        allowed_domains: app.allowed_domains,
+        inbound_filters: app
+            .inbound_filters
+            .iter()
+            .map(|filter| filter.id())
+            .collect(),
+        filter_options: InboundFilter::ALL.map(InboundFilter::info).into(),
         dsn: store::build_dsn(&state.config.public_origin, &app.public_key, &app.id),
         quota_exceeded: used_today >= daily_quota,
         quota_override: app.daily_quota,

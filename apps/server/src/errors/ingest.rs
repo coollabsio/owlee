@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::store;
+use crate::browser;
 use crate::error::AppError;
 use crate::intake::DropReason;
 use crate::peer::Client;
@@ -60,7 +61,7 @@ pub async fn ingest_envelope(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_app_rate(&state, &headers, &app.id) {
+    if let Some(response) = admit_app(&state, &headers, &app) {
         return response;
     }
     let mut last_id = None;
@@ -80,6 +81,7 @@ pub async fn ingest_envelope(
                         let event = normalize_event(payload);
                         match accept_event(&state, &headers, &app, &event).await {
                             Ok(Accepted::Stored(id)) => last_id = Some(id),
+                            Ok(Accepted::Filtered) => {}
                             Ok(Accepted::Limited(response)) => return response,
                             Err(error) => {
                                 state
@@ -145,12 +147,13 @@ pub async fn ingest_store(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = enforce_app_rate(&state, &headers, &app.id) {
+    if let Some(response) = admit_app(&state, &headers, &app) {
         return response;
     }
     let event = normalize_event(payload);
     match accept_event(&state, &headers, &app, &event).await {
         Ok(Accepted::Stored(id)) => json_ok(&headers, json!({ "id": id })),
+        Ok(Accepted::Filtered) => json_ok(&headers, json!({})),
         Ok(Accepted::Limited(response)) => response,
         Err(error) => {
             state
@@ -172,6 +175,8 @@ pub async fn ingest_security(headers: HeaderMap) -> Response {
 
 enum Accepted {
     Stored(String),
+    /// An inbound filter matched. It answers 200 so the SDK neither retries nor backs off.
+    Filtered,
     Limited(Response),
 }
 
@@ -210,14 +215,40 @@ async fn read_body(
     })
 }
 
-fn enforce_app_rate(state: &AppState, headers: &HeaderMap, app_id: &str) -> Option<Response> {
+/// The origin check comes first, so other web pages cannot use up the app's
+/// bucket. A request without `Origin` and `Referer` passes, as server SDKs send
+/// neither. A script can still forge `Origin`.
+fn admit_app(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<Response> {
+    let allow_all = app.allowed_domains.is_empty() || app.allowed_domains.iter().any(|d| d == "*");
+    if !allow_all {
+        let host = browser::request_host(
+            header_str(headers, header::ORIGIN),
+            header_str(headers, header::REFERER),
+        );
+        if host.is_some_and(|host| {
+            !browser::host_allowed(
+                &host,
+                &app.allowed_domains,
+                state.config.ingest.allow_localhost,
+            )
+        }) {
+            state
+                .error_intake
+                .dropped(&app.id, DropReason::OriginNotAllowed);
+            return Some(ingest_error(
+                headers,
+                StatusCode::FORBIDDEN,
+                "origin is not allowed for this app".into(),
+            ));
+        }
+    }
     let app_limit = state
         .error_project_limit
-        .check(&format!("error-app:{app_id}"));
+        .check(&format!("error-app:{}", app.id));
     if !app_limit.allowed {
         state
             .error_intake
-            .dropped(app_id, DropReason::SourceRateLimit);
+            .dropped(&app.id, DropReason::SourceRateLimit);
         return Some(rate_limited(headers, app_limit.retry_after_secs, "key", ""));
     }
     None
@@ -229,6 +260,14 @@ async fn accept_event(
     app: &store::App,
     event: &owlee_errors::NormalizedEvent,
 ) -> Result<Accepted, String> {
+    if app
+        .inbound_filters
+        .iter()
+        .any(|filter| filter.matches(event))
+    {
+        state.error_intake.dropped(&app.id, DropReason::Filtered);
+        return Ok(Accepted::Filtered);
+    }
     let global = quota::error_quota(&state.db)
         .await
         .map_err(|error| error.to_string())?;
@@ -244,8 +283,8 @@ async fn accept_event(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if ingested.quota_exceeded {
-        state.error_intake.dropped(&app.id, DropReason::DailyQuota);
+    if let Some(reason) = ingested.refused {
+        state.error_intake.dropped(&app.id, reason);
         return Ok(Accepted::Limited(rate_limited(
             headers,
             ingested.retry_after_secs,

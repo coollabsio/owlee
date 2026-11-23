@@ -3,6 +3,7 @@
 //! DSN key instead of a login.
 
 mod alert;
+mod filter;
 mod http;
 mod ingest;
 mod seed;
@@ -25,6 +26,7 @@ pub fn api_routes() -> Router<AppState> {
             get(http::get_app).delete(http::delete_app),
         )
         .route("/error-apps/{id}/quota", put(http::set_app_quota))
+        .route("/error-apps/{id}/protection", put(http::set_app_protection))
         .route("/error-issues", get(http::list_issues))
         .route("/error-issues/bulk", post(http::bulk_update))
         .route(

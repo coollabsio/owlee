@@ -246,6 +246,9 @@ async fn exercise(config: Config) {
     retention_keeps_rollups(config.clone()).await;
     quota_is_enforced(config.clone()).await;
     override_replaces_the_global_cap(config.clone()).await;
+    protection_settings(config.clone()).await;
+    allowed_domains(config.clone()).await;
+    inbound_filters(config.clone()).await;
     txt_verification(config.clone()).await;
     login_is_limited(config.clone()).await;
     wrong_guesses_do_not_block_the_right_password(config).await;
@@ -993,6 +996,264 @@ async fn quota_is_enforced(config: Config) {
         .execute(state.db.pool())
         .await
         .unwrap();
+}
+
+async fn post_from(
+    app: &Router,
+    id: &str,
+    key: &str,
+    body: Vec<u8>,
+    extra: &[(&str, &str)],
+) -> Hit {
+    let auth = format!("Sentry sentry_key={key}, sentry_version=7");
+    let mut headers = vec![
+        ("content-type", "application/x-sentry-envelope"),
+        ("x-sentry-auth", auth.as_str()),
+    ];
+    headers.extend_from_slice(extra);
+    send(
+        app,
+        "POST",
+        &format!("/api/{id}/envelope/"),
+        body,
+        None,
+        &headers,
+    )
+    .await
+}
+
+async fn put_protection(app: &Router, id: &str, cookie: &Session, body: Value) -> Hit {
+    send(
+        app,
+        "PUT",
+        &format!("/api/error-apps/{id}/protection"),
+        body.to_string().into_bytes(),
+        Some(cookie),
+        &[("content-type", "application/json")],
+    )
+    .await
+}
+
+async fn stored_events(state: &AppState, id: &str) -> i64 {
+    count(
+        state,
+        "SELECT CAST(COUNT(*) AS BIGINT) AS n FROM events WHERE app_id = $1",
+        id,
+    )
+    .await
+}
+
+async fn used_today(state: &AppState, id: &str) -> i64 {
+    count(
+        state,
+        "SELECT CAST(COALESCE(SUM(count), 0) AS BIGINT) AS n FROM ingest_usage WHERE kind = 'error' AND subject_id = $1",
+        id,
+    )
+    .await
+}
+
+async fn protection_settings(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, _) = error_app(&app, &cookie).await;
+    let view = send(
+        &app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(view.body["allowedDomains"], json!([]));
+    assert_eq!(
+        view.body["inboundFilters"],
+        json!(["browser_extensions", "web_crawlers"])
+    );
+    assert_eq!(view.body["filterOptions"][3]["id"], "legacy_browsers");
+
+    let saved = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({
+            "allowedDomains": ["https://Shop.Example.com/path", "shop.example.com", " ", "*"],
+            "inboundFilters": ["localhost", "localhost"]
+        }),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    assert_eq!(
+        saved.body["allowedDomains"],
+        json!(["shop.example.com", "*"])
+    );
+    assert_eq!(saved.body["inboundFilters"], json!(["localhost"]));
+
+    let unknown = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": [], "inboundFilters": ["nope"]}),
+    )
+    .await;
+    assert_eq!(
+        unknown.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        unknown.body
+    );
+    let many: Vec<String> = (0..51).map(|n| format!("d{n}.example.com")).collect();
+    let too_many = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": many, "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(
+        too_many.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        too_many.body
+    );
+    let bad_host = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": ["shop example.com"], "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(
+        bad_host.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        bad_host.body
+    );
+
+    let member = owlee_server::member_session(&state, cookie.workspace.parse().unwrap())
+        .await
+        .unwrap();
+    let member = Session {
+        cookie: member.cookie,
+        workspace: cookie.workspace.clone(),
+        project: cookie.project.clone(),
+    };
+    let refused = put_protection(
+        &app,
+        &id,
+        &member,
+        json!({"allowedDomains": [], "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    let stranger = editor_session(&state).await.unwrap();
+    let stranger = Session {
+        cookie: stranger.cookie,
+        workspace: stranger.workspace_id.to_string(),
+        project: stranger.project_id.to_string(),
+    };
+    let foreign = put_protection(
+        &app,
+        &id,
+        &stranger,
+        json!({"allowedDomains": [], "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{}", foreign.body);
+    let after = send(
+        &app,
+        "GET",
+        &format!("/api/error-apps/{id}"),
+        Vec::new(),
+        Some(&cookie),
+        &[],
+    )
+    .await;
+    assert_eq!(after.body["inboundFilters"], json!(["localhost"]));
+}
+
+async fn allowed_domains(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let saved = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": ["example.com"], "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let body = || envelope(&event(&event_id(), "origin check").to_string());
+
+    let foreign = post_from(&app, &id, &key, body(), &[("origin", "https://evil.test")]).await;
+    assert_eq!(foreign.status, StatusCode::FORBIDDEN, "{}", foreign.body);
+    let referer = post_from(
+        &app,
+        &id,
+        &key,
+        body(),
+        &[("referer", "https://evil.test/page")],
+    )
+    .await;
+    assert_eq!(referer.status, StatusCode::FORBIDDEN, "{}", referer.body);
+    assert_eq!(stored_events(&state, &id).await, 0);
+    assert_eq!(
+        intake_of(&app, &id, &cookie).await["last_drop"]["reason"],
+        "origin_not_allowed"
+    );
+
+    let subdomain = post_from(
+        &app,
+        &id,
+        &key,
+        body(),
+        &[("origin", "https://app.example.com")],
+    )
+    .await;
+    assert_eq!(subdomain.status, StatusCode::OK, "{}", subdomain.body);
+    let server_sdk = post_from(&app, &id, &key, body(), &[]).await;
+    assert_eq!(server_sdk.status, StatusCode::OK, "{}", server_sdk.body);
+    assert_eq!(stored_events(&state, &id).await, 2);
+}
+
+async fn inbound_filters(config: Config) {
+    let (app, state, token) = boot_app(config).await;
+    let cookie = owner(&app, &state, token.as_deref()).await;
+    let (id, key) = error_app(&app, &cookie).await;
+    let mut crawler = event(&event_id(), "crawled");
+    crawler["request"] = json!({"url": "https://shop.example.com/", "headers": {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+    }});
+    let mut extension = event(&event_id(), "x is undefined");
+    extension["exception"]["values"][0]["stacktrace"]["frames"] =
+        json!([{"abs_path": "chrome-extension://abcdef/content.js"}]);
+
+    for filtered in [&crawler, &extension] {
+        let hit = post_event(&app, &id, &key, envelope(&filtered.to_string())).await;
+        assert_eq!(hit.status, StatusCode::OK, "{}", hit.body);
+        assert_eq!(hit.body, json!({}));
+    }
+    assert_eq!(stored_events(&state, &id).await, 0);
+    assert_eq!(used_today(&state, &id).await, 0);
+    let intake = intake_of(&app, &id, &cookie).await;
+    assert_eq!(intake["dropped"], 2);
+    assert_eq!(intake["last_drop"]["reason"], "filtered");
+
+    let saved = put_protection(
+        &app,
+        &id,
+        &cookie,
+        json!({"allowedDomains": [], "inboundFilters": []}),
+    )
+    .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    crawler["event_id"] = json!(event_id());
+    let kept = post_event(&app, &id, &key, envelope(&crawler.to_string())).await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
+    assert!(kept.body["id"].is_string(), "{}", kept.body);
+    assert_eq!(stored_events(&state, &id).await, 1);
+    assert_eq!(used_today(&state, &id).await, 1);
 }
 
 async fn override_replaces_the_global_cap(config: Config) {

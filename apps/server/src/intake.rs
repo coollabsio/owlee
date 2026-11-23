@@ -17,6 +17,7 @@ pub enum DropReason {
     Malformed,
     OriginNotAllowed,
     UnverifiedDomain,
+    Filtered,
     StorageFailed,
 }
 

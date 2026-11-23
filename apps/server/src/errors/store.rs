@@ -6,7 +6,9 @@ use serde::Serialize;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::filter::InboundFilter;
 use crate::error::AppError;
+use crate::intake::DropReason;
 use crate::paging::{Cursor, Key, Paged, Paging};
 
 #[derive(Debug, Clone)]
@@ -20,6 +22,9 @@ pub struct App {
     pub created_at: String,
     /// `None` means this app uses the instance default.
     pub daily_quota: Option<i64>,
+    /// Empty allows every origin.
+    pub allowed_domains: Vec<String>,
+    pub inbound_filters: Vec<InboundFilter>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,8 +91,8 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-const APP_COLUMNS: &str =
-    "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, a.daily_quota";
+const APP_COLUMNS: &str = "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, \
+     a.daily_quota, a.allowed_domains, a.inbound_filters";
 
 /// The apps of a workspace, optionally of one project in it.
 pub async fn list_apps(
@@ -220,6 +225,8 @@ pub async fn create_app(
         platform,
         created_at,
         daily_quota: None,
+        allowed_domains: Vec::new(),
+        inbound_filters: vec![InboundFilter::BrowserExtensions, InboundFilter::WebCrawlers],
     })
 }
 
@@ -623,8 +630,8 @@ pub async fn edge_event_ids(
 
 pub struct Ingested {
     pub id: String,
-    /// The daily quota was already spent. Nothing new was stored.
-    pub quota_exceeded: bool,
+    /// `DailyQuota` when nothing new was stored.
+    pub refused: Option<DropReason>,
     pub retry_after_secs: u64,
     /// Set when this event opened the issue or reopened a resolved one.
     pub alert: Option<IssueAlert>,
@@ -685,7 +692,7 @@ pub async fn ingest_event(
                 tx.commit().await?;
                 return Ok(Ingested {
                     id: candidate,
-                    quota_exceeded: false,
+                    refused: None,
                     retry_after_secs: 0,
                     alert: None,
                 });
@@ -695,10 +702,10 @@ pub async fn ingest_event(
     }
     let event_id = event_id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
     if !crate::quota::reserve(&mut *tx, crate::quota::ERROR, &app.id, quota).await? {
-        tx.commit().await?;
+        tx.rollback().await?;
         return Ok(Ingested {
             id: String::new(),
-            quota_exceeded: true,
+            refused: Some(DropReason::DailyQuota),
             retry_after_secs: crate::quota::secs_until_utc_midnight(),
             alert: None,
         });
@@ -843,7 +850,7 @@ pub async fn ingest_event(
     tx.commit().await?;
     Ok(Ingested {
         id: event_id,
-        quota_exceeded: false,
+        refused: None,
         retry_after_secs: 0,
         alert,
     })
@@ -859,6 +866,12 @@ fn app_from_row(row: &sqlx::any::AnyRow) -> Result<App, AppError> {
         platform: row.try_get("platform")?,
         created_at: row.try_get("created_at")?,
         daily_quota: row.try_get("daily_quota")?,
+        allowed_domains: row
+            .try_get::<String, _>("allowed_domains")?
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        inbound_filters: super::filter::parse_list(&row.try_get::<String, _>("inbound_filters")?),
     })
 }
 
@@ -872,6 +885,27 @@ pub async fn set_daily_quota(
     let sql = statement(db, "UPDATE error_apps SET daily_quota = ? WHERE id = ?");
     sqlx::query(&sql)
         .bind(quota)
+        .bind(&app.id)
+        .execute(db.pool())
+        .await?;
+    get_app(db, workspace_id, &app.id).await
+}
+
+pub async fn set_protection(
+    db: &Database,
+    workspace_id: Id,
+    id: &str,
+    allowed_domains: &[String],
+    inbound_filters: &[InboundFilter],
+) -> Result<App, AppError> {
+    let app = get_app(db, workspace_id, id).await?;
+    let sql = statement(
+        db,
+        "UPDATE error_apps SET allowed_domains = ?, inbound_filters = ? WHERE id = ?",
+    );
+    sqlx::query(&sql)
+        .bind(allowed_domains.join("\n"))
+        .bind(super::filter::to_list(inbound_filters))
         .bind(&app.id)
         .execute(db.pool())
         .await?;
