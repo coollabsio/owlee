@@ -67,7 +67,7 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
 export function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
   const { copied, copy } = useCopy();
   return (
-    <button type="button" className="icon-button absolute right-0.5 top-0.5 size-7" aria-label={copied ? "Copied" : label} onClick={() => void copy(text)}>
+    <button type="button" className="icon-button absolute right-1 top-1 size-6!" aria-label={copied ? "Copied" : label} onClick={() => void copy(text)}>
       {copied ? <Check className="size-3.5 text-[var(--ui-success)]" /> : <Copy className="size-3.5" />}
     </button>
   );
