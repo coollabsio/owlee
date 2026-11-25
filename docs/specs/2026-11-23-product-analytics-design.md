@@ -382,6 +382,15 @@ no per-visitor data. That is true only without identity mode.
 
 - Is 2,000,000 rows a good scan limit after the SQL filters? Measure a funnel on SQLite with 2,000,000 matching rows
   before release.
+  - Measured 2026-11-23 with `apps/server/tests/funnel_bench.rs` (4 steps, one glob step, one property condition,
+    2,000,000 matching rows of 2,388,380, 5 runs for each actor, 12 cores). The results are correct for each run.
+    - SQLite: median 6.9 s (range 6.7 to 7.1 s), 2 reports at the same time 15.5 s. Peak memory 490 MiB.
+    - Postgres 17 (default settings): median 1.8 s (range 1.4 to 2.0 s), 2 reports at the same time 3.4 s.
+      Peak memory 410 MiB.
+    - The Rust funnel pass takes about 0.1 s. On SQLite, the time is in the sqlx SQLite driver: the same query
+      in the `sqlite3` CLI takes 0.52 s. The `Any` driver adds no time (native `SqlitePool` is also 6.6 s).
+    - Both are below the 30 s limit, so 2,000,000 can stay. On SQLite, read the rows without sqlx (a raw
+      SQLite handle in `spawn_blocking`) if 7 s is too slow.
 - Is 50,000 new devices per site per day a good default?
 
 ## 17. Decisions
