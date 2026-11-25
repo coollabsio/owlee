@@ -24,6 +24,7 @@ export default defineConfig({
       "/api": process.env.VITE_API_PROXY ?? "http://127.0.0.1:43124",
       "/data.js": process.env.VITE_API_PROXY ?? "http://127.0.0.1:43124",
       "/go": process.env.VITE_API_PROXY ?? "http://127.0.0.1:43124",
+      "/otlp": process.env.VITE_API_PROXY ?? "http://127.0.0.1:43124",
     },
   },
 });

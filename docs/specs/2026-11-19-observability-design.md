@@ -1,6 +1,7 @@
 # Logs, traces, and metrics design
 
-Status: draft. Nothing in this document is built yet.
+Status: P0 and P1 built and tested on 2026-11-24 (sources, OTLP/HTTP intake, guards, logs search, live tail,
+retention, web pages, P0.4 load test). See section 15. P2 to P4 are not done yet.
 
 ## 1. Goal
 
@@ -156,12 +157,16 @@ The guards that exist for errors and analytics are reused:
 The quota counts items (log records, spans, points), not requests. One request can be partly accepted:
 Owlee stores items until the quota is full and reports the rest in `partial_success`.
 
-The default numbers are guesses. P0 includes a load test (section 10) that measures what one SQLite file can
-take, and the defaults are set from that result.
+The P0.4 load test (section 15) kept these defaults. One SQLite file stores about 30,000 log rows per second
+with a p95 request time of 116 ms, and Postgres about the same. The request guards are far below that. The
+daily quota of 1,000,000 logs is about 0.9 GB for each source and day (10 million rows used 9.1 GB in SQLite).
 
 ### 4.7 Writes
 
-- One request is one transaction. Rows are written with multi-row `INSERT` statements of up to 500 rows.
+- One request is two transactions. The first reserves the quota and commits at once. The second writes the
+  rows with multi-row `INSERT` statements of up to 500 rows. If the second fails, the reservation is given
+  back. On Postgres, one transaction for both held the lock on the quota row during the full write, and
+  intake for one source stopped at 8,500 rows per second.
 - The request waits for the commit. Owlee has no queue in memory, so a crash does not lose data that the
   client was told is stored (D11).
 - Rollup rows (sections 6.3 and 7.3) are updated in the same transaction with
@@ -528,8 +533,8 @@ Each step ends in a state that is tested and that can ship.
 
 1. Should a source and an error project be one object, so that one setup gives one DSN and one OTLP token?
    This design keeps them apart (D18). The setup page can make both in one step.
-2. What load must one SQLite file take? P0.4 answers this. If the result is too low, the fallback is to
-   require Postgres for telemetry, not to add another engine.
+2. Answered by P0.4 (section 15): one SQLite file takes about 30,000 log rows per second, so telemetry
+   does not require Postgres.
 3. Should Owlee accept Sentry SDK transactions as traces? Many error users already send them. It would give
    traces with no new SDK. This design leaves it out of P2.
 
@@ -543,7 +548,7 @@ Each step ends in a state that is tested and that can ship.
 | D4 | Telemetry is stored in the same SQLite or Postgres database, with the same SQL. No ClickHouse. If SQLite is too slow (P0.4), the answer is Postgres. | 2026-11-19 |
 | D5 | A source has one bearer token, stored as a SHA-256 hash and shown one time. It is not a public key like a DSN, because OTLP senders are servers, not browsers. | 2026-11-19 |
 | D6 | Intake paths are `/otlp/v1/{logs,traces,metrics}`, so `OTEL_EXPORTER_OTLP_ENDPOINT` is `https://<host>/otlp`. | 2026-11-19 |
-| D7 | Decode with `opentelemetry-proto` (messages and serde only). If P0.1 shows the cost is too high, use `prost` with committed generated code. | 2026-11-19 |
+| D7 | Decode with `opentelemetry-proto` (messages and serde only). If P0.1 shows the cost is too high, use `prost` with committed generated code. P0.1 measured a clean release build of 73 s before and 74 s after (CPU 418 s to 458 s) and a binary of 29.6 MB before and 31.0 MB after, with all of P0 and P1. Kept. Its serde reads OTLP/JSON; Owlee empties invalid hex ids before decoding and writes the JSON response itself. | 2026-11-23 |
 | D8 | Normalization lives in a new pure crate `crates/telemetry`, as `crates/errors` does for Sentry. HTTP and storage stay in `apps/server`. | 2026-11-19 |
 | D9 | No JSON functions in SQL. Filterable attributes go into key-value tables; the full set is JSON text for display. | 2026-11-19 |
 | D10 | Telemetry is not part of the per-user privacy export and erasure. It is deleted by source and by retention. Bodies and attributes are scrubbed at intake. | 2026-11-19 |
@@ -556,3 +561,53 @@ Each step ends in a state that is tested and that can ship.
 | D17 | Alerts on telemetry are monitors with new job types, so incidents, maintenance, status pages, and notifications work with no new code paths. | 2026-11-19 |
 | D18 | A telemetry source is separate from an error project. Errors and telemetry connect by `trace_id`, not by the object that received them. | 2026-11-19 |
 | D19 | Order: logs, then traces, then metrics, then alerts. Logs are the simplest and pair at once with errors. Traces reuse the log foundations. Metrics need the most new logic (temporality, cardinality, rollups). | 2026-11-19 |
+
+## 15. Build notes (P0 and P1)
+
+### 15.1 Load test (P0.4)
+
+Tool: `apps/server/tests/logs_load.rs` (`seed`, `search`, and `send`, run with `--ignored`). One machine with
+12 cores, NVMe disk, release build, Postgres 16 in Docker with default settings, one source, requests of
+100 records.
+
+Intake (`send`), stored rows per second and request time:
+
+| Sent rows per second | SQLite | Postgres |
+|---|---|---|
+| 10,000 | 10,000; p95 9 ms | 10,000; p95 21 ms |
+| 30,000 | 29,800; p95 116 ms | 30,000; p95 347 ms |
+| 60,000 | 47,900; p95 4.9 s (saturated) | 54,200; p95 2.4 s (saturated) |
+
+Search (`search`), median of 3 runs, 200-row page and facets:
+
+| Data | Page, any filter | Facets, worst case |
+|---|---|---|
+| SQLite, 1 million rows | 2 to 15 ms | 0.2 s |
+| SQLite, 10 million rows | 2 to 27 ms | 0.65 s (attribute filter) |
+| Postgres, 1 million rows | 1.4 to 128 ms | 0.16 s |
+
+The 50 million row run was not done. A page reads only the newest rows of its range, so its time depends on
+the range and the filter, not on the total rows. Facet time depends on the cap in 15.2.
+
+### 15.2 Changes from the load test
+
+| Change | Before | After |
+|---|---|---|
+| Quota reserve in its own transaction (section 4.7) | Postgres saturated at 8,500 rows per second, p95 4.2 s at 10,000 | 54,000 rows per second; p95 21 ms at 10,000 |
+| Facets count only the newest 10,000 matching rows, in one grouped query. The response has `capped: true` when the cap is reached, and the page says so. | 5 s for 7 days at 1 million rows; about 10 times more at 10 million | 0.65 s or less at 10 million rows |
+| Attribute filter is `EXISTS` on `log_attributes (log_id)`, not `IN` over all matching rows | 0.83 s for any range at 10 million rows, growing with total rows | 11 to 27 ms |
+
+### 15.3 Other notes
+
+- Routes under `/api/logs` and `/api/telemetry-sources` take a session only. API tokens get 403. Token scopes
+  for logs can come later.
+- A source name is unique in a project among sources that are not deleted (a partial unique index).
+- `telemetry_sources.first_log_at` drives the "Waiting for the first data" state on the setup page.
+- SQLite inserts use `?` placeholders. Numbered placeholders made 500-row statements 4 times slower.
+- Facets always return the six levels, with 0 for a level that has no rows.
+- `PATCH /api/telemetry-sources/{id}` takes `name` and `dailyQuota`.
+- Live tail asks for rows newer than the newest row it has. A request that commits late, with an older time,
+  does not show in the tail. A new search shows it.
+- The setup page snippets were run against the dev server: Node, Python, Go, Rust, and the Collector each
+  stored logs. Node needs `@opentelemetry/api` 1.10 or later for the logs API. Python needs
+  `opentelemetry-instrumentation-logging`.

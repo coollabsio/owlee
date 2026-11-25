@@ -10,6 +10,7 @@ import { type Column, DataTable } from "@/components/data-table";
 import { Button, ErrorText, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
 import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, type EventSummary, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { TRACE_ID, traceLogsPath } from "@/lib/logs";
 import { watchReplayPath } from "@/lib/replay";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 
@@ -143,6 +144,7 @@ export function IssueDetailPage() {
   }
   const data = issue.data;
   const event = pickedOther ? picked.data : latest;
+  const traceId = event ? traceIdOf(event) : null;
   const events = flattenPages(eventList.data?.pages.map((page) => page.items));
   const parts = splitTitle(data.title);
   const issueKey = data.shortId || data.id;
@@ -318,11 +320,16 @@ export function IssueDetailPage() {
                 {event ? (
                   <div className="flex flex-col gap-3">
                     <EventChips event={event} />
-                    {event.replay ? (
+                    {event.replay || traceId ? (
                       <div className="flex flex-wrap gap-2">
                         {event.replay ? (
                           <Link className="button" to={watchReplayPath(data.appId, event.replay, event.timestamp)}>
                             Watch replay
+                          </Link>
+                        ) : null}
+                        {traceId ? (
+                          <Link className="button" to={traceLogsPath(traceId, event.timestamp)}>
+                            Logs for this trace
                           </Link>
                         ) : null}
                       </div>
@@ -683,6 +690,12 @@ function stackText(exceptions: ExceptionInfo[]) {
       return [head, ...frames].join("\n");
     })
     .join("\n\n");
+}
+
+/** The event's `contexts.trace.trace_id`, when it is a 32-character hex trace id. */
+function traceIdOf(event: NormalizedEvent) {
+  const id = record(event.contexts.trace).trace_id;
+  return id && TRACE_ID.test(id) ? id.toLowerCase() : null;
 }
 
 function record(value: unknown): Record<string, string> {

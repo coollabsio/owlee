@@ -42,6 +42,13 @@ const REPLAY_MAX_SEGMENT: &str = "OWLEE_REPLAY_MAX_SEGMENT_BYTES";
 const REPLAY_RATE_APP: &str = "OWLEE_REPLAY_RATE_APP_PER_MIN";
 const REPLAY_RATE_IP: &str = "OWLEE_REPLAY_RATE_IP_PER_MIN";
 const REPLAY_RETENTION: &str = "OWLEE_REPLAY_RETENTION_DAYS";
+const OTLP_MAX_BODY: &str = "OWLEE_OTLP_MAX_BODY_BYTES";
+const OTLP_RATE_SOURCE: &str = "OWLEE_OTLP_RATE_SOURCE_PER_MIN";
+const OTLP_BURST_SOURCE: &str = "OWLEE_OTLP_RATE_SOURCE_BURST";
+const OTLP_RATE_IP: &str = "OWLEE_OTLP_RATE_IP_PER_MIN";
+const OTLP_BURST_IP: &str = "OWLEE_OTLP_RATE_IP_BURST";
+const LOG_DAILY_QUOTA: &str = "OWLEE_LOG_DAILY_QUOTA";
+const LOG_RETENTION: &str = "OWLEE_LOG_RETENTION_DAYS";
 const ERROR_KEEP_FIRST: &str = "OWLEE_ERROR_KEEP_FIRST";
 const ERROR_SAMPLE_WINDOW: &str = "OWLEE_ERROR_SAMPLE_WINDOW_SECS";
 const ALLOW_LOCALHOST: &str = "OWLEE_INGEST_ALLOW_LOCALHOST";
@@ -80,6 +87,15 @@ pub struct IngestConfig {
     pub replay_rate_app_per_min: u32,
     pub replay_rate_ip_per_min: u32,
     pub replay_retention_days: i64,
+    /// The most an OTLP request may inflate to.
+    pub otlp_max_body_bytes: usize,
+    pub otlp_rate_source_per_min: u32,
+    pub otlp_rate_source_burst: u32,
+    pub otlp_rate_ip_per_min: u32,
+    pub otlp_rate_ip_burst: u32,
+    /// Log records per source per UTC day. A source's own `daily_quota` replaces it.
+    pub log_daily_quota: i64,
+    pub log_retention_days: i64,
     pub error_keep_first: i64,
     pub error_sample_window_secs: i64,
     /// Accept `localhost` / `127.0.0.1` analytics origins in addition to the site domain.
@@ -142,6 +158,13 @@ impl Default for IngestConfig {
             replay_rate_app_per_min: 1200,
             replay_rate_ip_per_min: 120,
             replay_retention_days: 14,
+            otlp_max_body_bytes: 4 * 1024 * 1024,
+            otlp_rate_source_per_min: 600,
+            otlp_rate_source_burst: 120,
+            otlp_rate_ip_per_min: 600,
+            otlp_rate_ip_burst: 120,
+            log_daily_quota: 1_000_000,
+            log_retention_days: 7,
             error_keep_first: 5,
             error_sample_window_secs: 3600,
             allow_localhost: true,
@@ -629,6 +652,27 @@ fn apply_ingest_env(config: &mut Config) -> Result<(), ConfigError> {
     }
     if let Some(value) = optional(REPLAY_RETENTION) {
         ingest.replay_retention_days = parse_i64(REPLAY_RETENTION, &value)?;
+    }
+    if let Some(value) = optional(OTLP_MAX_BODY) {
+        ingest.otlp_max_body_bytes = parse_usize(OTLP_MAX_BODY, &value)?;
+    }
+    if let Some(value) = optional(OTLP_RATE_SOURCE) {
+        ingest.otlp_rate_source_per_min = parse_u32(OTLP_RATE_SOURCE, &value)?;
+    }
+    if let Some(value) = optional(OTLP_BURST_SOURCE) {
+        ingest.otlp_rate_source_burst = parse_u32(OTLP_BURST_SOURCE, &value)?;
+    }
+    if let Some(value) = optional(OTLP_RATE_IP) {
+        ingest.otlp_rate_ip_per_min = parse_u32(OTLP_RATE_IP, &value)?;
+    }
+    if let Some(value) = optional(OTLP_BURST_IP) {
+        ingest.otlp_rate_ip_burst = parse_u32(OTLP_BURST_IP, &value)?;
+    }
+    if let Some(value) = optional(LOG_DAILY_QUOTA) {
+        ingest.log_daily_quota = parse_i64(LOG_DAILY_QUOTA, &value)?;
+    }
+    if let Some(value) = optional(LOG_RETENTION) {
+        ingest.log_retention_days = parse_i64(LOG_RETENTION, &value)?;
     }
     if let Some(value) = optional(ERROR_KEEP_FIRST) {
         ingest.error_keep_first = parse_i64(ERROR_KEEP_FIRST, &value)?.max(1);

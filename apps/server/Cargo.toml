@@ -23,6 +23,7 @@ hex.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 owlee-domain = { path = "../../crates/status" }
 owlee-errors = { path = "../../crates/errors" }
+owlee-telemetry = { path = "../../crates/telemetry" }
 owlee-insights = { path = "../../crates/insights" }
 owlee-platform = { path = "../../crates/platform" }
 isbot = "0.1.3"

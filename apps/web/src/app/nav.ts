@@ -11,6 +11,7 @@ import {
   Brush,
   Danger,
   Data,
+  DocumentText,
   Devices,
   Folder,
   Gauge,
@@ -95,6 +96,17 @@ export const products: Product[] = [
           { to: "/errors", label: "Issues", icon: Bug },
           { to: "/errors/apps", label: "Apps", icon: Element3 },
         ],
+      },
+    ],
+  },
+  {
+    id: "observability",
+    label: "Observability",
+    description: "Logs from OpenTelemetry sources.",
+    icon: DocumentText,
+    groups: [
+      {
+        links: [{ to: "/logs", label: "Logs", icon: DocumentText }],
       },
     ],
   },

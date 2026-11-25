@@ -63,7 +63,7 @@ pub fn scrub_raw_event(raw: &mut Value) {
     scrub_value(raw);
 }
 
-fn is_sensitive(key: &str) -> bool {
+pub fn is_sensitive(key: &str) -> bool {
     let key = key.to_ascii_lowercase().replace('-', "_");
     // `auth` alone, because as a substring it would match `author`.
     key == "auth"

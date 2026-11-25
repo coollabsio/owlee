@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> Router {
         .route("/public/{slug}", get(public_page))
         .route("/public/{slug}/incidents", get(public_page_incidents))
         .merge(crate::insights::api_routes())
+        .merge(crate::telemetry::api_routes())
         .merge(crate::errors::privacy_routes())
         .merge(crate::api_tokens::routes())
         .route_layer(middleware::from_fn(crate::api_tokens::deny_tokens))
@@ -128,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .fallback(api_missing);
     Router::new()
         .nest("/api", api)
+        .merge(crate::telemetry::otlp_routes())
         .merge(crate::insights::public_routes())
         .fallback(crate::insights::fallback)
         // No route streams, so a request that runs longer than this is stuck.

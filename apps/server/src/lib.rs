@@ -40,6 +40,7 @@ mod seed;
 mod setup;
 mod state;
 mod static_assets;
+mod telemetry;
 mod verify;
 mod workspaces;
 
@@ -55,4 +56,5 @@ pub use routes::router;
 pub use seed::{DEMO_EMAIL, DEMO_PASSWORD, DemoScope};
 pub use setup::{SetupError, initialize_setup_token, is_complete, rotate_setup_token, setup_url};
 pub use state::{AppState, TestSession, boot, editor_session, member_session, testing_config};
+pub use telemetry::prune_logs;
 pub use verify::recheck_verified;

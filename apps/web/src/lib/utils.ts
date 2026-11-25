@@ -35,7 +35,7 @@ export function duration(iso?: string | null) {
   return `${Math.round(hours / 24)}d`;
 }
 
-const DROP_REASONS: Record<DropReason, string> = {
+export const DROP_REASONS: Record<DropReason, string> = {
   client_rate_limit: "one client sent too fast",
   source_rate_limit: "too many events for this source",
   daily_quota: "daily cap reached",

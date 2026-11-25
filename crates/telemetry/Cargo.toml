@@ -1,0 +1,16 @@
+[package]
+name = "owlee-telemetry"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "OTLP decoding, log normalization, and the log search language"
+
+[dependencies]
+base64.workspace = true
+hex.workspace = true
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "with-serde", "logs", "trace", "metrics"] }
+owlee-errors = { path = "../errors" }
+prost = "0.14"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

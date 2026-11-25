@@ -18,6 +18,8 @@ import { AnalyticsPage, VisitorPage } from "@/pages/analytics";
 import { DashboardPage } from "@/pages/dashboard";
 import { HomePage } from "@/pages/home";
 import { LinkDetailPage, LinksPage } from "@/pages/links";
+import { LogSourcesPage, LogsPage } from "@/pages/logs";
+import { LogSourceDetailPage } from "@/pages/telemetry-sources";
 import { ErrorAppDetailPage, ErrorAppsPage } from "@/pages/error-apps";
 import { IncidentDetailPage, IncidentsPage } from "@/pages/incidents";
 import { IssueDetailPage } from "@/pages/issue-detail";
@@ -119,6 +121,9 @@ export function App() {
           <Route path="errors/apps" element={<ErrorAppsPage />} />
           <Route path="errors/apps/:id" element={<ErrorAppDetailPage />} />
           <Route path="errors/apps/:id/replays/:replayId" element={<ReplayPage />} />
+          <Route path="logs" element={<LogsPage />} />
+          <Route path="logs/sources" element={<LogSourcesPage />} />
+          <Route path="logs/sources/:id" element={<LogSourceDetailPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="profile/security" element={<SecurityPage />} />
           <Route path="profile/sessions" element={<SessionsPage />} />

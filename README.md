@@ -22,13 +22,13 @@ Owlee is a self-hosted uptime monitor, status page, incident desk, error tracker
 - A link shortener. Links live on a hostname you add, and also at `/go/{slug}` on this server, with click counts, referrers, and an optional public page.
 - Error tracking. Create a project, copy its Sentry DSN, and point an official Sentry SDK at it. Issues group on a fingerprint, with a short id such as `CHECKOUT-1`, stack traces, breadcrumbs, tags, and the raw event.
 - Session replay. An error app stores the replays that the Sentry browser SDK records, plays them back, and links them to error events. Replays are off for each app until an editor turns them on.
+- Logs. A telemetry source receives OpenTelemetry (OTLP/HTTP) logs. Search and filter them, follow a live tail, and open the logs of an error's trace.
 
 ## Planned
 
 These features are not built yet. The idea for metrics, logs, and traces comes from [DataCat](https://github.com/replit/datacat). Their design is in [docs/specs/2026-11-19-observability-design.md](docs/specs/2026-11-19-observability-design.md).
 
 - Metrics. Receive OpenTelemetry (OTLP/HTTP) metrics, show charts, and alert when a value crosses a line.
-- Logs. Receive OTLP logs, search and filter them, show a live tail, and link a log line to its trace and error.
 - Traces. Receive OTLP traces, show a service list and a span waterfall, and link a trace to its error issue.
 
 ## Run it
@@ -410,6 +410,25 @@ The Sentry browser SDK records the page with [rrweb](https://github.com/rrweb-io
 
 Short-link hostnames only take over a request when the `Host` is a configured link domain and not Owlee's own origin, and only after `/api` and `/go` have already been routed. Sentry ingest stays on `/api/...`. In production a link hostname redirects only after its TXT record is verified, the same way as a site domain. A link slug cannot start with a path that Owlee uses, such as `api`. Each address may record 30 clicks a minute. Past that, the redirect still works and the click is not counted.
 
+## Logs
+
+Create a **telemetry source** in a project. Owlee shows its token one time and stores only its SHA-256. Point an OpenTelemetry SDK or the OpenTelemetry Collector at it:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=https://owlee.example.com/otlp
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>"
+```
+
+- Owlee accepts OTLP/HTTP on `POST /otlp/v1/logs`, `/otlp/v1/traces`, and `/otlp/v1/metrics`, in protobuf (`application/x-protobuf`) and JSON (`application/json`), optionally gzip. The answer uses the encoding of the request. gRPC is not supported.
+- Logs are stored. Traces and metrics are not stored yet: they answer `200` with every span or data point in `partial_success`.
+- A wrong token is `401`, a bad body `400`, and a body above `OWLEE_OTLP_MAX_BODY_BYTES` (4 MiB, before and after gzip) `413`. Each source and each client IP has a token bucket (`OWLEE_OTLP_RATE_SOURCE_*`, `OWLEE_OTLP_RATE_IP_*`, 600 requests a minute). A full bucket is `429` with `Retry-After`.
+- Each source may store `OWLEE_LOG_DAILY_QUOTA` log records per UTC day (1,000,000), or its own cap. A request that passes the cap stores what fits and reports the rest in `partial_success`. When nothing fits, the answer is `429` with `Retry-After` until 00:00 UTC.
+- Owlee answers after the rows are committed. A crash after the answer loses nothing.
+- A record keeps at most 64 attributes, keys of 128 characters, values of 1 KiB, and a body of 16 KiB. Longer parts are cut. Secrets are filtered as for errors, and `client.address`, `source.address`, and `net.peer.ip` are removed.
+- Logs are deleted after `OWLEE_LOG_RETENTION_DAYS` (7). Deleting a source stops its intake at once. The hourly retention pass then deletes its logs in batches.
+
+The search box takes `timeout` or `"connection reset"` (body text, any case), `service:`, `env:`, `host:`, `trace:`, `level:error` or `level:>=warn`, an attribute such as `http.route:/checkout`, and `-` before a term for "not". Terms are joined with AND. A search covers at most 7 days and shows 200 rows a page, newest first. Live tail asks for new rows every 2 seconds.
+
 ## Analytics
 
 Add a site in **Sites**, then paste the snippet from **Tracker**:
@@ -477,6 +496,7 @@ crates/platform Config, SQLite/Postgres pool, migrations, passwords, ids
 crates/status   Assertions, state machine, uptime, slugs, notification signing
 crates/insights Cookieless visitor ids, URL parsing, user-agent classification, short-link rules
 crates/errors   Sentry envelope parsing, event normalization, issue fingerprinting
+crates/telemetry OTLP decoding, log normalization, the log search language
 deploy          Docker Compose
 docs            README screenshots
 examples        PHP, JavaScript, and Rust programs that send errors

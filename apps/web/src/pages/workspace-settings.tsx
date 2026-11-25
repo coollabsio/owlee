@@ -19,6 +19,7 @@ import { downloadText } from "@/lib/dns";
 import { useCanEdit, useMe } from "@/lib/me";
 import { formatTime } from "@/lib/utils";
 import { resetWorkspace, useWorkspace, workspaceRoleLabel } from "@/lib/workspace";
+import { SourcesCard } from "@/pages/telemetry-sources";
 
 const roleOptions: { value: InviteRole; label: string }[] = [
   { value: "member", label: "Member" },
@@ -41,6 +42,7 @@ export function WorkspaceProjectsPage() {
   return (
     <SettingsView title="Projects" description="The projects that group the records of this workspace.">
       <ProjectsCard />
+      <SourcesCard allProjects />
     </SettingsView>
   );
 }

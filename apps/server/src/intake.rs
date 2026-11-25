@@ -1,4 +1,4 @@
-//! Stored and dropped counts per error project and analytics site, so a
+//! Stored and dropped counts per error project, analytics site, and telemetry source, so a
 //! sender that is refused is visible in the UI and not only in the log.
 //! The counts live in memory and start at zero when the server starts.
 
@@ -49,12 +49,20 @@ pub struct IntakeStats {
 
 impl IntakeStats {
     pub fn stored(&self, id: &str) {
-        self.update(id, |counts| counts.stored += 1);
+        self.stored_many(id, 1);
+    }
+
+    pub fn stored_many(&self, id: &str, count: u64) {
+        self.update(id, |counts| counts.stored += count);
     }
 
     pub fn dropped(&self, id: &str, reason: DropReason) {
+        self.dropped_many(id, 1, reason);
+    }
+
+    pub fn dropped_many(&self, id: &str, count: u64, reason: DropReason) {
         self.update(id, |counts| {
-            counts.dropped += 1;
+            counts.dropped += count;
             counts.last_drop = Some(LastDrop {
                 at: TimestampMillis::now(),
                 reason,

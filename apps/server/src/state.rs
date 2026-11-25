@@ -33,6 +33,10 @@ pub struct AppState {
     pub analytics_ip_limit: Arc<TokenBucket>,
     pub error_intake: Arc<crate::intake::IntakeStats>,
     pub analytics_intake: Arc<crate::intake::IntakeStats>,
+    /// Keyed by `{source_id}:{signal}`, as `abc:logs`.
+    pub telemetry_intake: Arc<crate::intake::IntakeStats>,
+    pub otlp_source_limit: Arc<TokenBucket>,
+    pub otlp_ip_limit: Arc<TokenBucket>,
     pub login_ip_limit: Arc<TokenBucket>,
     /// Failed passwords per account and client address.
     pub login_account_limit: Arc<TokenBucket>,
@@ -146,6 +150,15 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         inflight: Inflight::default(),
         error_intake: Arc::default(),
         analytics_intake: Arc::default(),
+        telemetry_intake: Arc::default(),
+        otlp_source_limit: Arc::new(TokenBucket::per_minute(
+            ingest.otlp_rate_source_per_min,
+            ingest.otlp_rate_source_burst,
+        )),
+        otlp_ip_limit: Arc::new(TokenBucket::per_minute(
+            ingest.otlp_rate_ip_per_min,
+            ingest.otlp_rate_ip_burst,
+        )),
         connectivity: Connectivity::new(config.connectivity_targets.clone()),
         passwords,
         insights_salt: Arc::default(),

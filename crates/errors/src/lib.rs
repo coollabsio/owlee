@@ -14,4 +14,4 @@ pub use replay::{
     MAX_SEGMENT_ID, RecordingEncoding, ReplayError, ReplaySegment, ReplayType, is_replay_id,
     parse_replay,
 };
-pub use scrub::{scrub_query, scrub_raw_event, scrub_text};
+pub use scrub::{is_sensitive, scrub_query, scrub_raw_event, scrub_text};
