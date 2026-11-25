@@ -126,3 +126,34 @@ async fn api_and_ingest_responses_get_the_headers_and_keep_cors() {
         assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
     }
 }
+
+#[tokio::test]
+async fn the_replay_player_is_framed_by_owlee_only_and_runs_no_inline_script() {
+    let app = app().await;
+    let (_, _, index) = get(&app, "GET", "/").await;
+    let (status, headers, html) = get(&app, "GET", "/replay-player.html").await;
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+         img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; \
+         base-uri 'none'; frame-ancestors 'self'"
+    );
+    assert_eq!(headers["x-frame-options"], "SAMEORIGIN");
+    assert_common(&headers);
+    // Without a web build the document is missing, and it is never the app's index.
+    assert!(
+        status == StatusCode::NOT_FOUND || (status == StatusCode::OK && html != index),
+        "{status}"
+    );
+    if status == StatusCode::OK {
+        assert_eq!(headers["content-type"], "text/html");
+        assert_eq!(
+            inline_script_sources(&html),
+            "",
+            "script-src 'self' allows no inline script"
+        );
+    }
+
+    let (_, app_page, _) = get(&app, "GET", "/error-apps/1/replays/abc").await;
+    assert_eq!(app_page["x-frame-options"], "DENY");
+}

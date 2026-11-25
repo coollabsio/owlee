@@ -22,6 +22,7 @@ import { ErrorAppDetailPage, ErrorAppsPage } from "@/pages/error-apps";
 import { IncidentDetailPage, IncidentsPage } from "@/pages/incidents";
 import { IssueDetailPage } from "@/pages/issue-detail";
 import { IssuesPage } from "@/pages/issues";
+import { ReplayPage } from "@/pages/replays";
 import { MaintenancePage } from "@/pages/maintenance";
 import { MonitorDetailPage, MonitorsPage } from "@/pages/monitors";
 import { NotificationsPage } from "@/pages/notifications";
@@ -117,6 +118,7 @@ export function App() {
           <Route path="errors/:id/events/:eventId" element={<IssueDetailPage />} />
           <Route path="errors/apps" element={<ErrorAppsPage />} />
           <Route path="errors/apps/:id" element={<ErrorAppDetailPage />} />
+          <Route path="errors/apps/:id/replays/:replayId" element={<ReplayPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="profile/security" element={<SecurityPage />} />
           <Route path="profile/sessions" element={<SessionsPage />} />

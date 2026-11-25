@@ -20,6 +20,11 @@ pub enum DropReason {
     Filtered,
     SpikeProtection,
     StorageFailed,
+    ReplaysDisabled,
+    ReplayHourlyLimit,
+    ReplayQuota,
+    /// An item type Owlee does not store, such as `replay_video`.
+    Unsupported,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

@@ -33,6 +33,14 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
         .bind(now.timestamp() - 8 * 86_400)
         .execute(state.db.pool())
         .await?;
+    crate::errors::prune_replay_usage(&state.db, now.timestamp() - 8 * 86_400).await?;
+    let replay_before = now.timestamp_millis()
+        - state
+            .config
+            .ingest
+            .replay_retention_days
+            .saturating_mul(86_400_000);
+    crate::errors::prune_replays(&state.db, replay_before).await?;
     // Loading this month's salt deletes last month's, even with no analytics traffic.
     state
         .insights_salt

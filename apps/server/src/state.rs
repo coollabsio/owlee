@@ -26,6 +26,9 @@ pub struct AppState {
     pub insights_limits: Arc<crate::insights::Limits>,
     pub error_project_limit: Arc<TokenBucket>,
     pub error_ip_limit: Arc<TokenBucket>,
+    /// Envelopes with replay items and no event use these instead of the error buckets.
+    pub replay_app_limit: Arc<TokenBucket>,
+    pub replay_ip_limit: Arc<TokenBucket>,
     pub analytics_site_limit: Arc<TokenBucket>,
     pub analytics_ip_limit: Arc<TokenBucket>,
     pub error_intake: Arc<crate::intake::IntakeStats>,
@@ -154,6 +157,14 @@ pub async fn boot(config: Config) -> Result<AppState, BootError> {
         error_ip_limit: Arc::new(TokenBucket::per_minute(
             ingest.error_rate_ip_per_min,
             ingest.error_rate_ip_burst,
+        )),
+        replay_app_limit: Arc::new(TokenBucket::per_minute(
+            ingest.replay_rate_app_per_min,
+            ingest.replay_rate_app_per_min / 4,
+        )),
+        replay_ip_limit: Arc::new(TokenBucket::per_minute(
+            ingest.replay_rate_ip_per_min,
+            ingest.replay_rate_ip_per_min / 4,
         )),
         analytics_site_limit: Arc::new(TokenBucket::per_minute(
             ingest.analytics_rate_site_per_min,

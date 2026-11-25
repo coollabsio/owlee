@@ -1,6 +1,6 @@
 # Session replay design
 
-Status: draft. Nothing in this document is built yet. Revised after a review by four models on 2026-11-23.
+Status: built on 2026-11-23. Revised after a review by four models on 2026-11-23. §14 lists where the build differs from this text.
 
 ## 1. Goal
 
@@ -253,7 +253,7 @@ as links to other hosts. The CSP blocks them, so those pages play with less styl
 - The error app page gets a "Replays" tab. It lists replays by receive time with duration, first URL, URL count,
   user label, browser, release, and error count. Filters: URL (substring match on `replay_urls.url`), release,
   environment, and "has errors".
-- The replay page `/error-apps/{app_id}/replays/{replay_id}` has the player, a timeline under it with one mark for
+- The replay page `/errors/apps/{app_id}/replays/{replay_id}` has the player, a timeline under it with one mark for
   each linked error event, and a side list of breadcrumbs and navigations. The side list comes from the Sentry
   custom rrweb events (`type: 5`, `data.tag: breadcrumb`) in the recording, read in the browser. A click on a
   list item or a mark moves the player to that time.
@@ -365,3 +365,17 @@ PRIVACY.md gets a "Session replay" part:
 | D10 | Replays have a daily byte cap and an hourly cap on new replays, not spike protection. Bytes are the disk cost. The hourly cap stops a sender with the public key from spending the whole day's bytes in minutes with random replay ids. Segments of a known replay do not count against it, so replays that already started can finish. | 2026-11-23 |
 | D11 | Replay-only envelopes use their own app and IP token buckets (`OWLEE_REPLAY_RATE_APP_PER_MIN`, default 1200, and `OWLEE_REPLAY_RATE_IP_PER_MIN`, default 120). One session sends about 12 envelopes a minute, so the error buckets (120 and 60 a minute) would refuse errors after about 10 sessions. The IP check before the body cannot know the category, so a replay-only envelope gives back its error IP token after the parse. | 2026-11-23 |
 | D12 | The outcome is decided for each item. A replay refusal drops the replay items, adds the `replay` category to `X-Sentry-Rate-Limits`, and never changes the status of the event item. The SDK reads that header on every response. | 2026-11-23 |
+
+## 14. Build notes
+
+| # | Where | What the build does |
+|---|---|---|
+| B1 | §8 list route | No `from` and `to` filters. The page is `{ items, nextCursor }`, as the issue events list, with `limit` from 1 to 50. |
+| B2 | §8 settings route | A `422` names `daily_bytes` and `hourly_limit` under `fields`, as the other error app forms do. |
+| B3 | §5 schema | `data` is declared `BYTEA`. Postgres stores binary, and SQLite keeps the blob unchanged under that type name. An extra index `replay_users (app_id, replay_id)` keeps the cascade delete fast. |
+| B4 | §4 rate limits | Reasons in `X-Sentry-Rate-Limits`: `replays_disabled`, `replay_hourly_limit`, and `quota_exceeded` for daily bytes. An envelope with an event and replay items also takes a replay app token. Replay bucket bursts are a quarter of the per-minute rate. |
+| B5 | §6 timeline | The Sentry SDK writes its `performanceSpan` custom events with an rrweb `timestamp` in seconds. The web app converts every timestamp below 10^11 to ms before playback, or the player starts in 1970. |
+| B6 | §7 links | The issue detail adds `replay` to its `latest` event too, because the issue page shows that event without fetching it again. |
+| B7 | §8 tokens | The token form has a "Replay recordings" row with only Read. Token app limits apply to replay routes as to the other error app routes. |
+| B8 | §11 tests | Tested in the dev environment with `@sentry/browser` 11.17.0: record, list, play, seek, error link, and masked input. A hostile recording (`<script>`, `onerror`, `<base>`, `<meta refresh>`, `<form>`, `<iframe srcdoc>`, external and relative images) ran no script. Served by Owlee with the player CSP, it made no request to another host. Served by the Vite dev server, which sends no CSP, the images and stylesheet did load. |
+

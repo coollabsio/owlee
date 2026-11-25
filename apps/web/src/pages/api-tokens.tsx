@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { Key } from "reicon-react";
-import { ALL_RESOURCES, AccessPicker, ResourcePicker, type ResourceSelection, accessLevel, isResourceSelectionEmpty, toTokenResources } from "@/components/scope-access";
+import { ALL_RESOURCES, AccessPicker, ResourcePicker, type ResourceSelection, isResourceSelectionEmpty, toTokenResources } from "@/components/scope-access";
 import { SettingsView } from "@/components/settings-view";
 import { CodeBlock } from "@/components/setup-guide";
 import { Button, ConfirmDialog, CopyInput, Dialog, ErrorText, Field, Input, LayerCard, RowActions, Select, Spinner, StatusBadge } from "@/components/ui";
@@ -105,7 +105,7 @@ function CreateTokenDialog({ open, onClose, onIssued }: { open: boolean; onClose
         name: name.trim(),
         scopes,
         expires_in_days: EXPIRY_OPTIONS.find((option) => option.value === expiry)!.days,
-        resources: accessLevel(scopes, "errors") === "none" ? null : toTokenResources(limit),
+        resources: scopes.length === 0 ? null : toTokenResources(limit),
       }),
     onSuccess: async (token) => {
       onIssued({ name: token.name, token: token.token });

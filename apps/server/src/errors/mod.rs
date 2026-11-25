@@ -6,6 +6,9 @@ mod alert;
 mod filter;
 mod http;
 mod ingest;
+mod replay;
+mod replay_http;
+mod replay_store;
 mod seed;
 mod store;
 
@@ -15,6 +18,7 @@ use axum::routing::{get, post, put};
 use crate::state::AppState;
 
 pub use alert::ISSUE_ALERTS_PER_HOUR;
+pub use replay_store::{prune_replays, prune_usage as prune_replay_usage};
 pub use seed::seed_demo;
 pub use store::privatize_events;
 
@@ -27,6 +31,15 @@ pub fn api_routes() -> Router<AppState> {
         )
         .route("/error-apps/{id}/quota", put(http::set_app_quota))
         .route("/error-apps/{id}/protection", put(http::set_app_protection))
+        .route(
+            "/error-apps/{id}/replays-settings",
+            put(replay_http::set_settings),
+        )
+        .route("/error-apps/{id}/replays", get(replay_http::list))
+        .route(
+            "/error-apps/{id}/replays/{replay_id}",
+            get(replay_http::detail).delete(replay_http::delete),
+        )
         .route("/error-issues", get(http::list_issues))
         .route("/error-issues/bulk", post(http::bulk_update))
         .route(
@@ -39,6 +52,14 @@ pub fn api_routes() -> Router<AppState> {
             get(http::event_neighbors),
         )
         .route("/error-events/{id}", get(http::get_event))
+}
+
+/// Recordings need the `replays:read` scope. `errors:read` reaches the replay list and metadata only.
+pub fn replay_recording_routes() -> Router<AppState> {
+    Router::new().route(
+        "/error-apps/{id}/replays/{replay_id}/segments/{segment_id}",
+        get(replay_http::segment),
+    )
 }
 
 /// Cookie only, unlike `api_routes`, so a token cannot export or erase a person's events.

@@ -1,7 +1,8 @@
 //! Browser hardening headers on every response.
 //!
 //! Public status and share pages may be embedded on other sites, so they allow any frame
-//! ancestor. The dashboard and everything else refuse framing.
+//! ancestor. The replay player is framed by the dashboard only. The dashboard and
+//! everything else refuse framing.
 
 use std::sync::LazyLock;
 
@@ -17,26 +18,38 @@ use sha2::{Digest, Sha256};
 
 static APP_POLICY: LazyLock<HeaderValue> = LazyLock::new(|| policy("'none'"));
 static EMBEDDABLE_POLICY: LazyLock<HeaderValue> = LazyLock::new(|| policy("*"));
+/// Recorded DOM is rebuilt in rrweb's sandboxed inner frame, which inherits
+/// this policy: recorded inline styles work, and nothing loads from or posts
+/// to another host.
+const PLAYER_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+     img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; \
+     frame-ancestors 'self'";
+pub const PLAYER_PATH: &str = "/replay-player.html";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathClass {
+    App,
+    Embeddable,
+    Player,
+}
 
 pub async fn add(request: Request, next: Next) -> Response {
-    let embeddable = is_embeddable(request.uri().path());
+    let class = classify(request.uri().path());
     let mut response = next.run(request).await;
-    apply(response.headers_mut(), embeddable);
+    apply(response.headers_mut(), class);
     response
 }
 
-fn apply(headers: &mut HeaderMap, embeddable: bool) {
-    let policy: &HeaderValue = if embeddable {
-        &EMBEDDABLE_POLICY
-    } else {
-        &APP_POLICY
+fn apply(headers: &mut HeaderMap, class: PathClass) {
+    let (policy, frame_options) = match class {
+        PathClass::App => (APP_POLICY.clone(), Some("DENY")),
+        PathClass::Embeddable => (EMBEDDABLE_POLICY.clone(), None),
+        PathClass::Player => (HeaderValue::from_static(PLAYER_POLICY), Some("SAMEORIGIN")),
     };
-    headers
-        .entry(CONTENT_SECURITY_POLICY)
-        .or_insert_with(|| policy.clone());
+    headers.entry(CONTENT_SECURITY_POLICY).or_insert(policy);
     // For browsers without CSP `frame-ancestors`.
-    if !embeddable {
-        headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if let Some(frame_options) = frame_options {
+        headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static(frame_options));
     }
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers
@@ -50,6 +63,16 @@ fn apply(headers: &mut HeaderMap, embeddable: bool) {
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()"),
     );
+}
+
+fn classify(path: &str) -> PathClass {
+    if path == PLAYER_PATH {
+        PathClass::Player
+    } else if is_embeddable(path) {
+        PathClass::Embeddable
+    } else {
+        PathClass::App
+    }
 }
 
 /// `/status/{slug}` and `/share/{kind}/{slug}`. The dashboard's own `/status` is not public.
@@ -79,7 +102,7 @@ fn policy(frame_ancestors: &str) -> HeaderValue {
 
 #[cfg(test)]
 mod tests {
-    use super::is_embeddable;
+    use super::{PathClass, classify, is_embeddable};
 
     #[test]
     fn only_public_pages_are_embeddable() {
@@ -89,5 +112,13 @@ mod tests {
         assert!(!is_embeddable("/status/"));
         assert!(!is_embeddable("/"));
         assert!(!is_embeddable("/api/public/acme"));
+    }
+
+    #[test]
+    fn only_the_player_document_is_the_player_class() {
+        assert_eq!(classify("/replay-player.html"), PathClass::Player);
+        assert_eq!(classify("/replay-player.html/x"), PathClass::App);
+        assert_eq!(classify("/assets/replay-player-abc.js"), PathClass::App);
+        assert_eq!(classify("/status/acme"), PathClass::Embeddable);
     }
 }

@@ -18,6 +18,7 @@
     "react-dom": "^19.2.0",
     "react-router": "^7.18.6",
     "reicon-react": "1.2.6",
+    "rrweb-player": "2.2.2",
     "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {

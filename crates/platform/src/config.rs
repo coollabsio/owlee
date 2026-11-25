@@ -37,6 +37,11 @@ const ANALYTICS_BURST_IP: &str = "OWLEE_ANALYTICS_RATE_IP_BURST";
 const CHECK_RETENTION: &str = "OWLEE_CHECK_RETENTION_DAYS";
 const ERROR_RETENTION: &str = "OWLEE_ERROR_RETENTION_DAYS";
 const ANALYTICS_RETENTION: &str = "OWLEE_ANALYTICS_RETENTION_DAYS";
+const REPLAY_MAX_BODY: &str = "OWLEE_REPLAY_MAX_BODY_BYTES";
+const REPLAY_MAX_SEGMENT: &str = "OWLEE_REPLAY_MAX_SEGMENT_BYTES";
+const REPLAY_RATE_APP: &str = "OWLEE_REPLAY_RATE_APP_PER_MIN";
+const REPLAY_RATE_IP: &str = "OWLEE_REPLAY_RATE_IP_PER_MIN";
+const REPLAY_RETENTION: &str = "OWLEE_REPLAY_RETENTION_DAYS";
 const ERROR_KEEP_FIRST: &str = "OWLEE_ERROR_KEEP_FIRST";
 const ERROR_SAMPLE_WINDOW: &str = "OWLEE_ERROR_SAMPLE_WINDOW_SECS";
 const ALLOW_LOCALHOST: &str = "OWLEE_INGEST_ALLOW_LOCALHOST";
@@ -67,6 +72,14 @@ pub struct IngestConfig {
     pub check_retention_days: i64,
     pub error_retention_days: i64,
     pub analytics_retention_days: i64,
+    /// The read limit of an envelope. The `event` item keeps `error_max_body_bytes`.
+    pub replay_max_body_bytes: usize,
+    /// The most a replay recording may inflate to.
+    pub replay_max_segment_bytes: usize,
+    /// Token buckets of envelopes with replay items and no event. The burst is a quarter of the rate.
+    pub replay_rate_app_per_min: u32,
+    pub replay_rate_ip_per_min: u32,
+    pub replay_retention_days: i64,
     pub error_keep_first: i64,
     pub error_sample_window_secs: i64,
     /// Accept `localhost` / `127.0.0.1` analytics origins in addition to the site domain.
@@ -124,6 +137,11 @@ impl Default for IngestConfig {
             check_retention_days: 14,
             error_retention_days: 30,
             analytics_retention_days: 90,
+            replay_max_body_bytes: 10 * 1024 * 1024,
+            replay_max_segment_bytes: 64 * 1024 * 1024,
+            replay_rate_app_per_min: 1200,
+            replay_rate_ip_per_min: 120,
+            replay_retention_days: 14,
             error_keep_first: 5,
             error_sample_window_secs: 3600,
             allow_localhost: true,
@@ -596,6 +614,21 @@ fn apply_ingest_env(config: &mut Config) -> Result<(), ConfigError> {
     }
     if let Some(value) = optional(ANALYTICS_RETENTION) {
         ingest.analytics_retention_days = parse_i64(ANALYTICS_RETENTION, &value)?;
+    }
+    if let Some(value) = optional(REPLAY_MAX_BODY) {
+        ingest.replay_max_body_bytes = parse_usize(REPLAY_MAX_BODY, &value)?;
+    }
+    if let Some(value) = optional(REPLAY_MAX_SEGMENT) {
+        ingest.replay_max_segment_bytes = parse_usize(REPLAY_MAX_SEGMENT, &value)?;
+    }
+    if let Some(value) = optional(REPLAY_RATE_APP) {
+        ingest.replay_rate_app_per_min = parse_u32(REPLAY_RATE_APP, &value)?;
+    }
+    if let Some(value) = optional(REPLAY_RATE_IP) {
+        ingest.replay_rate_ip_per_min = parse_u32(REPLAY_RATE_IP, &value)?;
+    }
+    if let Some(value) = optional(REPLAY_RETENTION) {
+        ingest.replay_retention_days = parse_i64(REPLAY_RETENTION, &value)?;
     }
     if let Some(value) = optional(ERROR_KEEP_FIRST) {
         ingest.error_keep_first = parse_i64(ERROR_KEEP_FIRST, &value)?.max(1);

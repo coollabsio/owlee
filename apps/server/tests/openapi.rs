@@ -9,6 +9,7 @@ use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 
 const EVENT_ID: &str = "22222222222222222222222222222222";
+const REPLAY_ID: &str = "33333333333333333333333333333333";
 
 async fn send(
     app: &Router,
@@ -136,7 +137,8 @@ struct Operation {
     path: String,
     parameters: Vec<Value>,
     request_schema: Option<Value>,
-    success: (StatusCode, Value),
+    /// `None` for a success with no body, such as 204.
+    success: (StatusCode, Option<Value>),
 }
 
 fn operations(document: &Value) -> Vec<Operation> {
@@ -163,8 +165,11 @@ fn operations(document: &Value) -> Vec<Operation> {
                 .unwrap_or_else(|| panic!("{method} {path} documents no 2xx"));
             let schema = resolve(document, response)
                 .pointer("/content/application~1json/schema")
-                .unwrap_or_else(|| panic!("{method} {path} {code} has no JSON schema"))
-                .clone();
+                .cloned();
+            assert!(
+                schema.is_some() || code == "204",
+                "{method} {path} {code} has no JSON schema"
+            );
             found.push(Operation {
                 id: operation["operationId"].as_str().unwrap().to_owned(),
                 method: method.to_uppercase(),
@@ -179,12 +184,17 @@ fn operations(document: &Value) -> Vec<Operation> {
 }
 
 /// Reads first and deletes last, so every operation finds the seeded rows.
-fn order(method: &str) -> u8 {
-    match method {
+/// Deeper paths go first, so a replay is deleted before its app.
+fn order(operation: &Operation) -> (u8, std::cmp::Reverse<usize>) {
+    let method = match operation.method.as_str() {
         "GET" | "HEAD" => 0,
         "DELETE" => 2,
         _ => 1,
-    }
+    };
+    (
+        method,
+        std::cmp::Reverse(operation.path.matches('/').count()),
+    )
 }
 
 struct Seed {
@@ -194,11 +204,15 @@ struct Seed {
     event_id: String,
 }
 
+const SEGMENT_ID: &str = "0";
+
 impl Seed {
     /// Ids by the resource the path names, so a route for a new resource fails here until it is seeded.
     fn path_value(&self, path: &str, name: &str) -> &str {
         match (path.split('/').nth(1), name) {
             (_, "event_id") | (Some("error-events"), "id") => &self.event_id,
+            (_, "replay_id") => REPLAY_ID,
+            (_, "segment_id") => SEGMENT_ID,
             (Some("error-apps"), "id") => &self.app_id,
             (Some("error-issues"), "id") => &self.issue_id,
             _ => panic!("no seeded value for {{{name}}} in {path}"),
@@ -216,6 +230,9 @@ impl Seed {
                 "inboundFilters": ["localhost"],
                 "spikeProtection": true,
             }),
+            "set_error_app_replays" => {
+                json!({ "enabled": true, "dailyBytes": 1_048_576, "hourlyLimit": 50 })
+            }
             "bulk_update_issue_status" => json!({ "ids": [self.issue_id], "status": "ignored" }),
             "update_issue_status" => json!({ "status": "resolved" }),
             other => panic!("no request body for {other}"),
@@ -246,7 +263,7 @@ async fn seed(app: &Router, editor: &TestSession) -> Seed {
         "logger": "app",
         "sdk": { "name": "sentry.javascript.browser", "version": "8.0.0" },
         "user": { "email": "ada@example.com" },
-        "tags": { "browser": "Firefox" },
+        "tags": { "browser": "Firefox", "replayId": REPLAY_ID },
         "contexts": { "os": { "name": "Linux" } },
         "breadcrumbs": { "values": [
             { "timestamp": 1_700_000_000.0, "category": "ui.click", "message": "Pay", "level": "info" }
@@ -279,6 +296,47 @@ async fn seed(app: &Router, editor: &TestSession) -> Seed {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = send(
+        app,
+        "PUT",
+        &format!("/api/error-apps/{app_id}/replays-settings"),
+        Some(&json!({ "enabled": true, "dailyBytes": 536_870_912, "hourlyLimit": 1000 })),
+        &cookie(editor),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let replay_event = json!({
+        "type": "replay_event",
+        "replay_id": REPLAY_ID,
+        "event_id": REPLAY_ID,
+        "replay_type": "session",
+        "segment_id": 0,
+        "timestamp": 1_700_000_001.0,
+        "replay_start_timestamp": 1_700_000_000.0,
+        "urls": ["https://shop.example/cart"],
+        "release": "shop@1.4.0",
+        "environment": "production",
+        "user": { "email": "ada@example.com" },
+    })
+    .to_string();
+    let recording = "{\"segment_id\":0}\n[{\"type\":4,\"data\":{},\"timestamp\":1700000000000}]";
+    let envelope = format!(
+        "{{\"event_id\":\"{REPLAY_ID}\"}}\n{{\"type\":\"replay_event\"}}\n{replay_event}\n{{\"type\":\"replay_recording\",\"length\":{}}}\n{recording}\n",
+        recording.len()
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/{app_id}/envelope/?sentry_key={key}"))
+                .body(Body::from(envelope))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("x-sentry-rate-limits").is_none());
     let (_, _, feed) = send(
         app,
         "GET",
@@ -312,7 +370,7 @@ async fn all_scopes_token(app: &Router, editor: &TestSession) -> String {
         "/api/api-tokens",
         Some(&json!({
             "name": "Contract",
-            "scopes": ["errors:read", "errors:write", "errors:delete"],
+            "scopes": ["errors:read", "errors:write", "errors:delete", "replays:read"],
             "expires_in_days": null,
         })),
         &cookie(editor),
@@ -346,10 +404,10 @@ async fn every_documented_operation_matches_the_router() {
     let contract = Contract::new(&document);
 
     let mut operations = operations(&document);
-    operations.sort_by_key(|operation| order(&operation.method));
+    operations.sort_by_key(order);
     assert_eq!(
         operations.len(),
-        13,
+        18,
         "the walk found every operation in the document"
     );
 
@@ -398,8 +456,10 @@ async fn every_documented_operation_matches_the_router() {
             problems.push(format!(
                 "status {status}, documented {expected}: {response}"
             ));
-        } else {
+        } else if let Some(schema) = schema {
             problems.extend(contract.violations(schema, &response));
+        } else if response != Value::Null {
+            problems.push(format!("documented no body, got {response}"));
         }
         if !problems.is_empty() {
             failures.insert(
@@ -439,7 +499,7 @@ async fn mcp_tools_are_documented_operations() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tools.len(), 6, "{tools:?}");
+    assert_eq!(tools.len(), 7, "{tools:?}");
     let missing: Vec<&&str> = tools
         .iter()
         .filter(|tool| !documented.iter().any(|id| id == *tool))

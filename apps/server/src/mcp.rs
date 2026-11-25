@@ -69,7 +69,7 @@ const ISSUE_ID: Param = Param {
     values: &[],
 };
 
-static TOOLS: [Tool; 6] = [
+static TOOLS: [Tool; 7] = [
     Tool {
         name: "list_error_apps",
         description: "List the error tracking apps in the workspace, with issue and event counts.",
@@ -165,6 +165,59 @@ static TOOLS: [Tool; 6] = [
             required: true,
             values: &[],
         }],
+    },
+    Tool {
+        name: "list_replays",
+        description: "List the session replays of one error app, newest first, 50 per page. Metadata only: \
+             pages, duration, browser, release, user label, and linked error count. \
+             Pass nextCursor from the result as cursor for the next page.",
+        product: ApiProduct::Errors,
+        method: Method::GET,
+        path: "/error-apps/{id}/replays",
+        params: &[
+            Param {
+                name: "id",
+                description: "Error app id, from list_error_apps.",
+                at: In::Path,
+                required: true,
+                values: &[],
+            },
+            Param {
+                name: "url",
+                description: "Only replays that visited a URL containing this text.",
+                at: In::Query,
+                required: false,
+                values: &[],
+            },
+            Param {
+                name: "release",
+                description: "Only replays of this release.",
+                at: In::Query,
+                required: false,
+                values: &[],
+            },
+            Param {
+                name: "environment",
+                description: "Only replays from this environment, such as production.",
+                at: In::Query,
+                required: false,
+                values: &[],
+            },
+            Param {
+                name: "hasErrors",
+                description: "true lists only replays with a linked error event.",
+                at: In::Query,
+                required: false,
+                values: &["true", "false"],
+            },
+            Param {
+                name: "cursor",
+                description: "nextCursor from the previous page.",
+                at: In::Query,
+                required: false,
+                values: &[],
+            },
+        ],
     },
     Tool {
         name: "update_issue_status",

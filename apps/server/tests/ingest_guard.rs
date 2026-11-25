@@ -259,9 +259,16 @@ async fn oversized_body(config: &Config) {
     let (app, state, token) = boot_app(config.clone()).await;
     let cookie = owner(&app, &state, token.as_deref()).await;
     let (id, key) = error_app(&app, &cookie).await;
-    let mut huge = "x".repeat(config.ingest.error_max_body_bytes + 8);
-    huge.insert_str(0, "{");
+    // The envelope read limit is the replay limit. The event item keeps the error limit.
+    let huge = " ".repeat(config.ingest.replay_max_body_bytes + 8);
     let hit = post_event(&app, &id, &key, huge.into_bytes()).await;
+    assert_eq!(hit.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", hit.body);
+    let event = format!(
+        r#"{{"message":"{}"}}"#,
+        "x".repeat(config.ingest.error_max_body_bytes)
+    );
+    let envelope = format!("{{}}\n{{\"type\":\"event\"}}\n{event}\n");
+    let hit = post_event(&app, &id, &key, envelope.into_bytes()).await;
     assert_eq!(hit.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", hit.body);
 
     let (app, state, token) = boot_app(config.clone()).await;
@@ -360,7 +367,7 @@ async fn burst_is_429(mut config: Config) {
             .rate_limits
             .as_deref()
             .unwrap_or("")
-            .contains(":error:"),
+            .contains(":error;replay:ip"),
         "{:?}",
         blocked.rate_limits
     );

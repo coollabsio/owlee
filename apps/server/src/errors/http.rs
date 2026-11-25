@@ -13,7 +13,7 @@ use crate::state::AppState;
 use crate::workspaces::{Member, ProjectFilter, require_project};
 
 /// The apps this request may see. Resolve it once per request.
-async fn visible(state: &AppState, member: &Member) -> Result<Visible, AppError> {
+pub(super) async fn visible(state: &AppState, member: &Member) -> Result<Visible, AppError> {
     Visible::resolve(&state.db, member.workspace_id, member.limit.as_ref()).await
 }
 
@@ -73,6 +73,19 @@ pub struct AppView {
     pub spike_protection: bool,
     pub spike_limit: i64,
     pub used_this_hour: i64,
+    pub replays: ReplaySettingsView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaySettingsView {
+    pub enabled: bool,
+    pub daily_bytes: i64,
+    pub hourly_limit: i64,
+    pub today_bytes: i64,
+    pub hour_replays: i64,
+    /// Compressed bytes of every stored segment of the app.
+    pub total_bytes: i64,
 }
 
 pub async fn list_apps(
@@ -219,7 +232,7 @@ pub async fn delete_app(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
+pub(super) async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
     let global = crate::quota::error_quota(&state.db).await?;
     let daily_quota = crate::quota::effective(global, app.daily_quota);
     let used_today = crate::quota::used(&state.db, crate::quota::ERROR, &app.id).await?;
@@ -227,7 +240,16 @@ async fn app_view(state: &AppState, app: App) -> Result<AppView, AppError> {
     let hour = crate::quota::current_hour();
     let used_this_hour = crate::quota::hour_used(state.db.pool(), &app.id, hour).await?;
     let (sum, sum_sq) = crate::quota::hour_baseline(state.db.pool(), &app.id, hour).await?;
+    let replay_usage = super::replay_store::usage(&state.db, &app.id).await?;
     Ok(AppView {
+        replays: ReplaySettingsView {
+            enabled: app.replays_enabled,
+            daily_bytes: app.replay_daily_bytes,
+            hourly_limit: app.replay_hourly_limit,
+            today_bytes: replay_usage.today_bytes,
+            hour_replays: replay_usage.hour_replays,
+            total_bytes: replay_usage.total_bytes,
+        },
         allowed_domains: app.allowed_domains,
         inbound_filters: app
             .inbound_filters
@@ -315,6 +337,7 @@ pub struct IssueDetail {
     pub environments: Vec<String>,
     pub histogram: Vec<i64>,
     pub tags: Vec<store::TagGroup>,
+    pub replay_event_count: i64,
 }
 
 pub async fn list_issues(
@@ -395,18 +418,31 @@ pub async fn get_issue(
     let environments =
         store::list_environments(&state.db, member.workspace_id, &visible, "", &issue.app_id)
             .await?;
+    let replay_event_count =
+        super::replay_store::issue_replay_event_count(&state.db, &issue.id).await?;
+    let latest = match &analytics.latest_payload {
+        Some(payload) => Some(
+            event_with_replay(
+                &state,
+                &issue.app_id,
+                analytics.latest_replay_id.as_deref(),
+                payload,
+            )
+            .await?,
+        ),
+        None => None,
+    };
     issue.period_event_count = analytics.period_events;
     issue.user_count = analytics.users;
     Ok(Json(IssueDetail {
         issue,
-        latest: analytics
-            .latest_payload
-            .map(|payload| normalized_payload(&payload)),
+        latest,
         first_event_id,
         latest_event_id,
         environments,
         histogram: analytics.histogram,
         tags: analytics.tags,
+        replay_event_count,
     }))
 }
 
@@ -517,8 +553,36 @@ pub async fn get_event(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let visible = visible(&state, &member).await?;
-    let payload = store::get_event(&state.db, member.workspace_id, &visible, &id).await?;
-    Ok(Json(normalized_payload(&payload)))
+    let event = store::get_event(&state.db, member.workspace_id, &visible, &id).await?;
+    Ok(Json(
+        event_with_replay(
+            &state,
+            &event.app_id,
+            event.replay_id.as_deref(),
+            &event.payload,
+        )
+        .await?,
+    ))
+}
+
+/// The normalized event with `replay`: the linked replay when it exists in the same app, else null.
+async fn event_with_replay(
+    state: &AppState,
+    app_id: &str,
+    replay_id: Option<&str>,
+    payload: &str,
+) -> Result<Value, AppError> {
+    let replay = match replay_id {
+        Some(replay_id) => super::replay_store::started_ms_of(&state.db, app_id, replay_id)
+            .await?
+            .map(|started_ms| serde_json::json!({ "id": replay_id, "startedMs": started_ms })),
+        None => None,
+    };
+    let mut body = normalized_payload(payload);
+    if let Value::Object(object) = &mut body {
+        object.insert("replay".to_owned(), replay.unwrap_or(Value::Null));
+    }
+    Ok(body)
 }
 
 fn normalized_payload(payload: &str) -> Value {
@@ -543,8 +607,10 @@ pub async fn export_user_events(
     member.require_editor()?;
     let key = privacy_key(&state, &query)?;
     let events = store::events_for_user(&state.db, member.workspace_id, &key).await?;
+    let replays =
+        super::replay_store::replays_for_user(&state.db, member.workspace_id, &key).await?;
     Ok(Json(
-        serde_json::json!({ "user": query.user.trim(), "events": events }),
+        serde_json::json!({ "user": query.user.trim(), "events": events, "replays": replays }),
     ))
 }
 
@@ -556,6 +622,7 @@ pub async fn delete_user_events(
     member.require_editor()?;
     let key = privacy_key(&state, &query)?;
     let deleted = store::delete_events_for_user(&state.db, member.workspace_id, &key).await?;
+    super::replay_store::delete_replays_for_user(&state.db, member.workspace_id, &key).await?;
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 

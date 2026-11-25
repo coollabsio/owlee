@@ -8,6 +8,7 @@ use owlee_errors::{BodyError, decode_body, normalize_event, parse_envelope};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::replay::{self, ReplayItems};
 use super::store;
 use crate::browser;
 use crate::error::AppError;
@@ -37,8 +38,9 @@ pub async fn ingest_envelope(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let decoded = match read_body(&state, &app_id, &headers, request).await {
-        Ok(decoded) => decoded,
+    let max_body = state.config.ingest.replay_max_body_bytes;
+    let (decoded, ip_key) = match read_body(&state, &app_id, &headers, request, max_body).await {
+        Ok(read) => read,
         Err(response) => return response,
     };
     let envelope = match parse_envelope(&decoded) {
@@ -48,6 +50,14 @@ pub async fn ingest_envelope(
             return ingest_error(&headers, StatusCode::BAD_REQUEST, error.to_string());
         }
     };
+    let max_event = state.config.ingest.error_max_body_bytes;
+    if envelope
+        .items
+        .iter()
+        .any(|item| item.item_type == "event" && item.payload.len() > max_event)
+    {
+        return too_large(&headers);
+    }
     let dsn_key = envelope
         .header
         .get("dsn")
@@ -61,61 +71,80 @@ pub async fn ingest_envelope(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
-    if let Some(response) = admit_app(&state, &headers, &app) {
+    if let Some(response) = admit_origin(&state, &headers, &app) {
         return response;
     }
-    let mut last_id = None;
+    let replay_items = ReplayItems::of(&envelope);
+    let has_event = envelope.items.iter().any(|item| item.item_type == "event");
+    // A replay-only envelope takes from the replay buckets instead (D11).
+    if (has_event || replay_items.is_empty())
+        && let Some(response) = admit_app(&state, &headers, &app)
+    {
+        return response;
+    }
+    let mut response = None;
     let mut seen_event = false;
-    for item in &envelope.items {
-        match item.item_type.as_str() {
-            // An envelope carries at most one event. More would be stored for
-            // a single rate-limit token.
-            "event" if seen_event => {
+    for item in envelope
+        .items
+        .iter()
+        .filter(|item| item.item_type == "event")
+    {
+        // An envelope carries at most one event. More would be stored for
+        // a single rate-limit token.
+        if seen_event {
+            state.error_intake.dropped(&app.id, DropReason::Malformed);
+            tracing::warn!("dropped extra event item in envelope");
+            continue;
+        }
+        seen_event = true;
+        let payload = match serde_json::from_slice::<Value>(&item.payload) {
+            Ok(payload) => payload,
+            Err(error) => {
                 state.error_intake.dropped(&app.id, DropReason::Malformed);
-                tracing::warn!("dropped extra event item in envelope");
+                tracing::warn!(error = %error, "skipped malformed event item");
+                continue;
             }
-            "event" => {
-                seen_event = true;
-                match serde_json::from_slice::<Value>(&item.payload) {
-                    Ok(payload) => {
-                        let event = normalize_event(payload);
-                        match accept_event(&state, &headers, &app, &event).await {
-                            Ok(Accepted::Stored(id)) => last_id = Some(id),
-                            Ok(Accepted::Filtered) => {}
-                            Ok(Accepted::Limited(response)) => return response,
-                            Err(error) => {
-                                state
-                                    .error_intake
-                                    .dropped(&app.id, DropReason::StorageFailed);
-                                tracing::error!(error = %error, "failed to store sentry event");
-                                return ingest_error(
-                                    &headers,
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "failed to store event".into(),
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        state.error_intake.dropped(&app.id, DropReason::Malformed);
-                        tracing::warn!(error = %error, "skipped malformed event item");
-                    }
-                }
-            }
-            other => {
-                tracing::debug!(
-                    item_type = other,
-                    bytes = item.payload.len(),
-                    "ignored envelope item"
+        };
+        let event = normalize_event(payload);
+        response = match accept_event(&state, &headers, &app, &event).await {
+            Ok(Accepted::Stored(id)) => Some(json_ok(&headers, json!({ "id": id }))),
+            Ok(Accepted::Filtered) => None,
+            Ok(Accepted::Limited(limited)) => Some(limited),
+            Err(error) => {
+                state
+                    .error_intake
+                    .dropped(&app.id, DropReason::StorageFailed);
+                tracing::error!(error = %error, "failed to store sentry event");
+                return ingest_error(
+                    &headers,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to store event".into(),
                 );
             }
+        };
+    }
+    for item in &envelope.items {
+        if !matches!(
+            item.item_type.as_str(),
+            "event" | "replay_event" | "replay_recording" | "replay_video"
+        ) {
+            tracing::debug!(
+                item_type = item.item_type.as_str(),
+                bytes = item.payload.len(),
+                "ignored envelope item"
+            );
         }
     }
-    let body = match last_id {
-        Some(id) => json!({ "id": id }),
-        None => json!({}),
+    let replay_limit = if replay_items.is_empty() {
+        None
+    } else {
+        replay::intake(&state, &app, replay_items, has_event, &ip_key).await
     };
-    json_ok(&headers, body)
+    let mut response = response.unwrap_or_else(|| json_ok(&headers, json!({})));
+    if let Some(limit) = replay_limit {
+        add_rate_limit(&mut response, &limit.header_entry());
+    }
+    response
 }
 
 pub async fn ingest_store(
@@ -125,8 +154,9 @@ pub async fn ingest_store(
     headers: HeaderMap,
     request: Request,
 ) -> Response {
-    let decoded = match read_body(&state, &app_id, &headers, request).await {
-        Ok(decoded) => decoded,
+    let max_body = state.config.ingest.error_max_body_bytes;
+    let decoded = match read_body(&state, &app_id, &headers, request, max_body).await {
+        Ok((decoded, _)) => decoded,
         Err(response) => return response,
     };
     let payload: Value = match serde_json::from_slice(&decoded) {
@@ -147,6 +177,9 @@ pub async fn ingest_store(
         Ok(app) => app,
         Err(error) => return ingest_error_from(&headers, error),
     };
+    if let Some(response) = admit_origin(&state, &headers, &app) {
+        return response;
+    }
     if let Some(response) = admit_app(&state, &headers, &app) {
         return response;
     }
@@ -181,14 +214,16 @@ enum Accepted {
 }
 
 /// Takes the sender's rate-limit token before any of the body is read, then
-/// reads and decodes at most `error_max_body_bytes`. A sender with a wrong key
-/// or a malformed body spends tokens too.
+/// reads and decodes at most `max_body`. A sender with a wrong key or a
+/// malformed body spends tokens too. Returns the client's rate-limit key, so a
+/// replay-only envelope can give its error token back.
 async fn read_body(
     state: &AppState,
     claimed_app_id: &str,
     headers: &HeaderMap,
     request: Request,
-) -> Result<Vec<u8>, Response> {
+    max_body: usize,
+) -> Result<(Vec<u8>, String), Response> {
     let client = Client::of(&state.config, headers, request.extensions());
     let ip_limit = state
         .error_ip_limit
@@ -197,11 +232,17 @@ async fn read_body(
         state
             .error_intake
             .dropped_if_known(claimed_app_id, DropReason::ClientRateLimit);
-        return Err(rate_limited(headers, ip_limit.retry_after_secs, "ip", ""));
+        // The category is not known before the body is read.
+        return Err(rate_limited(
+            headers,
+            ip_limit.retry_after_secs,
+            "error;replay",
+            "ip",
+            "",
+        ));
     }
-    let max_body = state.config.ingest.error_max_body_bytes;
     let bytes = read_limited(request, max_body, headers).await?;
-    decode_body(
+    let decoded = decode_body(
         header_str(headers, header::CONTENT_ENCODING),
         &bytes,
         max_body,
@@ -212,13 +253,14 @@ async fn read_body(
             BodyError::TooLarge => too_large(headers),
             other => ingest_error(headers, StatusCode::BAD_REQUEST, other.to_string()),
         }
-    })
+    })?;
+    Ok((decoded, client.limit_key))
 }
 
-/// The origin check comes first, so other web pages cannot use up the app's
-/// bucket. A request without `Origin` and `Referer` passes, as server SDKs send
-/// neither. A script can still forge `Origin`.
-fn admit_app(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<Response> {
+/// The origin check comes before the buckets, so other web pages cannot use up
+/// the app's bucket. A request without `Origin` and `Referer` passes, as server
+/// SDKs send neither. A script can still forge `Origin`.
+fn admit_origin(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<Response> {
     let allow_all = app.allowed_domains.is_empty() || app.allowed_domains.iter().any(|d| d == "*");
     if !allow_all {
         let host = browser::request_host(
@@ -242,6 +284,10 @@ fn admit_app(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<
             ));
         }
     }
+    None
+}
+
+fn admit_app(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<Response> {
     let app_limit = state
         .error_project_limit
         .check(&format!("error-app:{}", app.id));
@@ -249,7 +295,13 @@ fn admit_app(state: &AppState, headers: &HeaderMap, app: &store::App) -> Option<
         state
             .error_intake
             .dropped(&app.id, DropReason::SourceRateLimit);
-        return Some(rate_limited(headers, app_limit.retry_after_secs, "key", ""));
+        return Some(rate_limited(
+            headers,
+            app_limit.retry_after_secs,
+            "error",
+            "key",
+            "",
+        ));
     }
     None
 }
@@ -292,6 +344,7 @@ async fn accept_event(
         return Ok(Accepted::Limited(rate_limited(
             headers,
             ingested.retry_after_secs,
+            "error",
             scope,
             code,
         )));
@@ -346,6 +399,7 @@ fn too_large(request_headers: &HeaderMap) -> Response {
 fn rate_limited(
     request_headers: &HeaderMap,
     retry_after: u64,
+    categories: &str,
     scope: &str,
     reason: &str,
 ) -> Response {
@@ -360,18 +414,31 @@ fn rate_limited(
         headers.insert(header::RETRY_AFTER, value);
     }
     let limit = if reason.is_empty() {
-        format!("{retry_after}:error:{scope}")
+        format!("{retry_after}:{categories}:{scope}")
     } else {
-        format!("{retry_after}:error:{scope}:{reason}")
+        format!("{retry_after}:{categories}:{scope}:{reason}")
     };
-    if let Ok(value) = HeaderValue::from_str(&limit) {
+    add_rate_limit(&mut response, &limit);
+    response
+}
+
+/// Appends one entry to `X-Sentry-Rate-Limits`, which SDKs read on every response.
+fn add_rate_limit(response: &mut Response, entry: &str) {
+    let headers = response.headers_mut();
+    let value = match headers
+        .get("x-sentry-rate-limits")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(existing) => format!("{existing}, {entry}"),
+        None => entry.to_owned(),
+    };
+    if let Ok(value) = HeaderValue::from_str(&value) {
         headers.insert("x-sentry-rate-limits", value);
     }
     headers.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
         HeaderValue::from_static("Retry-After, X-Sentry-Rate-Limits, X-Sentry-Error"),
     );
-    response
 }
 
 fn auth_key(headers: &HeaderMap) -> Option<String> {

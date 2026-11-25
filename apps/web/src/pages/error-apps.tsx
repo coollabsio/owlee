@@ -13,6 +13,7 @@ import { useCanEdit } from "@/lib/me";
 import { type GuideCode, guideFor, isPlatformId, type PlatformGuide, type PlatformId, platformGuides, platformIds } from "@/lib/platform-guides";
 import { cn, fullTime, intakeSummary, timeAgo } from "@/lib/utils";
 import { useListScope, useProjectChoice } from "@/lib/workspace";
+import { ReplaySettingsCard, ReplaysCard } from "@/pages/replays";
 
 export function ErrorAppsPage() {
   const canEdit = useCanEdit();
@@ -262,10 +263,12 @@ export function ErrorAppDetailPage() {
           </p>
         </LayerCard>
       )}
+      <ReplaysCard app={data} />
       <SetupGuide app={data} open={!receiving || showGuide} onToggle={receiving ? () => setShowGuide((value) => !value) : undefined} />
       <DsnCard dsn={data.dsn} />
       <AppQuota key={String(data.quotaOverride ?? "inherit")} app={data} />
       <IngestProtection key={JSON.stringify([data.allowedDomains, data.inboundFilters, data.spikeProtection])} app={data} />
+      <ReplaySettingsCard key={JSON.stringify([data.replays.enabled, data.replays.dailyBytes, data.replays.hourlyLimit])} app={data} />
       <ConfirmDialog
         open={confirming}
         title="Delete app?"

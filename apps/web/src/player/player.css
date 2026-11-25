@@ -1,0 +1,14 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #111;
+  color: #aaa;
+  font: 13px system-ui, sans-serif;
+}
+
+#player > .rr-player {
+  box-shadow: none;
+  border-radius: 0;
+}

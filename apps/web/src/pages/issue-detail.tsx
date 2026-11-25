@@ -10,6 +10,7 @@ import { type Column, DataTable } from "@/components/data-table";
 import { Button, ErrorText, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, Spinner, useCopy } from "@/components/ui";
 import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, type EventSummary, type ExceptionInfo, type Issue, type IssueDetail, type NormalizedEvent } from "@/lib/api";
 import { useCanEdit } from "@/lib/me";
+import { watchReplayPath } from "@/lib/replay";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 
 /** Router state the issue list passes, so the breadcrumb returns to the list the user came from. */
@@ -317,6 +318,15 @@ export function IssueDetailPage() {
                 {event ? (
                   <div className="flex flex-col gap-3">
                     <EventChips event={event} />
+                    {event.replay ? (
+                      <div className="flex flex-wrap gap-2">
+                        {event.replay ? (
+                          <Link className="button" to={watchReplayPath(data.appId, event.replay, event.timestamp)}>
+                            Watch replay
+                          </Link>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <nav className="flex flex-wrap gap-4 text-[0.75rem] font-medium text-[var(--ui-fg-faint)]" aria-label="Event sections">
                       {sections.map((section) => (
                         <button key={section.key} type="button" className="hover:text-[var(--ui-fg)]" onClick={() => reveal(section.key)}>
@@ -365,6 +375,7 @@ export function IssueDetailPage() {
               </Detail>
               <Detail label="Events, all time">{data.eventCount.toLocaleString()}</Detail>
               <Detail label={`Users, ${rangeLabel}`}>{data.userCount.toLocaleString()}</Detail>
+              {data.replayEventCount > 0 ? <Detail label="Events with a replay">{data.replayEventCount.toLocaleString()}</Detail> : null}
               <Detail label="Environment">{data.environment || "-"}</Detail>
               <Detail label="Release">{data.release || "-"}</Detail>
               <Detail label="App">

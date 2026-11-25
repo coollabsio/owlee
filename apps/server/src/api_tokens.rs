@@ -29,6 +29,8 @@ const DAY_MS: i64 = 86_400_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApiProduct {
     Errors,
+    /// Replay recordings. The replay list and metadata are `Errors` routes.
+    Replays,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,10 +58,11 @@ pub struct Scope {
 }
 
 impl Scope {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::new(ApiProduct::Errors, Access::Read),
         Self::new(ApiProduct::Errors, Access::Write),
         Self::new(ApiProduct::Errors, Access::Delete),
+        Self::new(ApiProduct::Replays, Access::Read),
     ];
 
     #[must_use]
@@ -73,6 +76,9 @@ impl Scope {
             (ApiProduct::Errors, Access::Read) => "errors:read",
             (ApiProduct::Errors, Access::Write) => "errors:write",
             (ApiProduct::Errors, Access::Delete) => "errors:delete",
+            (ApiProduct::Replays, Access::Read) => "replays:read",
+            (ApiProduct::Replays, Access::Write) => "replays:write",
+            (ApiProduct::Replays, Access::Delete) => "replays:delete",
         }
     }
 
@@ -99,7 +105,9 @@ pub struct ResourceLimit {
 
 /// The routers a token can call, each tagged with the product its scopes name.
 pub fn product_routes() -> Router<AppState> {
-    crate::errors::api_routes().route_layer(Extension(ApiProduct::Errors))
+    crate::errors::api_routes()
+        .route_layer(Extension(ApiProduct::Errors))
+        .merge(crate::errors::replay_recording_routes().route_layer(Extension(ApiProduct::Replays)))
 }
 
 /// Cookie only. `deny_tokens` covers them, so a token cannot mint more tokens.

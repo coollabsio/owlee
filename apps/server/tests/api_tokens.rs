@@ -451,7 +451,8 @@ async fn mcp_calls_the_errors_api(app: &Router, state: &AppState) {
             "list_issues",
             "get_issue",
             "list_issue_events",
-            "get_event"
+            "get_event",
+            "list_replays"
         ]
     );
     assert_eq!(
@@ -461,7 +462,7 @@ async fn mcp_calls_the_errors_api(app: &Router, state: &AppState) {
     let (_, reply) = rpc(app, &write, list).await;
     assert_eq!(names(&reply).last().unwrap(), "update_issue_status");
     assert_eq!(
-        reply["result"]["tools"][5]["inputSchema"]["required"],
+        reply["result"]["tools"][6]["inputSchema"]["required"],
         json!(["id", "status"])
     );
 

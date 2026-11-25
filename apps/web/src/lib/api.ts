@@ -1,4 +1,5 @@
 import { queryClient } from "@/lib/query-client";
+import type { ReplaySettings } from "@/lib/replay";
 import { currentWorkspaceId } from "@/lib/workspace";
 
 export class ApiError extends Error {
@@ -286,18 +287,25 @@ export const listSessions = () => api<AuthSession[]>("/api/auth/sessions");
 
 export const revokeSession = (id: string) => api<void>(`/api/auth/sessions/${id}`, { method: "DELETE" });
 
-export type ScopeProduct = "errors";
+export type ScopeProduct = "errors" | "replays";
 export type ScopeAccess = "read" | "write" | "delete";
 export type ApiScope = `${ScopeProduct}:${ScopeAccess}`;
 
 export const SCOPE_ACCESSES: ScopeAccess[] = ["read", "write", "delete"];
 
 /** One access row in the token form for each product that tokens can reach. */
-export const API_PRODUCTS: { product: ScopeProduct; label: string; hint: string }[] = [
+export const API_PRODUCTS: { product: ScopeProduct; label: string; hint: string; accesses: ScopeAccess[] }[] = [
   {
     product: "errors",
     label: "Errors",
     hint: "Read lists apps, issues, and events. Write also changes issue status and edits apps. Delete also deletes apps.",
+    accesses: SCOPE_ACCESSES,
+  },
+  {
+    product: "replays",
+    label: "Replay recordings",
+    hint: "Read downloads the recorded pages of session replays. The replay list and details need only Errors read.",
+    accesses: ["read"],
   },
 ];
 
@@ -681,6 +689,7 @@ export type ErrorApp = {
   /** The most events this app may store in the current UTC hour. */
   spikeLimit: number;
   usedThisHour: number;
+  replays: ReplaySettings;
 };
 
 export type InboundFilterOption = { id: string; label: string; description: string };
@@ -785,6 +794,8 @@ export type NormalizedEvent = {
   request: Record<string, unknown>;
   extra: Record<string, unknown>;
   raw: unknown;
+  /** The session replay this event happened in, when it exists in the same app. */
+  replay: { id: string; startedMs: number | null } | null;
 };
 
 export type EventPage = { items: EventSummary[]; nextCursor: string | null };
@@ -803,6 +814,8 @@ export type IssueDetail = Issue & {
   environments: string[];
   histogram: number[];
   tags: TagGroup[];
+  /** Events of this issue that have a stored replay. */
+  replayEventCount: number;
 };
 
 export type Workspace = UserWorkspace & { created_at: string };

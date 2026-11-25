@@ -33,12 +33,22 @@ Error events come from the Sentry SDKs in your apps. Before an event is stored, 
 
 Owlee keeps a keyed hash of each of `user.id`, `user.email`, `user.username`, and `user.ip_address` that the event has. Values are lowercased before hashing. The key is `OWLEE_APP_KEY`, so the hashes cannot be reversed with a list of emails or addresses. The first hash also counts affected users.
 
+## Session replay
+
+The Sentry browser SDK can record replays of your pages. Owlee stores them only for an app where an editor turned on **Store replays**.
+
+- A replay holds what the user saw on the page and what they did, as far as the SDK did not mask it. Owlee cannot check the masking. Keep the SDK defaults: `maskAllText`, `maskAllInputs`, and `blockAllMedia`.
+- Owlee stores no IP address for a replay.
+- The replay list shows `user.username`, else `user.email`, else `user.id`, as error events keep them. Owlee also keeps a keyed hash of each of them, as for error events.
+- Owlee filters sensitive query parameters in the URLs it lists for a replay. It does not change the recording, so URLs, clicks, and page text inside the recording stay as the SDK sent them.
+
 ## Retention
 
 | Data | Kept for |
 | --- | --- |
 | Error events | `OWLEE_ERROR_RETENTION_DAYS`, 30 days by default |
 | Analytics events, visits, and visitor ids | `OWLEE_ANALYTICS_RETENTION_DAYS`, 90 days by default |
+| Session replays | `OWLEE_REPLAY_RETENTION_DAYS`, 14 days after the last part arrived |
 | Issue rows and analytics daily rollups | Until you delete the project or site |
 
 Issues and daily rollups hold counts, titles, and top values such as pages and countries. They hold no visitor ids or user keys.
@@ -47,7 +57,8 @@ Issues and daily rollups hold counts, titles, and top values such as pages and c
 
 Sign in as an admin and open **Settings → Privacy requests**. Enter the id, email, username, or IP address the person's events were sent with. Letter case does not matter.
 
-- **Export JSON** downloads every stored error event for that value across all projects.
-- **Delete events** removes those events. Issue counts and issue titles stay. An issue title comes from the exception message, so check it if your messages can contain personal data.
+- **Export JSON** downloads every stored error event for that value across all projects. It also lists the session replays with that user and a download link for each part of the recording.
+- **Delete events** removes those events and those replays. Issue counts and issue titles stay. An issue title comes from the exception message, so check it if your messages can contain personal data.
+- A replay with no user fields cannot be found by a request. Delete it from the replay page.
 
 The same actions are available as `GET` and `DELETE /api/privacy/errors?user=<value>`.

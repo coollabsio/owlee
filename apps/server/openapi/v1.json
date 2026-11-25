@@ -4,14 +4,15 @@
     "title": "Owlee API",
     "version": "1.0.0",
     "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" },
-    "description": "The Owlee API for error tracking. Scripts, code generators, and AI tools call it with a personal API token.\n\n## Authentication\n\nSend an API token in the `Authorization` header: `Authorization: Bearer owl_...`. Create a token in **Settings > API & MCP**. Owlee shows a token once. A token belongs to one user in one workspace, and its workspace comes from the token. If the request has an `X-Owlee-Workspace` header that names another workspace, the result is 404. A token can never do more than its owner's current role allows. A missing, unknown, expired, or paused token gets 401.\n\n## Scopes\n\nA token has scopes of the form `<product>:<access>`. This version has `errors:read`, `errors:write`, and `errors:delete`. The request method gives the scope a route needs: `GET` and `HEAD` need `read`, `DELETE` needs `delete`, and the other methods need `write`. Each operation names its scope in `x-required-scope`. A token without that scope gets 403 with the code `missing_scope`. A member of the workspace (not an owner or admin) gets 403 `forbidden` on routes that change data.\n\n## Resource limits\n\nA token can be limited to some projects and error apps. A resource outside the limit is hidden: a list leaves it out, and a lookup by id returns 404, the same as a resource in another workspace. A limited token that creates an app outside its listed projects gets 403 `resource_not_allowed`.\n\n## Errors\n\nAn error response is a JSON problem document (RFC 9457 shape) with the fields `type` (a URI), `title`, `status` (the HTTP status), `code` (a stable machine-readable code such as `not_found`, `missing_scope`, `resource_not_allowed`, `validation_failed`, or `bad_request`), `detail` (a sentence for a person), and, on 422 only, `fields` (an object that maps each invalid field to a message). Branch on `code`, not on `title` or `detail`.\n\n## Paging\n\nList routes that page return `nextCursor`. Send it back as the `cursor` query parameter to get the next page. `nextCursor` is `null` on the last page. A cursor is opaque.\n\n## Versioning\n\nThis document is v1 of the API, at `/api/v1/openapi.json`. `/api/openapi.json` always serves the newest version. A new field or route raises the minor version of `info.version`. A removed or changed field or route makes a new major version with a new URL, and v1 stays while its routes exist.\n\n## MCP\n\nThe same token works with the remote MCP server at `/api/mcp` (Streamable HTTP, JSON responses). Its tools have the same names as the `operationId` of the matching operations here, such as `list_issues` and `update_issue_status`."
+    "description": "The Owlee API for error tracking. Scripts, code generators, and AI tools call it with a personal API token.\n\n## Authentication\n\nSend an API token in the `Authorization` header: `Authorization: Bearer owl_...`. Create a token in **Settings > API & MCP**. Owlee shows a token once. A token belongs to one user in one workspace, and its workspace comes from the token. If the request has an `X-Owlee-Workspace` header that names another workspace, the result is 404. A token can never do more than its owner's current role allows. A missing, unknown, expired, or paused token gets 401.\n\n## Scopes\n\nA token has scopes of the form `<product>:<access>`. This version has `errors:read`, `errors:write`, `errors:delete`, and `replays:read`. `replays:read` reaches replay recordings, and `errors:read` reaches the replay list and metadata. The request method gives the scope a route needs: `GET` and `HEAD` need `read`, `DELETE` needs `delete`, and the other methods need `write`. Each operation names its scope in `x-required-scope`. A token without that scope gets 403 with the code `missing_scope`. A member of the workspace (not an owner or admin) gets 403 `forbidden` on routes that change data.\n\n## Resource limits\n\nA token can be limited to some projects and error apps. A resource outside the limit is hidden: a list leaves it out, and a lookup by id returns 404, the same as a resource in another workspace. A limited token that creates an app outside its listed projects gets 403 `resource_not_allowed`.\n\n## Errors\n\nAn error response is a JSON problem document (RFC 9457 shape) with the fields `type` (a URI), `title`, `status` (the HTTP status), `code` (a stable machine-readable code such as `not_found`, `missing_scope`, `resource_not_allowed`, `validation_failed`, or `bad_request`), `detail` (a sentence for a person), and, on 422 only, `fields` (an object that maps each invalid field to a message). Branch on `code`, not on `title` or `detail`.\n\n## Paging\n\nList routes that page return `nextCursor`. Send it back as the `cursor` query parameter to get the next page. `nextCursor` is `null` on the last page. A cursor is opaque.\n\n## Versioning\n\nThis document is v1 of the API, at `/api/v1/openapi.json`. `/api/openapi.json` always serves the newest version. A new field or route raises the minor version of `info.version`. A removed or changed field or route makes a new major version with a new URL, and v1 stays while its routes exist.\n\n## MCP\n\nThe same token works with the remote MCP server at `/api/mcp` (Streamable HTTP, JSON responses). Its tools have the same names as the `operationId` of the matching operations here, such as `list_issues` and `update_issue_status`."
   },
   "servers": [{ "url": "/api" }],
   "security": [{ "bearerAuth": [] }],
   "tags": [
     { "name": "Apps", "description": "Error tracking apps. An app has a DSN that a Sentry SDK sends events to." },
     { "name": "Issues", "description": "Groups of events with the same fingerprint." },
-    { "name": "Events", "description": "Single error events." }
+    { "name": "Events", "description": "Single error events." },
+    { "name": "Replays", "description": "Session replays recorded by the Sentry browser SDK. Recordings need the `replays:read` scope." }
   ],
   "paths": {
     "/error-apps": {
@@ -151,6 +152,152 @@
           "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/error-apps/{id}/replays-settings": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "put": {
+        "operationId": "set_error_app_replays",
+        "summary": "Set an app's session replay settings",
+        "description": "Turns replay intake on or off and sets its caps. Replays are off for a new app.",
+        "tags": ["Replays"],
+        "x-required-scope": "errors:write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/ReplaySettingsBody" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The app with its new replay settings.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/App" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "422": { "$ref": "#/components/responses/ValidationFailed" }
+        }
+      }
+    },
+    "/error-apps/{id}/replays": {
+      "parameters": [{ "$ref": "#/components/parameters/AppId" }],
+      "get": {
+        "operationId": "list_replays",
+        "summary": "List an app's session replays",
+        "description": "Replays newest first by receive time, at most `limit` per page (default and maximum 50). Metadata only.",
+        "tags": ["Replays"],
+        "x-required-scope": "errors:read",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "description": "Only replays that visited a URL containing this text. Case is ignored.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "release",
+            "in": "query",
+            "description": "Only replays of this release.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "description": "Only replays from this environment, such as `production`.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "hasErrors",
+            "in": "query",
+            "description": "`true` lists only replays with a linked error event.",
+            "schema": { "type": "string", "enum": ["true", "false"] }
+          },
+          { "$ref": "#/components/parameters/Cursor" },
+          { "$ref": "#/components/parameters/Limit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of replays.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ReplayPage" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-apps/{id}/replays/{replay_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/ReplayId" }
+      ],
+      "get": {
+        "operationId": "get_replay",
+        "summary": "Get a session replay",
+        "description": "The replay's metadata, its URLs, its stored segment ids, and the error events that link to it.",
+        "tags": ["Replays"],
+        "x-required-scope": "errors:read",
+        "responses": {
+          "200": {
+            "description": "The replay.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ReplayDetail" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "operationId": "delete_replay",
+        "summary": "Delete a session replay",
+        "description": "Deletes the replay with all of its segments.",
+        "tags": ["Replays"],
+        "x-required-scope": "errors:delete",
+        "responses": {
+          "204": { "description": "The replay is deleted." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/error-apps/{id}/replays/{replay_id}/segments/{segment_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/AppId" },
+        { "$ref": "#/components/parameters/ReplayId" },
+        {
+          "name": "segment_id",
+          "in": "path",
+          "required": true,
+          "description": "The segment id, from `segments` of the replay.",
+          "schema": { "type": "integer", "minimum": 0, "maximum": 999 }
+        }
+      ],
+      "get": {
+        "operationId": "get_replay_segment",
+        "summary": "Get one recording segment",
+        "description": "The rrweb events of one segment as the SDK sent them. A compressed segment comes with `Content-Encoding: deflate`, which HTTP clients inflate. The answer has `Cache-Control: no-store`.",
+        "tags": ["Replays"],
+        "x-required-scope": "replays:read",
+        "responses": {
+          "200": {
+            "description": "A JSON array of rrweb events.",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": {} } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -440,6 +587,13 @@
         "description": "`nextCursor` from the previous page.",
         "schema": { "type": "string" }
       },
+      "ReplayId": {
+        "name": "replay_id",
+        "in": "path",
+        "required": true,
+        "description": "The replay id, 32 lowercase hex characters.",
+        "schema": { "type": "string" }
+      },
       "Limit": {
         "name": "limit",
         "in": "query",
@@ -553,7 +707,11 @@
           "unverified_domain",
           "filtered",
           "spike_protection",
-          "storage_failed"
+          "storage_failed",
+          "replays_disabled",
+          "replay_hourly_limit",
+          "replay_quota",
+          "unsupported"
         ]
       },
       "IntakeCounts": {
@@ -584,7 +742,8 @@
           "id", "projectId", "name", "slug", "platform", "publicKey", "dsn", "createdAt",
           "dailyQuota", "quotaOverride", "usedToday", "quotaExceeded", "resetsAt",
           "issueCount", "eventCount", "lastEventAt", "intake", "allowedDomains",
-          "inboundFilters", "filterOptions", "spikeProtection", "spikeLimit", "usedThisHour"
+          "inboundFilters", "filterOptions", "spikeProtection", "spikeLimit", "usedThisHour",
+          "replays"
         ],
         "properties": {
           "id": { "type": "string" },
@@ -609,8 +768,95 @@
           "filterOptions": { "type": "array", "items": { "$ref": "#/components/schemas/FilterInfo" } },
           "spikeProtection": { "type": "boolean" },
           "spikeLimit": { "type": "integer", "description": "The hourly event limit that spike protection applies now." },
-          "usedThisHour": { "type": "integer" }
+          "usedThisHour": { "type": "integer" },
+          "replays": { "$ref": "#/components/schemas/ReplaySettings" }
         }
+      },
+      "ReplaySettings": {
+        "type": "object",
+        "description": "Session replay intake of the app. Byte counts are compressed bytes as stored.",
+        "required": ["enabled", "dailyBytes", "hourlyLimit", "todayBytes", "hourReplays", "totalBytes"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "dailyBytes": { "type": "integer", "description": "The most segment bytes stored in one UTC day." },
+          "hourlyLimit": { "type": "integer", "description": "The most new replays started in one UTC hour." },
+          "todayBytes": { "type": "integer" },
+          "hourReplays": { "type": "integer" },
+          "totalBytes": { "type": "integer", "description": "Bytes of every stored replay of the app." }
+        }
+      },
+      "ReplaySettingsBody": {
+        "type": "object",
+        "required": ["enabled", "dailyBytes", "hourlyLimit"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "dailyBytes": { "type": "integer", "minimum": 1048576, "maximum": 107374182400 },
+          "hourlyLimit": { "type": "integer", "minimum": 1, "maximum": 100000 }
+        }
+      },
+      "ReplaySummary": {
+        "type": "object",
+        "required": [
+          "id", "replayType", "hasStart", "startedMs", "lastMs", "receivedMs", "lastReceivedMs",
+          "durationMs", "segmentCount", "bytes", "firstUrl", "urlCount", "release", "environment",
+          "browser", "os", "userLabel", "errorCount", "live"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "replayType": { "type": "string", "enum": ["session", "buffer"] },
+          "hasStart": { "type": "boolean", "description": "Whether segment 0 is stored. Without it the replay cannot play." },
+          "startedMs": { "type": ["integer", "null"], "description": "Unix milliseconds, client clock, clamped." },
+          "lastMs": { "type": "integer" },
+          "receivedMs": { "type": "integer", "description": "Unix milliseconds of the first segment, server clock." },
+          "lastReceivedMs": { "type": "integer" },
+          "durationMs": { "type": ["integer", "null"] },
+          "segmentCount": { "type": "integer" },
+          "bytes": { "type": "integer" },
+          "firstUrl": { "type": ["string", "null"] },
+          "urlCount": { "type": "integer" },
+          "release": { "type": ["string", "null"] },
+          "environment": { "type": ["string", "null"] },
+          "browser": { "type": ["string", "null"] },
+          "os": { "type": ["string", "null"] },
+          "userLabel": { "type": ["string", "null"], "description": "The user's username, email, or id." },
+          "errorCount": { "type": "integer" },
+          "live": { "type": "boolean", "description": "A segment arrived in the last 15 minutes." }
+        }
+      },
+      "ReplayPage": {
+        "type": "object",
+        "required": ["items", "nextCursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ReplaySummary" } },
+          "nextCursor": { "type": ["string", "null"] }
+        }
+      },
+      "ReplayDetail": {
+        "description": "A replay with the fields of `ReplaySummary` and more.",
+        "allOf": [
+          { "$ref": "#/components/schemas/ReplaySummary" },
+          {
+            "type": "object",
+            "required": ["urls", "segments", "errors"],
+            "properties": {
+              "urls": { "type": "array", "items": { "type": "string" } },
+              "segments": { "type": "array", "description": "Stored segment ids, ascending.", "items": { "type": "integer" } },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["eventId", "issueId", "title", "timestampMs"],
+                  "properties": {
+                    "eventId": { "type": "string" },
+                    "issueId": { "type": "string" },
+                    "title": { "type": "string" },
+                    "timestampMs": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "IssueStatus": {
         "type": "string",
@@ -691,7 +937,7 @@
           { "$ref": "#/components/schemas/Issue" },
           {
             "type": "object",
-            "required": ["latest", "firstEventId", "latestEventId", "environments", "histogram", "tags"],
+            "required": ["latest", "firstEventId", "latestEventId", "environments", "histogram", "tags", "replayEventCount"],
             "properties": {
               "latest": {
                 "description": "The latest event under the filters.",
@@ -705,7 +951,8 @@
                 "items": { "type": "string" }
               },
               "histogram": { "type": "array", "description": "Events per bucket over `range`.", "items": { "type": "integer" } },
-              "tags": { "type": "array", "items": { "$ref": "#/components/schemas/TagGroup" } }
+              "tags": { "type": "array", "items": { "$ref": "#/components/schemas/TagGroup" } },
+              "replayEventCount": { "type": "integer", "description": "Events of the issue that link to a stored replay." }
             }
           }
         ]
@@ -851,7 +1098,21 @@
           "user": { "description": "The event user, as sent." },
           "request": { "description": "The HTTP request, as sent." },
           "extra": { "description": "Extra data, as sent." },
-          "raw": { "description": "The stored payload." }
+          "raw": { "description": "The stored payload." },
+          "replay": {
+            "description": "On `get_event` only: the replay that recorded this event, when it is stored in the same app.",
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["id", "startedMs"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "startedMs": { "type": ["integer", "null"] }
+                }
+              },
+              { "type": "null" }
+            ]
+          }
         }
       }
     }

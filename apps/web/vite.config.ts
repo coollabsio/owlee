@@ -10,6 +10,15 @@ export default defineConfig({
     },
   },
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      // The replay player is its own page, so rrweb never loads in the main bundle.
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        player: fileURLToPath(new URL("./replay-player.html", import.meta.url)),
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": process.env.VITE_API_PROXY ?? "http://127.0.0.1:43124",

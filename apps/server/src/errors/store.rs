@@ -27,6 +27,9 @@ pub struct App {
     pub allowed_domains: Vec<String>,
     pub inbound_filters: Vec<InboundFilter>,
     pub spike_protection: bool,
+    pub replays_enabled: bool,
+    pub replay_daily_bytes: i64,
+    pub replay_hourly_limit: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,7 +166,8 @@ fn visible_filter(column: &str) -> String {
 }
 
 const APP_COLUMNS: &str = "a.id, a.project_id, a.name, a.slug, a.public_key, a.platform, a.created_at, \
-     a.daily_quota, a.allowed_domains, a.inbound_filters, a.spike_protection";
+     a.daily_quota, a.allowed_domains, a.inbound_filters, a.spike_protection, \
+     a.replays_enabled, a.replay_daily_bytes, a.replay_hourly_limit";
 
 /// The apps of a workspace, optionally of one project in it.
 pub async fn list_apps(
@@ -299,6 +303,9 @@ pub async fn create_app(
         allowed_domains: Vec::new(),
         inbound_filters: vec![InboundFilter::BrowserExtensions, InboundFilter::WebCrawlers],
         spike_protection: true,
+        replays_enabled: false,
+        replay_daily_bytes: 512 * 1024 * 1024,
+        replay_hourly_limit: 1000,
     })
 }
 
@@ -348,6 +355,7 @@ pub struct TagGroup {
 
 pub struct IssueAnalytics {
     pub latest_payload: Option<String>,
+    pub latest_replay_id: Option<String>,
     pub histogram: Vec<i64>,
     pub users: i64,
     pub period_events: i64,
@@ -682,17 +690,23 @@ fn issue_status(status: &str) -> Result<&str, AppError> {
     }
 }
 
+pub struct StoredEvent {
+    pub app_id: String,
+    pub replay_id: Option<String>,
+    pub payload: String,
+}
+
 pub async fn get_event(
     db: &Database,
     workspace_id: Id,
     visible: &Visible,
     id: &str,
-) -> Result<String, AppError> {
+) -> Result<StoredEvent, AppError> {
     let [visible_flag, visible_apps] = visible.binds();
     let sql = statement(
         db,
         &format!(
-            "SELECT payload FROM events WHERE id = ? AND {IN_WORKSPACE} AND {}",
+            "SELECT app_id, replay_id, payload FROM events WHERE id = ? AND {IN_WORKSPACE} AND {}",
             visible_filter("app_id")
         ),
     );
@@ -706,7 +720,11 @@ pub async fn get_event(
     let Some(row) = row else {
         return Err(AppError::NotFound);
     };
-    Ok(row.try_get("payload")?)
+    Ok(StoredEvent {
+        app_id: row.try_get("app_id")?,
+        replay_id: row.try_get("replay_id")?,
+        payload: row.try_get("payload")?,
+    })
 }
 
 /// The oldest and newest stored events of an issue, ignoring any filter.
@@ -926,8 +944,9 @@ pub async fn ingest_event(
         let insert_event = statement(
             db,
             "INSERT INTO events (
-                id, app_id, issue_id, timestamp, level, title, environment, release, user_key, payload
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id, app_id, issue_id, timestamp, level, title, environment, release, user_key, payload,
+                replay_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         sqlx::query(&insert_event)
             .bind(&event_id)
@@ -940,6 +959,7 @@ pub async fn ingest_event(
             .bind(&event.release)
             .bind(hashes.first().cloned().unwrap_or_default())
             .bind(payload)
+            .bind(replay_tag(event))
             .execute(&mut *tx)
             .await?;
         for hash in &hashes {
@@ -992,6 +1012,9 @@ fn app_from_row(row: &sqlx::any::AnyRow) -> Result<App, AppError> {
             .collect(),
         inbound_filters: super::filter::parse_list(&row.try_get::<String, _>("inbound_filters")?),
         spike_protection: row.try_get::<i64, _>("spike_protection")? != 0,
+        replays_enabled: row.try_get::<i64, _>("replays_enabled")? != 0,
+        replay_daily_bytes: row.try_get("replay_daily_bytes")?,
+        replay_hourly_limit: row.try_get("replay_hourly_limit")?,
     })
 }
 
@@ -1182,7 +1205,7 @@ pub async fn issue_analytics(
 ) -> Result<IssueAnalytics, AppError> {
     let sql = statement(
         db,
-        "SELECT id, timestamp, level, title, environment, release, user_key, payload
+        "SELECT id, timestamp, level, title, environment, release, user_key, payload, replay_id
          FROM events WHERE issue_id = ? ORDER BY timestamp DESC LIMIT 1000",
     );
     let rows = sqlx::query(&sql)
@@ -1218,6 +1241,7 @@ pub async fn issue_analytics(
     let mut tags: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>> =
         std::collections::BTreeMap::new();
     let mut latest_payload = None;
+    let mut latest_replay_id = None;
     for row in &matched {
         let timestamp: String = row.try_get("timestamp")?;
         let user_key: Option<String> = row.try_get("user_key")?;
@@ -1242,6 +1266,7 @@ pub async fn issue_analytics(
         }
         if latest_payload.is_none() {
             latest_payload = Some(payload);
+            latest_replay_id = row.try_get("replay_id")?;
         }
     }
     let mut groups: Vec<(i64, TagGroup)> = tags
@@ -1261,6 +1286,7 @@ pub async fn issue_analytics(
     groups.truncate(TAG_KEY_LIMIT);
     Ok(IssueAnalytics {
         latest_payload,
+        latest_replay_id,
         histogram,
         users: users.len() as i64,
         period_events: matched.len() as i64,
@@ -1640,6 +1666,16 @@ fn event_unhandled(event: &NormalizedEvent) -> bool {
         .exceptions
         .iter()
         .any(|exception| exception.handled == Some(false))
+}
+
+/// The `replayId` tag that the Sentry browser SDK sets while it records.
+fn replay_tag(event: &NormalizedEvent) -> Option<String> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.key == "replayId")
+        .map(|tag| tag.value.to_ascii_lowercase())
+        .filter(|id| owlee_errors::is_replay_id(id))
 }
 
 const USER_FIELDS: [&str; 4] = ["id", "email", "username", "ip_address"];

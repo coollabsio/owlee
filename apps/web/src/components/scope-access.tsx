@@ -33,7 +33,7 @@ function InfoTip({ text }: { text: string }) {
   );
 }
 
-export type AccessRow = { product: ScopeProduct; label: string; hint: string; details?: ReactNode };
+export type AccessRow = { product: ScopeProduct; label: string; hint: string; accesses: readonly ScopeAccess[]; details?: ReactNode };
 
 /** One row per product with a No access / Read / Write / Delete choice. `readOnly` limits every row to Read. */
 export function AccessPicker({ rows, scopes, onChange, readOnly }: { rows: AccessRow[]; scopes: ApiScope[]; onChange: (scopes: ApiScope[]) => void; readOnly?: boolean }) {
@@ -52,7 +52,7 @@ export function AccessPicker({ rows, scopes, onChange, readOnly }: { rows: Acces
                 aria-label={`${row.label} access`}
                 value={level}
                 onChange={(next) => onChange(withAccessLevel(scopes, row.product, next))}
-                options={(["none", ...SCOPE_ACCESSES] as const).map((option) => {
+                options={(["none", ...row.accesses] as const).map((option) => {
                   const locked = readOnly === true && (option === "write" || option === "delete");
                   const included = option !== "none" && level !== "none" && SCOPE_ACCESSES.indexOf(option) < SCOPE_ACCESSES.indexOf(level);
                   return { value: option, label: LEVEL_LABELS[option], disabled: locked, included, title: locked ? "Only workspace owners and admins can grant write or delete." : undefined };
