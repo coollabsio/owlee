@@ -356,6 +356,7 @@ pub struct TagGroup {
 pub struct IssueAnalytics {
     pub latest_payload: Option<String>,
     pub latest_replay_id: Option<String>,
+    pub latest_trace_id: Option<String>,
     pub histogram: Vec<i64>,
     pub users: i64,
     pub period_events: i64,
@@ -693,6 +694,7 @@ fn issue_status(status: &str) -> Result<&str, AppError> {
 pub struct StoredEvent {
     pub app_id: String,
     pub replay_id: Option<String>,
+    pub trace_id: Option<String>,
     pub payload: String,
 }
 
@@ -706,7 +708,7 @@ pub async fn get_event(
     let sql = statement(
         db,
         &format!(
-            "SELECT app_id, replay_id, payload FROM events WHERE id = ? AND {IN_WORKSPACE} AND {}",
+            "SELECT app_id, replay_id, trace_id, payload FROM events WHERE id = ? AND {IN_WORKSPACE} AND {}",
             visible_filter("app_id")
         ),
     );
@@ -723,6 +725,7 @@ pub async fn get_event(
     Ok(StoredEvent {
         app_id: row.try_get("app_id")?,
         replay_id: row.try_get("replay_id")?,
+        trace_id: row.try_get("trace_id")?,
         payload: row.try_get("payload")?,
     })
 }
@@ -945,8 +948,8 @@ pub async fn ingest_event(
             db,
             "INSERT INTO events (
                 id, app_id, issue_id, timestamp, level, title, environment, release, user_key, payload,
-                replay_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                replay_id, trace_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         sqlx::query(&insert_event)
             .bind(&event_id)
@@ -960,6 +963,7 @@ pub async fn ingest_event(
             .bind(hashes.first().cloned().unwrap_or_default())
             .bind(payload)
             .bind(replay_tag(event))
+            .bind(trace_tag(event))
             .execute(&mut *tx)
             .await?;
         for hash in &hashes {
@@ -1205,8 +1209,8 @@ pub async fn issue_analytics(
 ) -> Result<IssueAnalytics, AppError> {
     let sql = statement(
         db,
-        "SELECT id, timestamp, level, title, environment, release, user_key, payload, replay_id
-         FROM events WHERE issue_id = ? ORDER BY timestamp DESC LIMIT 1000",
+        "SELECT id, timestamp, level, title, environment, release, user_key, payload, replay_id,
+         trace_id FROM events WHERE issue_id = ? ORDER BY timestamp DESC LIMIT 1000",
     );
     let rows = sqlx::query(&sql)
         .bind(issue_id)
@@ -1242,6 +1246,7 @@ pub async fn issue_analytics(
         std::collections::BTreeMap::new();
     let mut latest_payload = None;
     let mut latest_replay_id = None;
+    let mut latest_trace_id = None;
     for row in &matched {
         let timestamp: String = row.try_get("timestamp")?;
         let user_key: Option<String> = row.try_get("user_key")?;
@@ -1267,6 +1272,7 @@ pub async fn issue_analytics(
         if latest_payload.is_none() {
             latest_payload = Some(payload);
             latest_replay_id = row.try_get("replay_id")?;
+            latest_trace_id = row.try_get("trace_id")?;
         }
     }
     let mut groups: Vec<(i64, TagGroup)> = tags
@@ -1287,6 +1293,7 @@ pub async fn issue_analytics(
     Ok(IssueAnalytics {
         latest_payload,
         latest_replay_id,
+        latest_trace_id,
         histogram,
         users: users.len() as i64,
         period_events: matched.len() as i64,
@@ -1676,6 +1683,22 @@ fn replay_tag(event: &NormalizedEvent) -> Option<String> {
         .find(|tag| tag.key == "replayId")
         .map(|tag| tag.value.to_ascii_lowercase())
         .filter(|id| owlee_errors::is_replay_id(id))
+}
+
+/// `contexts.trace.trace_id`, which links the event to its OpenTelemetry trace.
+fn trace_tag(event: &NormalizedEvent) -> Option<String> {
+    let id = event
+        .contexts
+        .get("trace")?
+        .get("trace_id")?
+        .as_str()?
+        .to_ascii_lowercase();
+    let valid = id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && id.bytes().any(|byte| byte != b'0');
+    valid.then_some(id)
 }
 
 const USER_FIELDS: [&str; 4] = ["id", "email", "username", "ip_address"];

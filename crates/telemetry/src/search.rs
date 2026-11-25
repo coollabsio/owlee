@@ -1,17 +1,27 @@
-//! The search language of the logs page, parsed into a typed filter. The
-//! server turns the filter into SQL with bound values.
+//! The search language of the logs and traces pages, parsed into a typed
+//! filter. The server turns the filter into SQL with bound values.
 //!
 //! | Input | Meaning |
 //! |---|---|
-//! | `timeout`, `"connection reset"` | the body contains the text, any case |
+//! | `timeout`, `"connection reset"` | the log body or span name contains the text, any case |
 //! | `service:api`, `env:`, `host:`, `trace:` | the column equals the value |
-//! | `level:error`, `level:>=warn` | the level, or the level and above |
+//! | `level:error`, `level:>=warn` | logs: the level, or the level and above |
+//! | `duration:>500ms` | traces: also `>=`, `<`, `<=`, and `us`, `ms`, `s` |
+//! | `status:error`, `kind:server` | traces: the span status or kind |
 //! | `http.route:/checkout` | an attribute equals the value |
 //! | `-env:dev` | not |
 //!
 //! Terms are joined with AND.
 
 use crate::logs::Level;
+use crate::spans::{SpanKind, SpanStatus};
+
+/// What a query searches. Each has terms the other refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dataset {
+    Logs,
+    Traces,
+}
 
 /// The most terms one query may have, so one search cannot build a huge statement.
 pub const MAX_TERMS: usize = 20;
@@ -34,10 +44,34 @@ pub enum TermKind {
     Field(Field, String),
     Level(Level),
     LevelAtLeast(Level),
+    Duration(Compare, i64),
+    Status(SpanStatus),
+    Kind(SpanKind),
     Attribute {
         key: String,
         value: String,
     },
+}
+
+/// The comparison of a `duration:` term. The number is microseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compare {
+    Above,
+    AtLeast,
+    Below,
+    AtMost,
+}
+
+impl Compare {
+    #[must_use]
+    pub const fn sql(self) -> &'static str {
+        match self {
+            Self::Above => ">",
+            Self::AtLeast => ">=",
+            Self::Below => "<",
+            Self::AtMost => "<=",
+        }
+    }
 }
 
 /// The text columns a `key:value` term can name.
@@ -79,7 +113,7 @@ impl QueryError {
     }
 }
 
-pub fn parse_query(input: &str) -> Result<Query, QueryError> {
+pub fn parse_query(input: &str, dataset: Dataset) -> Result<Query, QueryError> {
     let tokens = tokenize(input)?;
     if tokens.len() > MAX_TERMS {
         return Err(QueryError {
@@ -89,7 +123,7 @@ pub fn parse_query(input: &str) -> Result<Query, QueryError> {
     }
     let terms = tokens
         .into_iter()
-        .map(parse_term)
+        .map(|token| parse_term(token, dataset))
         .collect::<Result<_, _>>()?;
     Ok(Query { terms })
 }
@@ -120,7 +154,7 @@ fn tokenize(input: &str) -> Result<Vec<&str>, QueryError> {
     Ok(tokens)
 }
 
-fn parse_term(token: &str) -> Result<Term, QueryError> {
+fn parse_term(token: &str, dataset: Dataset) -> Result<Term, QueryError> {
     let (negated, rest) = match token.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, token),
@@ -134,7 +168,7 @@ fn parse_term(token: &str) -> Result<Term, QueryError> {
             if value.is_empty() {
                 return Err(QueryError::new(token, "Add a value after `:`"));
             }
-            field_term(token, key, value)?
+            field_term(token, key, value, dataset)?
         }
         _ => {
             let text = unquote(token, rest)?;
@@ -147,7 +181,24 @@ fn parse_term(token: &str) -> Result<Term, QueryError> {
     Ok(Term { negated, kind })
 }
 
-fn field_term(token: &str, key: &str, value: &str) -> Result<TermKind, QueryError> {
+fn field_term(
+    token: &str,
+    key: &str,
+    value: &str,
+    dataset: Dataset,
+) -> Result<TermKind, QueryError> {
+    match (key, dataset) {
+        ("level", Dataset::Traces) => {
+            return Err(QueryError::new(
+                token,
+                "Spans have no level. Use `status:error`",
+            ));
+        }
+        ("duration" | "status" | "kind", Dataset::Logs) => {
+            return Err(QueryError::new(token, "Use this term on traces, not logs"));
+        }
+        _ => {}
+    }
     let field = match key {
         "service" => Field::Service,
         "env" => Field::Environment,
@@ -179,6 +230,22 @@ fn field_term(token: &str, key: &str, value: &str) -> Result<TermKind, QueryErro
                 TermKind::Level(level)
             });
         }
+        "duration" => return duration_term(token, value),
+        "status" => {
+            return SpanStatus::parse(&value.to_ascii_lowercase())
+                .map(TermKind::Status)
+                .ok_or_else(|| QueryError::new(token, "Use a status of unset, ok, or error"));
+        }
+        "kind" => {
+            return SpanKind::parse(&value.to_ascii_lowercase())
+                .map(TermKind::Kind)
+                .ok_or_else(|| {
+                    QueryError::new(
+                        token,
+                        "Use a kind of internal, server, client, producer, or consumer",
+                    )
+                });
+        }
         _ => {
             return Ok(TermKind::Attribute {
                 key: key.to_owned(),
@@ -187,6 +254,35 @@ fn field_term(token: &str, key: &str, value: &str) -> Result<TermKind, QueryErro
         }
     };
     Ok(TermKind::Field(field, value.to_owned()))
+}
+
+/// `>500ms`, `>=1.5s`, `<250us`, `<=2s`.
+fn duration_term(token: &str, value: &str) -> Result<TermKind, QueryError> {
+    let bad = || {
+        QueryError::new(
+            token,
+            "Use a duration such as `duration:>500ms`, with >, >=, <, or <= and us, ms, or s",
+        )
+    };
+    let (compare, rest) = [
+        (">=", Compare::AtLeast),
+        ("<=", Compare::AtMost),
+        (">", Compare::Above),
+        ("<", Compare::Below),
+    ]
+    .into_iter()
+    .find_map(|(prefix, compare)| value.strip_prefix(prefix).map(|rest| (compare, rest)))
+    .ok_or_else(bad)?;
+    let rest = rest.to_ascii_lowercase();
+    let (number, scale) = [("us", 1.0), ("ms", 1_000.0), ("s", 1_000_000.0)]
+        .into_iter()
+        .find_map(|(unit, scale)| rest.strip_suffix(unit).map(|number| (number, scale)))
+        .ok_or_else(bad)?;
+    let number: f64 = number.parse().map_err(|_| bad())?;
+    if !number.is_finite() || number < 0.0 || number * scale > 1e15 {
+        return Err(bad());
+    }
+    Ok(TermKind::Duration(compare, (number * scale).round() as i64))
 }
 
 /// Attribute keys such as `http.route` or `user_agent.original`.
@@ -218,6 +314,14 @@ fn unquote<'a>(token: &str, text: &'a str) -> Result<&'a str, QueryError> {
 mod tests {
     use super::*;
 
+    fn logs(input: &str) -> Result<Query, QueryError> {
+        parse_query(input, Dataset::Logs)
+    }
+
+    fn traces(input: &str) -> Result<Query, QueryError> {
+        parse_query(input, Dataset::Traces)
+    }
+
     fn term(negated: bool, kind: TermKind) -> Term {
         Term { negated, kind }
     }
@@ -228,7 +332,7 @@ mod tests {
 
     #[test]
     fn parses_every_term_kind() {
-        let parsed = parse_query(
+        let parsed = logs(
             r#"timeout "connection reset" service:api level:>=warn http.route:/checkout -env:dev host:"web 1" trace:5B8EFFF798038103D269B633813FC60C level:Error -"health check""#,
         )
         .unwrap();
@@ -260,14 +364,14 @@ mod tests {
 
     #[test]
     fn empty_and_plain_input() {
-        assert_eq!(parse_query("").unwrap(), Query::default());
-        assert_eq!(parse_query("   ").unwrap(), Query::default());
+        assert_eq!(logs("").unwrap(), Query::default());
+        assert_eq!(logs("   ").unwrap(), Query::default());
         assert_eq!(
-            parse_query(r#""a:b" 100%_done"#).unwrap().terms,
+            logs(r#""a:b" 100%_done"#).unwrap().terms,
             vec![term(false, text("a:b")), term(false, text("100%_done"))]
         );
         assert_eq!(
-            parse_query("ratio:0.5").unwrap().terms,
+            logs("ratio:0.5").unwrap().terms,
             vec![term(
                 false,
                 TermKind::Attribute {
@@ -312,7 +416,7 @@ mod tests {
         ];
         for (input, token, message) in cases {
             assert_eq!(
-                parse_query(input),
+                logs(input),
                 Err(QueryError {
                     token: token.into(),
                     message: message.into()
@@ -322,8 +426,99 @@ mod tests {
         }
         let many = vec!["x"; MAX_TERMS + 1].join(" ");
         assert_eq!(
-            parse_query(&many).unwrap_err().message,
+            logs(&many).unwrap_err().message,
             "Use at most 20 search terms."
         );
+    }
+
+    #[test]
+    fn trace_terms() {
+        let parsed = traces(
+            "duration:>500ms duration:>=1.5s -duration:<250us duration:<=2S status:error -kind:client kind:Server checkout service:api",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.terms,
+            vec![
+                term(false, TermKind::Duration(Compare::Above, 500_000)),
+                term(false, TermKind::Duration(Compare::AtLeast, 1_500_000)),
+                term(true, TermKind::Duration(Compare::Below, 250)),
+                term(false, TermKind::Duration(Compare::AtMost, 2_000_000)),
+                term(false, TermKind::Status(SpanStatus::Error)),
+                term(true, TermKind::Kind(SpanKind::Client)),
+                term(false, TermKind::Kind(SpanKind::Server)),
+                term(false, text("checkout")),
+                term(false, TermKind::Field(Field::Service, "api".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_dataset_refuses_the_terms_of_the_other() {
+        let duration =
+            "Use a duration such as `duration:>500ms`, with >, >=, <, or <= and us, ms, or s";
+        let cases = [
+            (
+                traces("level:error"),
+                "level:error",
+                "Spans have no level. Use `status:error` in `level:error`.".to_owned(),
+            ),
+            (
+                logs("duration:>1s"),
+                "duration:>1s",
+                "Use this term on traces, not logs in `duration:>1s`.".to_owned(),
+            ),
+            (
+                logs("-status:ok"),
+                "-status:ok",
+                "Use this term on traces, not logs in `-status:ok`.".to_owned(),
+            ),
+            (
+                logs("kind:server"),
+                "kind:server",
+                "Use this term on traces, not logs in `kind:server`.".to_owned(),
+            ),
+            (
+                traces("duration:500ms"),
+                "duration:500ms",
+                format!("{duration} in `duration:500ms`."),
+            ),
+            (
+                traces("duration:>500"),
+                "duration:>500",
+                format!("{duration} in `duration:>500`."),
+            ),
+            (
+                traces("duration:>-1s"),
+                "duration:>-1s",
+                format!("{duration} in `duration:>-1s`."),
+            ),
+            (
+                traces("duration:>xms"),
+                "duration:>xms",
+                format!("{duration} in `duration:>xms`."),
+            ),
+            (
+                traces("status:bad"),
+                "status:bad",
+                "Use a status of unset, ok, or error in `status:bad`.".to_owned(),
+            ),
+            (
+                traces("kind:weird"),
+                "kind:weird",
+                "Use a kind of internal, server, client, producer, or consumer in `kind:weird`."
+                    .to_owned(),
+            ),
+        ];
+        for (parsed, token, message) in cases {
+            assert_eq!(
+                parsed,
+                Err(QueryError {
+                    token: token.into(),
+                    message
+                }),
+                "{token}"
+            );
+        }
     }
 }

@@ -796,6 +796,8 @@ export type NormalizedEvent = {
   raw: unknown;
   /** The session replay this event happened in, when it exists in the same app. */
   replay: { id: string; startedMs: number | null } | null;
+  /** Spans exist for this event's trace in a source the member can see. */
+  traceSpans: boolean;
 };
 
 export type EventPage = { items: EventSummary[]; nextCursor: string | null };

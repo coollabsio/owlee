@@ -420,7 +420,7 @@ OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>"
 ```
 
 - Owlee accepts OTLP/HTTP on `POST /otlp/v1/logs`, `/otlp/v1/traces`, and `/otlp/v1/metrics`, in protobuf (`application/x-protobuf`) and JSON (`application/json`), optionally gzip. The answer uses the encoding of the request. gRPC is not supported.
-- Logs are stored. Traces and metrics are not stored yet: they answer `200` with every span or data point in `partial_success`.
+- Logs and spans are stored. Metrics are not stored yet: they answer `200` with every data point in `partial_success`.
 - A wrong token is `401`, a bad body `400`, and a body above `OWLEE_OTLP_MAX_BODY_BYTES` (4 MiB, before and after gzip) `413`. Each source and each client IP has a token bucket (`OWLEE_OTLP_RATE_SOURCE_*`, `OWLEE_OTLP_RATE_IP_*`, 600 requests a minute). A full bucket is `429` with `Retry-After`.
 - Each source may store `OWLEE_LOG_DAILY_QUOTA` log records per UTC day (1,000,000), or its own cap. A request that passes the cap stores what fits and reports the rest in `partial_success`. When nothing fits, the answer is `429` with `Retry-After` until 00:00 UTC.
 - Owlee answers after the rows are committed. A crash after the answer loses nothing.
@@ -428,6 +428,17 @@ OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <token>"
 - Logs are deleted after `OWLEE_LOG_RETENTION_DAYS` (7). Deleting a source stops its intake at once. The hourly retention pass then deletes its logs in batches.
 
 The search box takes `timeout` or `"connection reset"` (body text, any case), `service:`, `env:`, `host:`, `trace:`, `level:error` or `level:>=warn`, an attribute such as `http.route:/checkout`, and `-` before a term for "not". Terms are joined with AND. A search covers at most 7 days and shows 200 rows a page, newest first. Live tail asks for new rows every 2 seconds.
+
+### Traces
+
+- `POST /otlp/v1/traces` stores spans. A span sent again, such as by a client retry, is stored once and counted once.
+- Each source may store `OWLEE_SPAN_DAILY_QUOTA` spans per UTC day (1,000,000). The source's own cap applies to logs only. Over the cap, the answer is `partial_success` and then `429`, as for logs. A span with an invalid trace or span id is dropped and reported in `partial_success`.
+- A span keeps at most 64 attributes, 32 events, and 32 links, with the same cuts and filters as a log record.
+- An entry span is a root span, or a server or consumer span. Entry spans make the service numbers: requests, errors (status `error`), and p50, p95, and p99 latency, for each minute. The operation is `METHOD /route` when the span has `http.route`, else the span name. A service keeps up to 200 operations; more go to `(other)`.
+- Percentiles come from a histogram with fixed buckets (1 ms up to 1000 s), with linear interpolation inside a bucket. A value above 1000 s shows as 1000 s.
+- Spans are deleted after `OWLEE_TRACE_RETENTION_DAYS` (7). The per-minute service numbers stay for `OWLEE_ROLLUP_RETENTION_DAYS` (90).
+- The trace list shows entry spans and takes the log search terms (`level:` excepted) plus `duration:>500ms` (also `>=`, `<`, `<=`, with `us`, `ms`, or `s`), `status:error`, `ok`, or `unset`, and `kind:server`, `client`, `producer`, `consumer`, or `internal`. Text matches the span name. A search covers at most 7 days and shows 200 rows a page.
+- The trace page shows up to 2,000 spans, the logs with the same trace id (up to 200), and the error events whose `contexts.trace.trace_id` is the trace id. An error event shows **View trace** when spans of its trace are stored.
 
 ## Analytics
 

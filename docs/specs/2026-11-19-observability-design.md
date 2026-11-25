@@ -1,7 +1,7 @@
 # Logs, traces, and metrics design
 
-Status: P0 and P1 built and tested on 2026-11-24 (sources, OTLP/HTTP intake, guards, logs search, live tail,
-retention, web pages, P0.4 load test). See section 15. P2 to P4 are not done yet.
+Status: P0 and P1 built and tested on 2026-11-24 (see section 15). P2 (traces) built and tested on
+2026-11-25 (see section 16). P3 and P4 are not done yet.
 
 ## 1. Goal
 
@@ -611,3 +611,36 @@ the range and the filter, not on the total rows. Facet time depends on the cap i
 - The setup page snippets were run against the dev server: Node, Python, Go, Rust, and the Collector each
   stored logs. Node needs `@opentelemetry/api` 1.10 or later for the logs API. Python needs
   `opentelemetry-instrumentation-logging`.
+
+## 16. Build notes (P2)
+
+### 16.1 End-to-end check
+
+On the dev server: the OpenTelemetry Collector with telemetrygen traces, and the Python SDK with nested spans,
+a recorded exception, and a log in the same span. A Sentry error event with the same trace id, sent in upper
+case. Checked: the services list and its percentiles, the service page charts and operations, the trace list
+with `status:error`, `duration:>50ms`, and an attribute filter, `level:` refused with 422 on traces, the
+waterfall, the span panel with the exception and its stack, the logs and errors of the trace, "View trace"
+on the issue page, and 404 for an unknown trace id.
+
+### 16.2 Changes from section 6
+
+| Change | Why |
+|---|---|
+| New table `span_operations` holds the known operations of each service. | The 200-operation cap is then a count of at most 200 rows, not a scan of 90 days of rollups. Retention deletes operations that have no rollup rows left. Two parallel requests can pass the cap by a few operations. |
+| Index `span_rollups (source_id, operation, minute)`. | For the services list. |
+| Spans are inserted with `ON CONFLICT DO NOTHING RETURNING`. Only returned spans get attribute rows and rollup counts. | A retried span is stored and counted one time. The quota and the intake counter still count the retry, because the quota is reserved before the insert. |
+| The quota reserve has its own transaction, as for logs (section 15.2). Rollup upserts run in sorted key order. | Parallel requests take row locks in the same order. |
+| Span links are limited to 32, as span events. | Section 12 has no link limit. |
+| A span with an invalid trace or span id is dropped, counted as `malformed`, and reported in `partial_success`. | |
+| `events.trace_id` is stored in lower case. An upper-case id from an SDK is accepted. | |
+| Event JSON has `traceSpans`. It checks the live sources of the whole workspace, because the event routes have no project filter. | |
+| Logs refuse `duration:`, `status:`, and `kind:`. Traces refuse `level:`. | One parser, two term sets. |
+| Series points and operations also return `errorRate`. A minute with no spans is a zero point. | |
+
+### 16.3 Known limits
+
+- A percentile is exact only to its bucket bounds (section 6.3), with linear interpolation inside the bucket.
+  Spans shorter than 1 ms all fall in `b00`, so p50 shows 500 µs for spans of 0.1 ms.
+- Rollup retention has no index on `minute`. Each delete batch reads the rollup rows of one source.
+- No load test for spans yet. Each entry span adds two rollup upserts to the write transaction.

@@ -1,7 +1,7 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { X } from "reicon-react";
-import { NavLink, useSearchParams } from "react-router";
+import { Link, NavLink, useSearchParams } from "react-router";
 import { type Column, DataTable } from "@/components/data-table";
 import { Button, ErrorText, Input, LayerCard, LoadMore, PageHeader, Select, Skeleton, StatusBadge } from "@/components/ui";
 import { ApiError, api, flattenPages, withCursor } from "@/lib/api";
@@ -15,9 +15,9 @@ import {
   type LogPage,
   type LogRow,
   mergeNewer,
+  LOG_RANGES,
   parseRange,
-  RANGE_PRESETS,
-  type RangePreset,
+  type RangeOptions,
   type RangeSpec,
   resolveRange,
   TAIL_INTERVAL_MS,
@@ -30,7 +30,7 @@ import { cn, toLocalInput } from "@/lib/utils";
 import { useListScope, useWorkspace, withProject } from "@/lib/workspace";
 import { SourcesCard } from "@/pages/telemetry-sources";
 
-const LEVEL_TONE: Record<LogLevel, "neutral" | "info" | "warning" | "error"> = {
+export const LEVEL_TONE: Record<LogLevel, "neutral" | "info" | "warning" | "error"> = {
   trace: "neutral",
   debug: "neutral",
   info: "info",
@@ -189,7 +189,7 @@ function LogsView({
     <>
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2 lg:flex-row lg:items-start">
-          <SearchBox q={q} error={fields.q} onSubmit={(next) => (next === q ? setAnchor(Date.now()) : update((params) => (next ? params.set("q", next) : params.delete("q"))))} />
+          <SearchBox q={q} error={fields.q} label="Search logs" placeholder="timeout service:api level:>=warn -env:dev" help={HELP} onSubmit={(next) => (next === q ? setAnchor(Date.now()) : update((params) => (next ? params.set("q", next) : params.delete("q"))))} />
           <RangePicker range={range} error={fields.to ?? fields.from} onChange={(next) => update((params) => writeRange(params, next))} />
           <TailButton tail={tail} disabled={range.kind === "custom" || !firstPage} onStart={startTail} onStop={() => setTail({ status: "off" })} />
         </div>
@@ -227,7 +227,22 @@ function LogsView({
   );
 }
 
-function SearchBox({ q, error, onSubmit }: { q: string; error?: string; onSubmit: (q: string) => void }) {
+/** The query box of a telemetry search, with its syntax popover. */
+export function SearchBox({
+  q,
+  error,
+  label,
+  placeholder,
+  help,
+  onSubmit,
+}: {
+  q: string;
+  error?: string;
+  label: string;
+  placeholder: string;
+  help: [string, string][];
+  onSubmit: (q: string) => void;
+}) {
   const [draft, setDraft] = useState(q);
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -238,17 +253,17 @@ function SearchBox({ q, error, onSubmit }: { q: string; error?: string; onSubmit
       <div className="flex gap-2">
         <Input
           className="font-mono text-[0.8125rem]"
-          aria-label="Search logs"
+          aria-label={label}
           aria-invalid={error ? true : undefined}
-          placeholder='timeout service:api level:>=warn -env:dev'
+          placeholder={placeholder}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
         />
-        <Button type="button" popoverTarget="log-query-help" aria-label="Search syntax">?</Button>
+        <Button type="button" popoverTarget="query-help" aria-label="Search syntax">?</Button>
         <Button type="submit" variant="highlighted">Search</Button>
       </div>
       {error ? <p className="field-error">{error}</p> : null}
-      <QueryHelp />
+      <QueryHelp help={help} />
     </form>
   );
 }
@@ -263,12 +278,12 @@ const HELP: [string, string][] = [
   ["a b", "both must match"],
 ];
 
-function QueryHelp() {
+function QueryHelp({ help }: { help: [string, string][] }) {
   return (
-    <div id="log-query-help" popover="auto" className="fixed inset-0 m-auto h-fit w-[min(28rem,calc(100vw-2rem))] rounded-[10px] border border-[var(--ui-card-border)] bg-[var(--ui-panel)] p-4 shadow-[var(--ui-modal-shadow)]">
+    <div id="query-help" popover="auto" className="fixed inset-0 m-auto h-fit w-[min(28rem,calc(100vw-2rem))] rounded-[10px] border border-[var(--ui-card-border)] bg-[var(--ui-panel)] p-4 shadow-[var(--ui-modal-shadow)]">
       <h2 className="mb-3 text-[0.875rem] font-medium text-[var(--ui-fg)]">Search syntax</h2>
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-[0.8125rem]">
-        {HELP.map(([example, meaning]) => (
+        {help.map(([example, meaning]) => (
           <div key={example} className="contents">
             <dt className="font-mono text-[var(--ui-fg)]">{example}</dt>
             <dd className="text-[var(--ui-fg-faint)]">{meaning}</dd>
@@ -280,15 +295,25 @@ function QueryHelp() {
   );
 }
 
-function RangePicker({ range, error, onChange }: { range: RangeSpec; error?: string; onChange: (range: RangeSpec) => void }) {
+export function RangePicker({
+  range,
+  error,
+  options = LOG_RANGES,
+  onChange,
+}: {
+  range: RangeSpec;
+  error?: string;
+  options?: RangeOptions;
+  onChange: (range: RangeSpec) => void;
+}) {
   const [custom, setCustom] = useState(range.kind === "custom");
   const now = Date.now();
-  const initial = resolveRange(range, now);
+  const initial = resolveRange(range, now, options);
   const [from, setFrom] = useState(toLocalInput(new Date(initial.from).toISOString()));
   const [to, setTo] = useState(toLocalInput(new Date(initial.to).toISOString()));
   const fromMs = new Date(from).getTime();
   const toMs = new Date(to).getTime();
-  const invalid = customRangeError(fromMs, toMs);
+  const invalid = customRangeError(fromMs, toMs, options);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
@@ -296,11 +321,11 @@ function RangePicker({ range, error, onChange }: { range: RangeSpec; error?: str
           className="w-44"
           aria-label="Time range"
           value={custom ? "custom" : range.kind === "preset" ? range.preset : "custom"}
-          options={[...RANGE_PRESETS.map((item) => ({ value: item.id as string, label: item.label })), { value: "custom", label: "Custom range" }]}
+          options={[...options.presets.map((item) => ({ value: item.id, label: item.label })), { value: "custom", label: "Custom range" }]}
           onChange={(value) => {
             if (value === "custom") return setCustom(true);
             setCustom(false);
-            onChange({ kind: "preset", preset: value as RangePreset });
+            onChange({ kind: "preset", preset: value });
           }}
         />
         {custom ? (
@@ -371,7 +396,7 @@ function FacetRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function FacetButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+export function FacetButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
@@ -423,6 +448,11 @@ function LogPanel({ id, onClose }: { id: string; onClose: () => void }) {
                 ["Log id", data.id],
               ]}
             />
+            {data.traceId ? (
+              <Link className="button self-start" to={`/traces/${encodeURIComponent(data.traceId)}`}>
+                View trace
+              </Link>
+            ) : null}
             <Section title="Attributes" values={data.attributes} />
             <Section title="Resource" values={data.resource} />
           </>
@@ -432,7 +462,7 @@ function LogPanel({ id, onClose }: { id: string; onClose: () => void }) {
   );
 }
 
-function Section({ title, values }: { title: string; values: Record<string, unknown> }) {
+export function Section({ title, values }: { title: string; values: Record<string, unknown> }) {
   const entries = Object.entries(values).map(([key, value]): [string, string] => [key, typeof value === "string" ? value : JSON.stringify(value)]);
   return (
     <div>
@@ -442,7 +472,7 @@ function Section({ title, values }: { title: string; values: Record<string, unkn
   );
 }
 
-function KeyValues({ entries }: { entries: [string, string][] }) {
+export function KeyValues({ entries }: { entries: [string, string][] }) {
   return (
     <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[0.8125rem]">
       {entries
@@ -457,7 +487,7 @@ function KeyValues({ entries }: { entries: [string, string][] }) {
   );
 }
 
-function logTime(ms: number) {
+export function logTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
     month: "short",
     day: "numeric",

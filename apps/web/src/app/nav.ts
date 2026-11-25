@@ -7,6 +7,7 @@ import {
   ChartLine,
   Element3,
   Global,
+  Hierarchy,
   Home,
   Brush,
   Danger,
@@ -102,11 +103,14 @@ export const products: Product[] = [
   {
     id: "observability",
     label: "Observability",
-    description: "Logs from OpenTelemetry sources.",
+    description: "Logs and traces from OpenTelemetry sources.",
     icon: DocumentText,
     groups: [
       {
-        links: [{ to: "/logs", label: "Logs", icon: DocumentText }],
+        links: [
+          { to: "/logs", label: "Logs", icon: DocumentText },
+          { to: "/traces", label: "Traces", icon: Hierarchy },
+        ],
       },
     ],
   },

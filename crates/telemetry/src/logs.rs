@@ -85,15 +85,15 @@ pub struct LogRow {
     pub resource_json: String,
 }
 
-struct Resource {
-    service: String,
-    environment: String,
-    host: String,
-    json: String,
+pub(crate) struct Resource {
+    pub service: String,
+    pub environment: String,
+    pub host: String,
+    pub json: String,
 }
 
 impl Resource {
-    fn of(attributes: &[KeyValue]) -> Self {
+    pub(crate) fn of(attributes: &[KeyValue]) -> Self {
         let text = |key: &str| {
             value::string_attribute(attributes, key)
                 .map(|text| value::cut_bytes(text, MAX_VALUE_BYTES).to_owned())
@@ -156,7 +156,7 @@ pub fn normalize_logs(request: &ExportLogsServiceRequest, received_ms: i64) -> V
 }
 
 /// An id of the wrong length or of all zeroes is invalid in OTLP.
-fn hex_id(bytes: &[u8], length: usize) -> Option<String> {
+pub(crate) fn hex_id(bytes: &[u8], length: usize) -> Option<String> {
     (bytes.len() == length && bytes.iter().any(|byte| *byte != 0)).then(|| hex::encode(bytes))
 }
 

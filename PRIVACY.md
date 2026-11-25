@@ -44,11 +44,11 @@ The Sentry browser SDK can record replays of your pages. Owlee stores them only 
 
 ## Telemetry
 
-Logs come from the OpenTelemetry SDKs and Collectors you point at a telemetry source. Before a log is stored, Owlee:
+Logs and spans come from the OpenTelemetry SDKs and Collectors you point at a telemetry source. Before a log or span is stored, Owlee:
 
 - removes the attributes `client.address`, `source.address`, and `net.peer.ip`, in the record and in its resource;
 - replaces the value of an attribute whose name matches the sensitive names listed for errors with `[Filtered]`, at any depth;
-- filters bearer and basic credentials, JWTs, AWS access key ids, PEM private keys, and card numbers in the body and in every attribute value, as for errors.
+- filters bearer and basic credentials, JWTs, AWS access key ids, PEM private keys, and card numbers in the log body, the span name, status message, and event names, and in every attribute value, as for errors.
 
 Everything else stays as the SDK sent it, such as user ids or emails that your code puts in a log line. Telemetry has no user key, so it is not part of the access and erasure requests below. Delete telemetry by deleting its source, or let retention remove it.
 
@@ -60,6 +60,8 @@ Everything else stays as the SDK sent it, such as user ids or emails that your c
 | Analytics events, visits, and visitor ids | `OWLEE_ANALYTICS_RETENTION_DAYS`, 90 days by default |
 | Session replays | `OWLEE_REPLAY_RETENTION_DAYS`, 14 days after the last part arrived |
 | Logs | `OWLEE_LOG_RETENTION_DAYS`, 7 days by default |
+| Spans | `OWLEE_TRACE_RETENTION_DAYS`, 7 days by default |
+| Per-minute service numbers from spans (counts and latency buckets) | `OWLEE_ROLLUP_RETENTION_DAYS`, 90 days by default |
 | Issue rows and analytics daily rollups | Until you delete the project or site |
 
 Issues and daily rollups hold counts, titles, and top values such as pages and countries. They hold no visitor ids or user keys.

@@ -424,8 +424,10 @@ pub async fn get_issue(
         Some(payload) => Some(
             event_with_replay(
                 &state,
+                &member,
                 &issue.app_id,
                 analytics.latest_replay_id.as_deref(),
+                analytics.latest_trace_id.as_deref(),
                 payload,
             )
             .await?,
@@ -557,19 +559,24 @@ pub async fn get_event(
     Ok(Json(
         event_with_replay(
             &state,
+            &member,
             &event.app_id,
             event.replay_id.as_deref(),
+            event.trace_id.as_deref(),
             &event.payload,
         )
         .await?,
     ))
 }
 
-/// The normalized event with `replay`: the linked replay when it exists in the same app, else null.
+/// The normalized event with `replay`, the linked replay when it exists in the same app, else
+/// null, and `traceSpans`, whether a source of the workspace has spans of the event's trace.
 async fn event_with_replay(
     state: &AppState,
+    member: &Member,
     app_id: &str,
     replay_id: Option<&str>,
+    trace_id: Option<&str>,
     payload: &str,
 ) -> Result<Value, AppError> {
     let replay = match replay_id {
@@ -581,6 +588,13 @@ async fn event_with_replay(
     let mut body = normalized_payload(payload);
     if let Value::Object(object) = &mut body {
         object.insert("replay".to_owned(), replay.unwrap_or(Value::Null));
+        let trace_spans = match trace_id {
+            Some(trace_id) => {
+                crate::telemetry::trace_has_spans(&state.db, member.workspace_id, trace_id).await?
+            }
+            None => false,
+        };
+        object.insert("traceSpans".to_owned(), Value::Bool(trace_spans));
     }
     Ok(body)
 }

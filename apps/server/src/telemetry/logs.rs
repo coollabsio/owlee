@@ -1,17 +1,17 @@
-//! Log search, facets, detail, live tail, and retention.
+//! Log search, facets, detail, and live tail.
 
 use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use owlee_platform::{Database, TimestampMillis};
-use owlee_telemetry::{Field, Level, Query as Search, TermKind, parse_query};
+use owlee_platform::TimestampMillis;
+use owlee_telemetry::{Dataset, Field, Level, Query as Search, TermKind, parse_query};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-use super::sources;
+use super::filter::{Filter, contains_pattern, time_range, visible_sources};
 use crate::error::AppError;
 use crate::paging::{Cursor, Key, PageParams};
 use crate::state::AppState;
@@ -23,7 +23,6 @@ const MAX_RANGE_MS: i64 = 7 * 86_400_000;
 const TOP_SERVICES: usize = 10;
 /// Facets count only the newest rows of a search, so a wide range stays fast. The load test chose this cap.
 const FACET_ROWS: i64 = 10_000;
-const BATCH: u64 = 500;
 
 #[derive(Deserialize, Default)]
 pub struct LogParams {
@@ -105,148 +104,85 @@ impl Scope {
         params: &LogParams,
         tail: bool,
     ) -> Result<Self, AppError> {
-        let search = parse_query(&params.q).map_err(|bad| AppError::field("q", bad.message))?;
-        let now = TimestampMillis::now().as_millis();
-        let to = params.to.unwrap_or(now);
-        let from = params.from.unwrap_or(to - DEFAULT_RANGE_MS);
-        if from > to {
-            return Err(AppError::field("to", "The end must be after the start."));
-        }
-        if to - from > MAX_RANGE_MS {
-            return Err(AppError::field("to", "Use a time range of at most 7 days."));
-        }
-        let project = project.resolve(&state.db, member.workspace_id).await?;
-        let sources = sources::list(&state.db, member.workspace_id, project)
-            .await?
-            .into_iter()
-            .map(|source| (source.id, source.name))
-            .collect();
+        let search = parse_query(&params.q, Dataset::Logs)
+            .map_err(|bad| AppError::field("q", bad.message))?;
+        let (from, to) = time_range(params.from, params.to, DEFAULT_RANGE_MS, MAX_RANGE_MS)?;
         Ok(Self {
-            sources,
+            sources: visible_sources(state, member, project).await?,
             from,
             to: (!tail).then_some(to),
             search,
         })
     }
-}
 
-enum Bind {
-    Text(String),
-    Int(i64),
-}
-
-/// A WHERE clause and its values. No user text goes into the SQL string.
-#[derive(Default)]
-struct Filter {
-    sql: Vec<String>,
-    binds: Vec<Bind>,
-}
-
-impl Filter {
-    fn bind(&mut self, value: Bind) -> String {
-        self.binds.push(value);
-        format!("${}", self.binds.len())
-    }
-
-    fn text(&mut self, value: &str) -> String {
-        self.bind(Bind::Text(value.to_owned()))
-    }
-
-    fn of(scope: &Scope) -> Self {
-        let mut filter = Self::default();
-        let ids: Vec<String> = scope.sources.keys().map(|id| filter.text(id)).collect();
-        filter
-            .sql
-            .push(format!("l.source_id IN ({})", ids.join(", ")));
-        let from = filter.bind(Bind::Int(scope.from));
+    fn filter(&self) -> Filter {
+        let mut filter = Filter::default();
+        filter.sources("l.source_id", &self.sources);
+        let from = filter.int(self.from);
         filter.sql.push(format!("l.time_ms >= {from}"));
-        if let Some(to) = scope.to {
-            let to = filter.bind(Bind::Int(to));
+        if let Some(to) = self.to {
+            let to = filter.int(to);
             filter.sql.push(format!("l.time_ms <= {to}"));
         }
-        for term in &scope.search.terms {
-            let condition = filter.term(&term.kind, term.negated);
+        for term in &self.search.terms {
+            let condition = log_term(&mut filter, &term.kind, term.negated);
             filter.sql.push(condition);
         }
         filter
     }
+}
 
-    fn term(&mut self, kind: &TermKind, negated: bool) -> String {
-        let condition = match kind {
-            TermKind::Text(text) => {
-                let pattern = self.text(&format!("%{}%", escape_like(text)));
-                format!("LOWER(l.body) LIKE LOWER({pattern}) ESCAPE '\\'")
-            }
-            TermKind::Field(Field::Trace, id) if negated => {
-                let id = self.text(id);
-                return format!("COALESCE(l.trace_id, '') <> {id}");
-            }
-            TermKind::Field(field, value) => {
-                let value = self.text(value);
-                format!("l.{} = {value}", field.column())
-            }
-            TermKind::Level(level) => {
-                let level = self.text(level.as_str());
-                format!("l.level = {level}")
-            }
-            TermKind::LevelAtLeast(least) => {
-                let levels: Vec<String> = Level::ALL
-                    .into_iter()
-                    .filter(|level| level >= least)
-                    .map(|level| self.text(level.as_str()))
-                    .collect();
-                format!("l.level IN ({})", levels.join(", "))
-            }
-            TermKind::Attribute { key, value } => {
-                let key = self.text(key);
-                let value = self.text(value);
-                format!(
-                    "EXISTS (SELECT 1 FROM log_attributes a \
-                     WHERE a.log_id = l.id AND a.key = {key} AND a.value = {value})"
-                )
-            }
-        };
-        if negated {
-            format!("NOT ({condition})")
-        } else {
-            condition
+fn log_term(filter: &mut Filter, kind: &TermKind, negated: bool) -> String {
+    let condition = match kind {
+        TermKind::Text(text) => {
+            let pattern = filter.text(&contains_pattern(text));
+            format!("LOWER(l.body) LIKE LOWER({pattern}) ESCAPE '\\'")
         }
-    }
-
-    fn query<'q>(
-        &self,
-        sql: &'q str,
-    ) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
-        let mut query = sqlx::query(sql);
-        for bind in &self.binds {
-            query = match bind {
-                Bind::Text(text) => query.bind(text.clone()),
-                Bind::Int(number) => query.bind(*number),
-            };
+        TermKind::Field(Field::Trace, id) if negated => {
+            let id = filter.text(id);
+            return format!("COALESCE(l.trace_id, '') <> {id}");
         }
-        query
-    }
-
-    fn clause(&self) -> String {
-        self.sql.join(" AND ")
+        TermKind::Field(field, value) => {
+            let value = filter.text(value);
+            format!("l.{} = {value}", field.column())
+        }
+        TermKind::Level(level) => {
+            let level = filter.text(level.as_str());
+            format!("l.level = {level}")
+        }
+        TermKind::LevelAtLeast(least) => {
+            let levels: Vec<String> = Level::ALL
+                .into_iter()
+                .filter(|level| level >= least)
+                .map(|level| filter.text(level.as_str()))
+                .collect();
+            format!("l.level IN ({})", levels.join(", "))
+        }
+        TermKind::Attribute { key, value } => {
+            let key = filter.text(key);
+            let value = filter.text(value);
+            format!(
+                "EXISTS (SELECT 1 FROM log_attributes a \
+                 WHERE a.log_id = l.id AND a.key = {key} AND a.value = {value})"
+            )
+        }
+        // The parser refuses trace terms on logs.
+        TermKind::Duration(..) | TermKind::Status(_) | TermKind::Kind(_) => "1 = 0".to_owned(),
+    };
+    if negated {
+        format!("NOT ({condition})")
+    } else {
+        condition
     }
 }
 
-fn escape_like(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if matches!(character, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
-}
-
-const LOG_COLUMNS: &str = "l.id, l.time_ms, l.level, l.severity_text, l.service, l.environment, \
+pub(super) const LOG_COLUMNS: &str = "l.id, l.time_ms, l.level, l.severity_text, l.service, l.environment, \
      l.host, l.body, l.trace_id, l.span_id, l.source_id";
 
-fn log_from_row(row: &AnyRow, sources: &HashMap<String, String>) -> Result<LogView, sqlx::Error> {
+pub(super) fn log_from_row(
+    row: &AnyRow,
+    sources: &HashMap<String, String>,
+) -> Result<LogView, sqlx::Error> {
     let source_id: String = row.try_get("source_id")?;
     Ok(LogView {
         id: row.try_get("id")?,
@@ -294,7 +230,7 @@ pub async fn search(
             tail_cursor: after.unwrap_or(floor),
         }));
     }
-    let mut filter = Filter::of(&scope);
+    let mut filter = scope.filter();
     let limit = match &after {
         Some(after) => {
             let after = filter.text(after);
@@ -303,7 +239,7 @@ pub async fn search(
         }
         None => {
             if let Some((time_ms, id)) = paging.int_after()? {
-                let time = filter.bind(Bind::Int(time_ms));
+                let time = filter.int(time_ms);
                 let id = filter.text(id);
                 filter.sql.push(format!(
                     "(l.time_ms < {time} OR (l.time_ms = {time} AND l.id < {id}))"
@@ -362,7 +298,7 @@ pub async fn facets(
             capped: false,
         }));
     }
-    let filter = Filter::of(&scope);
+    let filter = scope.filter();
     let sql = format!(
         "SELECT x.level, x.service, COUNT(*) AS n FROM \
          (SELECT l.level, l.service FROM logs l WHERE {} ORDER BY l.time_ms DESC LIMIT {FACET_ROWS}) x \
@@ -385,7 +321,11 @@ pub async fn facets(
         .into_iter()
         .map(|(service, count)| ServiceCount { service, count })
         .collect();
-    services.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.service.cmp(&b.service)));
+    services.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.service.cmp(&b.service))
+    });
     services.truncate(TOP_SERVICES);
     Ok(Json(Facets {
         levels,
@@ -421,46 +361,4 @@ pub async fn detail(
         attributes: json("attributes_json")?,
         resource: json("resource_json")?,
     }))
-}
-
-/// Logs older than `before_ms`, and every log of a deleted source and then
-/// the source itself, in batches of 500 so no statement holds the database long.
-/// Returns the number of logs deleted.
-pub async fn prune(db: &Database, before_ms: i64) -> Result<u64, sqlx::Error> {
-    let sources = sqlx::query("SELECT id, deleted_at FROM telemetry_sources")
-        .fetch_all(db.pool())
-        .await?;
-    let mut total = 0;
-    for row in &sources {
-        let id: String = row.try_get("id")?;
-        let deleted: Option<i64> = row.try_get("deleted_at")?;
-        // i64::MAX takes every log of a deleted source.
-        let before = if deleted.is_some() {
-            i64::MAX
-        } else {
-            before_ms
-        };
-        loop {
-            let count = sqlx::query(
-                "DELETE FROM logs WHERE id IN \
-                 (SELECT id FROM logs WHERE source_id = $1 AND time_ms < $2 LIMIT 500)",
-            )
-            .bind(&id)
-            .bind(before)
-            .execute(db.pool())
-            .await?
-            .rows_affected();
-            total += count;
-            if count < BATCH {
-                break;
-            }
-        }
-        if deleted.is_some() {
-            sqlx::query("DELETE FROM telemetry_sources WHERE id = $1")
-                .bind(&id)
-                .execute(db.pool())
-                .await?;
-        }
-    }
-    Ok(total)
 }

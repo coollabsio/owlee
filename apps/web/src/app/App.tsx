@@ -20,6 +20,7 @@ import { HomePage } from "@/pages/home";
 import { LinkDetailPage, LinksPage } from "@/pages/links";
 import { LogSourcesPage, LogsPage } from "@/pages/logs";
 import { LogSourceDetailPage } from "@/pages/telemetry-sources";
+import { ServicePage, ServicesPage, TracePage, TraceSourcesPage, TracesPage } from "@/pages/traces";
 import { ErrorAppDetailPage, ErrorAppsPage } from "@/pages/error-apps";
 import { IncidentDetailPage, IncidentsPage } from "@/pages/incidents";
 import { IssueDetailPage } from "@/pages/issue-detail";
@@ -124,6 +125,11 @@ export function App() {
           <Route path="logs" element={<LogsPage />} />
           <Route path="logs/sources" element={<LogSourcesPage />} />
           <Route path="logs/sources/:id" element={<LogSourceDetailPage />} />
+          <Route path="traces" element={<TracesPage />} />
+          <Route path="traces/services" element={<ServicesPage />} />
+          <Route path="traces/services/:service" element={<ServicePage />} />
+          <Route path="traces/sources" element={<TraceSourcesPage />} />
+          <Route path="traces/:traceId" element={<TracePage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="profile/security" element={<SecurityPage />} />
           <Route path="profile/sessions" element={<SessionsPage />} />

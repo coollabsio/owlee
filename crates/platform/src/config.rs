@@ -49,6 +49,9 @@ const OTLP_RATE_IP: &str = "OWLEE_OTLP_RATE_IP_PER_MIN";
 const OTLP_BURST_IP: &str = "OWLEE_OTLP_RATE_IP_BURST";
 const LOG_DAILY_QUOTA: &str = "OWLEE_LOG_DAILY_QUOTA";
 const LOG_RETENTION: &str = "OWLEE_LOG_RETENTION_DAYS";
+const SPAN_DAILY_QUOTA: &str = "OWLEE_SPAN_DAILY_QUOTA";
+const TRACE_RETENTION: &str = "OWLEE_TRACE_RETENTION_DAYS";
+const ROLLUP_RETENTION: &str = "OWLEE_ROLLUP_RETENTION_DAYS";
 const ERROR_KEEP_FIRST: &str = "OWLEE_ERROR_KEEP_FIRST";
 const ERROR_SAMPLE_WINDOW: &str = "OWLEE_ERROR_SAMPLE_WINDOW_SECS";
 const ALLOW_LOCALHOST: &str = "OWLEE_INGEST_ALLOW_LOCALHOST";
@@ -96,6 +99,11 @@ pub struct IngestConfig {
     /// Log records per source per UTC day. A source's own `daily_quota` replaces it.
     pub log_daily_quota: i64,
     pub log_retention_days: i64,
+    /// Spans per source per UTC day.
+    pub span_daily_quota: i64,
+    pub trace_retention_days: i64,
+    /// Span rollups, which the service pages read after the spans are gone.
+    pub rollup_retention_days: i64,
     pub error_keep_first: i64,
     pub error_sample_window_secs: i64,
     /// Accept `localhost` / `127.0.0.1` analytics origins in addition to the site domain.
@@ -165,6 +173,9 @@ impl Default for IngestConfig {
             otlp_rate_ip_burst: 120,
             log_daily_quota: 1_000_000,
             log_retention_days: 7,
+            span_daily_quota: 1_000_000,
+            trace_retention_days: 7,
+            rollup_retention_days: 90,
             error_keep_first: 5,
             error_sample_window_secs: 3600,
             allow_localhost: true,
@@ -673,6 +684,15 @@ fn apply_ingest_env(config: &mut Config) -> Result<(), ConfigError> {
     }
     if let Some(value) = optional(LOG_RETENTION) {
         ingest.log_retention_days = parse_i64(LOG_RETENTION, &value)?;
+    }
+    if let Some(value) = optional(SPAN_DAILY_QUOTA) {
+        ingest.span_daily_quota = parse_i64(SPAN_DAILY_QUOTA, &value)?;
+    }
+    if let Some(value) = optional(TRACE_RETENTION) {
+        ingest.trace_retention_days = parse_i64(TRACE_RETENTION, &value)?;
+    }
+    if let Some(value) = optional(ROLLUP_RETENTION) {
+        ingest.rollup_retention_days = parse_i64(ROLLUP_RETENTION, &value)?;
     }
     if let Some(value) = optional(ERROR_KEEP_FIRST) {
         ingest.error_keep_first = parse_i64(ERROR_KEEP_FIRST, &value)?.max(1);

@@ -12,6 +12,7 @@ import { api, flattenPages, withCursor, type EventNeighbors, type EventPage, typ
 import { useCanEdit } from "@/lib/me";
 import { TRACE_ID, traceLogsPath } from "@/lib/logs";
 import { watchReplayPath } from "@/lib/replay";
+import { tracePath } from "@/lib/traces";
 import { cn, fullTime, oneOf, splitTitle, timeAgo } from "@/lib/utils";
 
 /** Router state the issue list passes, so the breadcrumb returns to the list the user came from. */
@@ -330,6 +331,11 @@ export function IssueDetailPage() {
                         {traceId ? (
                           <Link className="button" to={traceLogsPath(traceId, event.timestamp)}>
                             Logs for this trace
+                          </Link>
+                        ) : null}
+                        {traceId && event.traceSpans ? (
+                          <Link className="button" to={tracePath(traceId)}>
+                            View trace
                           </Link>
                         ) : null}
                       </div>

@@ -41,13 +41,20 @@ pub async fn prune_expired(state: &AppState) -> Result<PruneStats, sqlx::Error> 
             .replay_retention_days
             .saturating_mul(86_400_000);
     crate::errors::prune_replays(&state.db, replay_before).await?;
-    let log_before = now.timestamp_millis()
-        - state
-            .config
-            .ingest
-            .log_retention_days
-            .saturating_mul(86_400_000);
-    crate::telemetry::prune_logs(&state.db, log_before).await?;
+    let ingest = &state.config.ingest;
+    let now_ms = now.timestamp_millis();
+    crate::telemetry::prune(
+        &state.db,
+        &crate::telemetry::Cutoffs {
+            logs_before_ms: now_ms - ingest.log_retention_days.saturating_mul(86_400_000),
+            spans_before_us: (now_ms - ingest.trace_retention_days.saturating_mul(86_400_000))
+                .saturating_mul(1000),
+            rollups_before_minute: (now_ms
+                - ingest.rollup_retention_days.saturating_mul(86_400_000))
+            .div_euclid(60_000),
+        },
+    )
+    .await?;
     // Loading this month's salt deletes last month's, even with no analytics traffic.
     state
         .insights_salt

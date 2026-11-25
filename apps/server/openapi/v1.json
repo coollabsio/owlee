@@ -1112,6 +1112,10 @@
               },
               { "type": "null" }
             ]
+          },
+          "traceSpans": {
+            "type": "boolean",
+            "description": "On `get_event` only: true when a telemetry source of the workspace has spans of the event's `contexts.trace.trace_id`."
           }
         }
       }

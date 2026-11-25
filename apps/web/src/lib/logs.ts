@@ -45,54 +45,75 @@ export type TelemetrySource = {
 export type CreatedTelemetrySource = TelemetrySource & { token: string };
 
 const MINUTE = 60_000;
-export const MAX_RANGE_MS = 7 * 24 * 60 * MINUTE;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
-export const RANGE_PRESETS = [
-  { id: "15m", label: "Last 15 minutes", ms: 15 * MINUTE },
-  { id: "1h", label: "Last hour", ms: 60 * MINUTE },
-  { id: "24h", label: "Last 24 hours", ms: 24 * 60 * MINUTE },
-  { id: "7d", label: "Last 7 days", ms: MAX_RANGE_MS },
-] as const;
-export type RangePreset = (typeof RANGE_PRESETS)[number]["id"];
+/** The presets a range picker offers, the one an empty URL means, and the longest range the server accepts. */
+export type RangeOptions = { presets: readonly { id: string; label: string; ms: number }[]; fallback: string; maxMs: number };
+
+/** Logs and traces: the last 15 minutes by default, at most 7 days. */
+export const LOG_RANGES: RangeOptions = {
+  presets: [
+    { id: "15m", label: "Last 15 minutes", ms: 15 * MINUTE },
+    { id: "1h", label: "Last hour", ms: HOUR },
+    { id: "24h", label: "Last 24 hours", ms: DAY },
+    { id: "7d", label: "Last 7 days", ms: 7 * DAY },
+  ],
+  fallback: "15m",
+  maxMs: 7 * DAY,
+};
+
+/** Services read the 90-day rollup: the last 24 hours by default. */
+export const SERVICE_RANGES: RangeOptions = {
+  presets: [
+    { id: "1h", label: "Last hour", ms: HOUR },
+    { id: "24h", label: "Last 24 hours", ms: DAY },
+    { id: "7d", label: "Last 7 days", ms: 7 * DAY },
+    { id: "30d", label: "Last 30 days", ms: 30 * DAY },
+    { id: "90d", label: "Last 90 days", ms: 90 * DAY },
+  ],
+  fallback: "24h",
+  maxMs: 90 * DAY,
+};
 
 /** A preset slides with the clock; a custom range is fixed epoch ms. */
-export type RangeSpec = { kind: "preset"; preset: RangePreset } | { kind: "custom"; from: number; to: number };
+export type RangeSpec = { kind: "preset"; preset: string } | { kind: "custom"; from: number; to: number };
 
 const epochMs = (value: string | null) => (value && /^\d+$/.test(value) ? Number(value) : null);
 
-/** `from` and `to` in the URL win; otherwise `range`, else the last 15 minutes. */
-export function parseRange(params: URLSearchParams): RangeSpec {
+/** `from` and `to` in the URL win; otherwise `range`, else the default preset. */
+export function parseRange(params: URLSearchParams, options = LOG_RANGES): RangeSpec {
   const from = epochMs(params.get("from"));
   const to = epochMs(params.get("to"));
   if (from !== null && to !== null) return { kind: "custom", from, to };
-  const preset = RANGE_PRESETS.find((item) => item.id === params.get("range"));
-  return { kind: "preset", preset: preset?.id ?? "15m" };
+  const preset = options.presets.find((item) => item.id === params.get("range"));
+  return { kind: "preset", preset: preset?.id ?? options.fallback };
 }
 
 /** Writes `range` into `params`, dropping the keys of the other kind. The default preset writes nothing. */
-export function writeRange(params: URLSearchParams, range: RangeSpec) {
+export function writeRange(params: URLSearchParams, range: RangeSpec, options = LOG_RANGES) {
   params.delete("range");
   params.delete("from");
   params.delete("to");
   if (range.kind === "custom") {
     params.set("from", String(range.from));
     params.set("to", String(range.to));
-  } else if (range.preset !== "15m") {
+  } else if (range.preset !== options.fallback) {
     params.set("range", range.preset);
   }
 }
 
-export function resolveRange(range: RangeSpec, now: number): { from: number; to: number } {
+export function resolveRange(range: RangeSpec, now: number, options = LOG_RANGES): { from: number; to: number } {
   if (range.kind === "custom") return { from: range.from, to: range.to };
-  const ms = RANGE_PRESETS.find((item) => item.id === range.preset)!.ms;
-  return { from: now - ms, to: now };
+  const preset = options.presets.find((item) => item.id === range.preset) ?? options.presets.find((item) => item.id === options.fallback)!;
+  return { from: now - preset.ms, to: now };
 }
 
 /** The reason a custom range cannot be searched, or null. The server checks the same rules. */
-export function customRangeError(from: number, to: number): string | null {
+export function customRangeError(from: number, to: number, options = LOG_RANGES): string | null {
   if (!Number.isFinite(from) || !Number.isFinite(to)) return "Pick a start and an end.";
   if (to <= from) return "The end must be after the start.";
-  if (to - from > MAX_RANGE_MS) return "A range can span at most 7 days.";
+  if (to - from > options.maxMs) return `A range can span at most ${Math.round(options.maxMs / DAY)} days.`;
   return null;
 }
 
@@ -148,7 +169,7 @@ export type Tail = { status: "off" } | { status: "live"; until: number } | { sta
 export function traceLogsPath(traceId: string, eventTime: string) {
   const at = Date.parse(eventTime);
   const params = new URLSearchParams({ q: `trace:${traceId}` });
-  if (Number.isFinite(at)) writeRange(params, { kind: "custom", from: at - 60 * MINUTE, to: at + 60 * MINUTE });
+  if (Number.isFinite(at)) writeRange(params, { kind: "custom", from: at - HOUR, to: at + HOUR });
   return `/logs?${params}`;
 }
 

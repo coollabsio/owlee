@@ -161,3 +161,60 @@ export function Stat({ label, value }: { label: string; value: string | number |
     </div>
   );
 }
+
+export type ChartLine = { label: string; color: string; values: number[] };
+
+/* Lines over time on the LatencyChart grid, with the peak, a legend, and the first and last time below. */
+export function SeriesChart({ times, lines, format, label }: { times: number[]; lines: ChartLine[]; format: (value: number) => string; label: string }) {
+  if (times.length === 0) {
+    return <p className="py-10 text-center text-[0.8125rem] text-[var(--ui-fg-faint)]">No data in this range.</p>;
+  }
+  const width = 320;
+  const height = 120;
+  const pad = 6;
+  const max = Math.max(...lines.flatMap((line) => line.values), 0) || 1;
+  const x = (index: number) => (times.length === 1 ? width / 2 : pad + (index / (times.length - 1)) * (width - pad * 2));
+  const y = (value: number) => height - pad - (value / max) * (height - pad * 2);
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2 font-mono text-[0.625rem] text-[var(--ui-fg-faint)]">
+        <span>{format(max)}</span>
+        {lines.length > 1 ? (
+          <span className="flex gap-2">
+            {lines.map((line) => (
+              <span key={line.label} className="flex items-center gap-1">
+                <i className="inline-block size-2 rounded-full" style={{ background: line.color }} />
+                {line.label}
+              </span>
+            ))}
+          </span>
+        ) : null}
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-28 w-full" role="img" aria-label={label}>
+        {[0.25, 0.5, 0.75].map((ratio) => (
+          <line key={ratio} x1={pad} x2={width - pad} y1={pad + ratio * (height - pad * 2)} y2={pad + ratio * (height - pad * 2)} stroke="var(--ui-divider)" strokeDasharray="3 4" vectorEffect="non-scaling-stroke" />
+        ))}
+        <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="var(--ui-divider)" vectorEffect="non-scaling-stroke" />
+        {lines.map((line) => (
+          <polyline
+            key={line.label}
+            fill="none"
+            stroke={line.color}
+            strokeWidth="1.5"
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+            points={line.values.map((value, index) => `${x(index)},${y(value)}`).join(" ")}
+          />
+        ))}
+      </svg>
+      <div className="mt-1 flex justify-between font-mono text-[0.625rem] text-[var(--ui-fg-faint)]">
+        <span>{axisTime(times[0])}</span>
+        <span>{axisTime(times[times.length - 1])}</span>
+      </div>
+    </div>
+  );
+}
+
+function axisTime(ms: number) {
+  return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}

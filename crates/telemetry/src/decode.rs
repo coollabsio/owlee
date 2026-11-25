@@ -60,15 +60,11 @@ pub fn decode_logs(
     decode(body, encoding)
 }
 
-/// Spans in an `ExportTraceServiceRequest`. Owlee does not store spans yet.
-pub fn count_spans(body: &[u8], encoding: Encoding) -> Result<u64, DecodeError> {
-    let request: ExportTraceServiceRequest = decode(body, encoding)?;
-    Ok(request
-        .resource_spans
-        .iter()
-        .flat_map(|resource| &resource.scope_spans)
-        .map(|scope| scope.spans.len() as u64)
-        .sum())
+pub fn decode_traces(
+    body: &[u8],
+    encoding: Encoding,
+) -> Result<ExportTraceServiceRequest, DecodeError> {
+    decode(body, encoding)
 }
 
 /// Data points in an `ExportMetricsServiceRequest`. Owlee does not store metrics yet.
@@ -227,21 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn counts_spans_and_points_in_json() {
+    fn counts_points_and_decodes_spans_in_json() {
         let traces = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[
             {"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174","name":"a"},
             {"traceId":"not hex","spanId":"","name":"b"}]}]}]}"#;
-        assert_eq!(count_spans(traces, Encoding::Json).unwrap(), 2);
+        let decoded = decode_traces(traces, Encoding::Json).unwrap();
+        assert_eq!(decoded.resource_spans[0].scope_spans[0].spans.len(), 2);
+        assert!(
+            decoded.resource_spans[0].scope_spans[0].spans[1]
+                .trace_id
+                .is_empty()
+        );
         let metrics = br#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
             {"name":"a","gauge":{"dataPoints":[{"asDouble":1.5},{"asInt":"2"}]}},
             {"name":"b","sum":{"dataPoints":[{"asInt":3}],"isMonotonic":true,"aggregationTemporality":2}}]}]}]}"#;
         assert_eq!(count_points(metrics, Encoding::Json).unwrap(), 3);
         assert!(matches!(
-            count_spans(b"{", Encoding::Json),
+            decode_traces(b"{", Encoding::Json),
             Err(DecodeError::Json(_))
         ));
         assert!(matches!(
-            count_spans(&[0xff, 0xff, 0xff], Encoding::Protobuf),
+            decode_traces(&[0xff, 0xff, 0xff], Encoding::Protobuf),
             Err(DecodeError::Protobuf(_))
         ));
     }
