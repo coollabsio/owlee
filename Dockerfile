@@ -21,7 +21,7 @@ COPY apps/server/ apps/server/
 COPY --from=web /src/apps/web/dist/ apps/web/dist/
 RUN cargo build --locked --release -p owlee-server
 
-FROM debian:bookworm-20261104-slim
+FROM debian:bookworm-20261123-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates sqlite3 postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
